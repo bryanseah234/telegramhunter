@@ -60,9 +60,5 @@ To start using Matkap, follow these steps:
 >>python matkap.py  
 
 
-## Disclaimer
-##
-
-
 
 
