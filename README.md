@@ -17,6 +17,10 @@ Ensure you comply with Telegram's API Terms of Service and all applicable laws i
 
 
 
+https://github.com/user-attachments/assets/44599ccd-4b99-461b-9967-913908882771
+
+
+
 ![image](https://github.com/user-attachments/assets/9c0bb952-8fe9-4d9d-8c67-96728649f43b)
 
 
@@ -60,7 +64,7 @@ To start using Matkap, follow these steps:
 
 
 
-https://github.com/user-attachments/assets/76df2451-f262-473d-9ef6-fcf6352dda5a
+
 
 
 
