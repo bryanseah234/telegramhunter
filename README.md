@@ -46,10 +46,18 @@ To start using Matkap, follow these steps:
 
 
 
+
+
+
+
 ```bash
 >>git clone https://github.com/0x6rss/matkap.git  
 >>cd matkap  
->>python matkap.py  
+>>python matkap.py
+
+https://github.com/user-attachments/assets/0297d339-4338-44b2-adf0-cacc4ab0c2c4
+
+
 
 
 
