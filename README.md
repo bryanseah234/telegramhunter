@@ -20,14 +20,6 @@ Ensure you comply with Telegram's API Terms of Service and all applicable laws i
 ![image](https://github.com/user-attachments/assets/9c0bb952-8fe9-4d9d-8c67-96728649f43b)
 
 
-## 📌 Features  
-- ✅ **Bot Token Validation** (`getMe`)  
-- ✅ **Automated Interaction** (Send `/start` via **Telethon**)  
-- ✅ **Message Extraction** (`getUpdates` to retrieve `chat_id` & `message_id`)  
-- ✅ **Old Message Forwarding** (Try lower `message_id` values until a past message is found)  
-- ✅ **Full Message Forwarding** (`1` to `last_message_id`)  
-- ✅ **Stop & Resume** (Pause forwarding & continue later)  
-- ✅ **Graphical Interface** (Tkinter-based GUI with logs & optional logo)  
 
 ## 🛠 Installation  
 
