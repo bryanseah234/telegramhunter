@@ -17,7 +17,8 @@ Ensure you comply with Telegram's API Terms of Service and all applicable laws i
 
 
 
-![image](https://github.com/user-attachments/assets/f752b834-4a0a-48aa-9b3f-49a0307cfaa1)  
+![image](https://github.com/user-attachments/assets/9c0bb952-8fe9-4d9d-8c67-96728649f43b)
+
 
 ## 📌 Features  
 - ✅ **Bot Token Validation** (`getMe`)  
