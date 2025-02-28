@@ -8,36 +8,66 @@ from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 from telethon import TelegramClient
 
+
+from dotenv import load_dotenv
+
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
 
-api_id = 123456 #ex
-api_hash = ""
-phone_number = "(ex: +9055555555)"
+
+load_dotenv()
+
+env_api_id = os.getenv("TELEGRAM_API_ID", "0")
+env_api_hash = os.getenv("TELEGRAM_API_HASH", "")
+env_phone_number = os.getenv("TELEGRAM_PHONE", "")
+
+api_id = int(env_api_id) if env_api_id.isdigit() else 0
+api_hash = env_api_hash
+phone_number = env_phone_number
+
 client = TelegramClient("anon_session", api_id, api_hash)
 
 TELEGRAM_API_URL = "https://api.telegram.org/bot"
 
 class TelegramGUI:
     def __init__(self, root):
+
         self.root = root
-        self.root.title("Matkap")
+        self.root.title("Matkap by 0x6rss")
         self.root.geometry("850x600")
         self.root.resizable(True, True)
 
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("TLabel", background="#D9D9D9", foreground="black")
-        style.configure("TButton", background="#E1E1E1", foreground="black")
-        style.configure("TLabelframe", background="#C9C9C9", foreground="black")
-        style.configure("TLabelframe.Label", font=("Arial", 11, "bold"))
-        style.configure("TEntry", fieldbackground="#FFFFFF", foreground="black")
 
-        self.header_frame = tk.Frame(self.root, bg="#aaa")
-        self.header_frame.grid(row=0, column=0, columnspan=3, sticky="ew")
+        self.themes = {
+            "Light": {
+                "bg": "#FFFFFF",
+                "fg": "#000000",
+                "header_bg": "#AAAAAA",
+                "main_bg": "#FFFFFF"
+            },
+            "Dark": {
+                "bg": "#2E2E2E",
+                "fg": "#FFFFFF",
+                "header_bg": "#333333",
+                "main_bg": "#2E2E2E"
+            }
+        }
+        self.current_theme = "Light"  
+        self.style = ttk.Style()
+        self.style.theme_use("clam")
+        self.configure_theme(self.current_theme)
+
+        self.style.configure("TLabel", background="#D9D9D9", foreground="black")
+        self.style.configure("TButton", background="#E1E1E1", foreground="black")
+        self.style.configure("TLabelframe", background="#C9C9C9", foreground="black")
+        self.style.configure("TLabelframe.Label", font=("Arial", 11, "bold"))
+        self.style.configure("TEntry", fieldbackground="#FFFFFF", foreground="black")
+
+        self.header_frame = tk.Frame(self.root, bg=self.themes[self.current_theme]["header_bg"])
+        self.header_frame.grid(row=0, column=0, columnspan=5, sticky="ew")
         self.header_frame.grid_columnconfigure(1, weight=1)
 
         self.logo_image = None
@@ -58,29 +88,38 @@ class TelegramGUI:
             self.header_frame,
             text="Matkap - hunt down malicious telegram bots",
             font=("Arial", 16, "bold"),
-            bg="#aaa",
-            fg="black",
+            bg=self.themes[self.current_theme]["header_bg"],
+            fg=self.themes[self.current_theme]["fg"],
             image=self.logo_image,
             compound="left",
             padx=10
         )
         self.header_label.grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
-        self.main_frame = tk.Frame(self.root, bg="#FFFFFF", highlightthickness=2, bd=0, relief="groove")
-        self.main_frame.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=10, pady=10)
+        self.main_frame = tk.Frame(self.root,
+                                   bg=self.themes[self.current_theme]["main_bg"],
+                                   highlightthickness=2, bd=0, relief="groove")
+        self.main_frame.grid(row=1, column=0, columnspan=5, sticky="nsew", padx=10, pady=10)
         self.root.grid_rowconfigure(1, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
 
+
+        ttk.Label(self.main_frame, text="Color Theme:").grid(row=0, column=2, sticky="e", padx=5, pady=5)
+        self.theme_combo = ttk.Combobox(self.main_frame, values=list(self.themes.keys()), state="readonly")
+        self.theme_combo.current(0)  
+        self.theme_combo.grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+        self.theme_combo.bind("<<ComboboxSelected>>", self.switch_theme)
+
         self.token_label = ttk.Label(self.main_frame, text="Malicious Bot Token:")
-        self.token_label.grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.token_label.grid(row=1, column=0, sticky="w", padx=5, pady=5)
         self.token_entry = ttk.Entry(self.main_frame, width=45)
-        self.token_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        self.token_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
         self.add_placeholder(self.token_entry, "Example: bot12345678:AsHy7q9QB755Lx4owv76xjLqZwHDcFf7CSE")
 
         self.chat_label = ttk.Label(self.main_frame, text="Malicious Chat ID (Forward):")
-        self.chat_label.grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.chat_label.grid(row=2, column=0, sticky="w", padx=5, pady=5)
         self.chatid_entry = ttk.Entry(self.main_frame, width=45)
-        self.chatid_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        self.chatid_entry.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
         self.add_placeholder(self.chatid_entry, "Example: 123456789")
 
         self.infiltrate_button = ttk.Button(
@@ -88,21 +127,21 @@ class TelegramGUI:
             text="1) Start Attack",
             command=self.start_infiltration
         )
-        self.infiltrate_button.grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        self.infiltrate_button.grid(row=3, column=0, padx=5, pady=5, sticky="w")
 
         self.forward_button = ttk.Button(
             self.main_frame,
-            text="2) Forward All Messages (1..last_message_id)",
+            text="2) Forward All Messages",
             command=self.forward_all_messages
         )
-        self.forward_button.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+        self.forward_button.grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
         self.stop_button = ttk.Button(
             self.main_frame,
             text="Stop",
             command=self.stop_forwarding
         )
-        self.stop_button.grid(row=2, column=2, padx=5, pady=5, sticky="w")
+        self.stop_button.grid(row=3, column=2, padx=5, pady=5, sticky="w")
 
         self.resume_button = ttk.Button(
             self.main_frame,
@@ -110,15 +149,19 @@ class TelegramGUI:
             command=self.resume_forward,
             state="disabled"
         )
-        self.resume_button.grid(row=2, column=3, padx=5, pady=5, sticky="w")
+        self.resume_button.grid(row=3, column=3, padx=5, pady=5, sticky="w")
 
         self.log_frame = ttk.LabelFrame(self.main_frame, text="Process Log")
-        self.log_frame.grid(row=3, column=0, columnspan=4, sticky="nsew", padx=5, pady=5)
-        self.main_frame.grid_rowconfigure(3, weight=1)
+        self.log_frame.grid(row=4, column=0, columnspan=5, sticky="nsew", padx=5, pady=5)
+        self.main_frame.grid_rowconfigure(4, weight=1)
         self.main_frame.grid_columnconfigure(1, weight=1)
 
         self.log_text = ScrolledText(self.log_frame, width=75, height=15, state="disabled")
         self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
+
+
+        clear_logs_btn = ttk.Button(self.log_frame, text="Clear Logs", command=self.clear_logs)
+        clear_logs_btn.pack(side="bottom", anchor="e", pady=5)
 
         self.bot_token = None
         self.bot_username = None
@@ -128,19 +171,49 @@ class TelegramGUI:
         self.stop_flag = False
         self.stopped_id = 0
         self.current_msg_id = 0
-
-
         self.max_older_attempts = 200
+
+    def configure_theme(self, theme_name):
+        theme_info = self.themes[theme_name]
+        bg = theme_info["bg"]
+        fg = theme_info["fg"]
+        self.style.configure(".", background=bg, foreground=fg)
+        self.style.configure("TLabel", background=bg, foreground=fg)
+        self.style.configure("TButton", background=bg, foreground=fg)
+        self.style.configure("TLabelframe", background=bg, foreground=fg)
+        self.style.configure("TLabelframe.Label", background=bg, foreground=fg)
+        self.style.configure("TEntry", fieldbackground="#FFFFFF", foreground="#000000")
+
+    def switch_theme(self, event):
+        selected_theme = self.theme_combo.get()
+        if selected_theme in self.themes:
+            self.current_theme = selected_theme
+            self.configure_theme(selected_theme)
+
+            self.header_frame.config(bg=self.themes[self.current_theme]["header_bg"])
+            self.header_label.config(bg=self.themes[self.current_theme]["header_bg"],
+                                     fg=self.themes[self.current_theme]["fg"])
+
+            self.main_frame.config(bg=self.themes[self.current_theme]["main_bg"])
+
+            self.log(f"🌀 Switched theme to: {selected_theme}")
+
+    def clear_logs(self):
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
 
     def add_placeholder(self, entry_widget, placeholder_text):
         def on_focus_in(event):
             if entry_widget.get() == placeholder_text:
                 entry_widget.delete(0, "end")
                 entry_widget.configure(foreground="black")
+
         def on_focus_out(event):
             if entry_widget.get().strip() == "":
                 entry_widget.insert(0, placeholder_text)
                 entry_widget.configure(foreground="grey")
+
         entry_widget.insert(0, placeholder_text)
         entry_widget.configure(foreground="grey")
         entry_widget.bind("<FocusIn>", on_focus_in)
@@ -242,13 +315,12 @@ class TelegramGUI:
             return False
 
     def infiltration_process(self, attacker_id):
-
         found_any = False
         start_id = self.last_message_id
-        stop_id = max(1, self.last_message_id - self.max_older_attempts)  
+        stop_id = max(1, self.last_message_id - self.max_older_attempts)
         self.log(f"Trying older IDs from {start_id} down to {stop_id}")
 
-        for test_id in range(start_id, stop_id-1, -1):
+        for test_id in range(start_id, stop_id - 1, -1):
             if self.stop_flag:
                 self.log("⏹️ Infiltration older ID check stopped by user.")
                 return
