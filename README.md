@@ -21,7 +21,8 @@ https://github.com/user-attachments/assets/44599ccd-4b99-461b-9967-913908882771
 
 
 
-![image](https://github.com/user-attachments/assets/9c0bb952-8fe9-4d9d-8c67-96728649f43b)
+![image](https://github.com/user-attachments/assets/df682873-4c02-4631-b278-fa7a100c57dc)
+
 
 
 
@@ -32,20 +33,22 @@ Before running **Matkap**, ensure you have the following:
 
 - **Python 3.7+** installed on your system.  
 - **Required dependencies** (Install them using the command below):  
-  ```bash
-  pip install requests telethon pillow
-🔹 Telegram API Credentials
-Before using Matkap, you must obtain your Telegram API credentials:
 
-Visit my.telegram.org/apps.
-Log in with your phone number.
-Create a new application and note the following values:
-api_id
-api_hash
-phone_number (your Telegram account).
-Insert these values into matkap.py (e.g., api_id = 123456, api_hash = "your_hash").
-🔹 Cloning & Running Matkap
-To start using Matkap, follow these steps:
+### 🔹 Telegram API Credentials (Using a .env File)
+
+Before using **Matkap**, you must obtain your **Telegram API credentials** from [my.telegram.org/apps](https://my.telegram.org/apps):
+
+1. **Visit** [my.telegram.org/apps](https://my.telegram.org/apps).  
+2. **Log in** with your phone number.  
+3. **Create a new application** and note the following values:
+   - **api_id**
+   - **api_hash**
+   - **phone_number** (your Telegram account)
+4. **Create a `.env` file** in your project folder and add these credentials:
+   ```env
+   TELEGRAM_API_ID=123456
+   TELEGRAM_API_HASH=your_hash
+   TELEGRAM_PHONE=+900000000000
 
 
 
@@ -55,9 +58,20 @@ To start using Matkap, follow these steps:
 
 
 ```bash
->>git clone https://github.com/0x6rss/matkap.git  
->>cd matkap  
+# Clone the repository
+>>git clone https://github.com/0x6rss/matkap.git
+
+# Navigate into the project folder
+>>cd matkap
+
+# Create and fill out your .env file with TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE
+
+# Install dependencies
+>>pip install -r requirements.txt
+
+# Run Matkap
 >>python matkap.py
+
 
 
 
