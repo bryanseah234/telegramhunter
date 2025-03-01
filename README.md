@@ -20,7 +20,7 @@ Ensure you comply with Telegram's API Terms of Service and all applicable laws i
  
 - **FOFA & URLScan Integration** – Searches for leaked Bot Tokens / Chat IDs in websites
 - **export logs** - export hunt logs
-- 
+  
   
 
 
@@ -72,20 +72,20 @@ Before running **Matkap**, ensure you have the following:
 
 ```bash
 # Clone the repository
-git clone https://github.com/0x6rss/matkap.git
+>>git clone https://github.com/0x6rss/matkap.git
 
 # Navigate into the project folder
-cd matkap
+>>cd matkap
 
 # Create and fill out your .env file 
 # with TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE 
 # (and FOFA_EMAIL, FOFA_KEY, URLSCAN_API_KEY if you plan to use them)
 
 # Install dependencies
-pip install -r requirements.txt
+>>pip install -r requirements.txt
 
 # Run Matkap
-python matkap.py
+>>python matkap.py
 ```
 
 ## Usage
