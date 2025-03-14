@@ -91,8 +91,7 @@ Before running **Matkap**, ensure you have the following:
 ## Usage
 
 1. **Start Attack**  
-   - Enter the malicious bot token (e.g., `bot12345678:ABC...`) and optionally a Chat ID for forwarding.  
-   - Click **Start Attack** to validate and interact with the malicious bot.
+   - Enter the malicious bot token (e.g., `bot12345678:ABC...`) and chat id.
 
 2. **Forward All Messages**  
    - Forward older messages by iterating through message IDs.  
