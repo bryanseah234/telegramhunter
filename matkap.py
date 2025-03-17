@@ -7,6 +7,7 @@ import threading
 from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError
 from dotenv import load_dotenv
 
 import fofa_api
@@ -158,7 +159,6 @@ class TelegramGUI:
         )
         self.resume_button.grid(row=3, column=3, padx=5, pady=5, sticky="w")
 
-
         self.fofa_button = ttk.Button(
             self.main_frame,
             text="3) Hunt With FOFA",
@@ -166,7 +166,6 @@ class TelegramGUI:
             command=self.run_fofa_hunt
         )
         self.fofa_button.grid(row=3, column=4, padx=5, pady=5, sticky="w")
-
 
         self.urlscan_button = ttk.Button(
             self.main_frame,
@@ -249,22 +248,16 @@ class TelegramGUI:
                 self.log_text.configure(state="disabled")
         self.log("📝 FOFA hunt finished.")
 
-
     def run_urlscan_hunt(self):
-        """Buton tıklandığında URLScan avını başlat."""
         thread = threading.Thread(target=self._urlscan_hunt_process)
         thread.start()
 
     def _urlscan_hunt_process(self):
-        """Arka planda URLScan sorgusunu ve regex aramasını gerçekleştirir."""
-        import urlscan_api  
         self.log("🔎 Starting URLScan hunt for domain:api.telegram.org ...")
-
         results = urlscan_api.search_urlscan_and_hunt()
         if not results:
             self.log("⚠️ No URLScan results or an error occurred!")
             return
-
         for (site_or_err, tokens, chats) in results:
             if site_or_err.startswith("Error"):
                 self.log(f"🚫 {site_or_err}")
@@ -272,7 +265,6 @@ class TelegramGUI:
             if site_or_err.startswith("No results"):
                 self.log("⚠️ No URLScan results found.")
                 continue
-
             self.log(f"✨ Found: {site_or_err}")
             if tokens:
                 self.log_text.configure(state="normal")
@@ -283,7 +275,6 @@ class TelegramGUI:
                         self.log_text.insert("end", ", ")
                 self.log_text.insert("end", "\n")
                 self.log_text.configure(state="disabled")
-
             if chats:
                 self.log_text.configure(state="normal")
                 self.log_text.insert("end", "   Potential Chat IDs: ")
@@ -293,7 +284,6 @@ class TelegramGUI:
                         self.log_text.insert("end", ", ")
                 self.log_text.insert("end", "\n")
                 self.log_text.configure(state="disabled")
-
         self.log("📝 URLScan hunt finished.")
 
     def configure_theme(self, theme_name):
@@ -379,15 +369,27 @@ class TelegramGUI:
             return None
 
     async def telethon_send_start(self, bot_username):
-        await client.start(phone_number)
-        self.log("✅ [Telethon] Logged in with your account.")
         try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                self.log("ℹ️ [Telethon] First login detected, sending code request...")
+                await client.send_code_request(phone_number)
+                code = tk.simpledialog.askstring("Telegram Code", "Enter the code you received:")
+                if code:
+                    try:
+                        await client.sign_in(phone_number, code)
+                    except SessionPasswordNeededError:
+                        password = tk.simpledialog.askstring("2FA Password", "Enter your 2FA password:", show="*")
+                        await client.sign_in(password=password)
+                else:
+                    raise Exception("No code provided!")
+            self.log("✅ [Telethon] Logged in with your account.")
             if not bot_username.startswith("@"):
                 bot_username = "@" + bot_username
             await client.send_message(bot_username, "/start")
             self.log(f"✅ [Telethon] '/start' sent to {bot_username}.")
         except Exception as e:
-            self.log(f"❌ [Telethon] Send error: {e}")
+            self.log(f"❌ [Telethon] Error: {e}")
         finally:
             await client.disconnect()
 
@@ -431,6 +433,9 @@ class TelegramGUI:
             return False
 
     def infiltration_process(self, attacker_id):
+        if not self.last_message_id:
+            self.log("❌ last_message_id is None, cannot proceed with infiltration.")
+            return
         found_any = False
         start_id = self.last_message_id
         stop_id = max(1, self.last_message_id - self.max_older_attempts)
@@ -469,8 +474,19 @@ class TelegramGUI:
         messagebox.showinfo("getMe", f"Bot validated: @{bot_user}")
         self.bot_token = parsed_token
         self.bot_username = bot_user
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(self.telethon_send_start(bot_user))
+
+
+        def run_async():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.telethon_send_start(bot_user))
+            loop.close()
+
+            self.root.after(0, self.post_telethon_steps, parsed_token, bot_user)
+
+        threading.Thread(target=run_async).start()
+
+    def post_telethon_steps(self, parsed_token, bot_user):
         my_id, last_id = self.get_updates(parsed_token)
         if not my_id or not last_id:
             messagebox.showerror("Error", "getUpdates gave no valid results.")
@@ -509,6 +525,9 @@ class TelegramGUI:
 
     def forward_continuation(self, attacker_chat_id, start_id):
         def do_forward():
+            if not self.last_message_id:
+                self.root.after(0, lambda: self.log("❌ last_message_id is None, cannot forward messages."))
+                return
             max_id = self.last_message_id
             success_count = 0
             for msg_id in range(start_id, max_id + 1):
