@@ -37,7 +37,7 @@ class TelegramGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Matkap by 0x6rss")
-        self.root.geometry("850x600")
+        self.root.geometry("1300x700")
         self.root.resizable(True, True)
 
         self.themes = {
