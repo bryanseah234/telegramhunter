@@ -203,9 +203,9 @@ class TelegramGUI:
     def export_logs(self):
         logs = self.log_text.get("1.0", "end")
         try:
-            with open("fofa_logs.txt", "w", encoding="utf-8") as f:
+            with open("logs.txt", "w", encoding="utf-8") as f:
                 f.write(logs)
-            messagebox.showinfo("Export Logs", "Logs have been exported to 'fofa_logs.txt'.")
+            messagebox.showinfo("Export Logs", "Logs have been exported to 'logs.txt'.")
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export logs!\n{e}")
 
