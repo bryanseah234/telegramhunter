@@ -89,6 +89,9 @@ Before running **Matkap**, ensure you have the following:
 ```
 
 ## Usage
+When you run the code for the first time, Telegram will send you a login code. You need to enter this code into the terminal where you ran the script.
+![image](https://github.com/user-attachments/assets/a4791bb2-2389-4fa9-bcab-b1fea962de4f)
+
 
 1. **Start Attack**  
    - Enter the malicious bot token (e.g., `bot12345678:ABC...`) and chat id.
