@@ -7,7 +7,6 @@ import threading
 from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
 from dotenv import load_dotenv
 
 import fofa_api
@@ -29,7 +28,7 @@ api_id = int(env_api_id) if env_api_id.isdigit() else 0
 api_hash = env_api_hash
 phone_number = env_phone_number
 
-client = TelegramClient("anon_session", api_id, api_hash)
+client = TelegramClient("anon_session", api_id, api_hash, app_version="9.4.0")
 
 TELEGRAM_API_URL = "https://api.telegram.org/bot"
 
@@ -37,7 +36,7 @@ class TelegramGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Matkap by 0x6rss")
-        self.root.geometry("1300x700")
+        self.root.geometry("1300x700")  
         self.root.resizable(True, True)
 
         self.themes = {
@@ -355,6 +354,9 @@ class TelegramGUI:
         return raw_token
 
     def get_me(self, bot_token):
+        webhook_info = requests.get(f"{TELEGRAM_API_URL}{bot_token}/getWebhookInfo").json()
+        if webhook_info.get("ok") and webhook_info["result"].get("url"):
+            requests.get(f"{TELEGRAM_API_URL}{bot_token}/deleteWebhook")
         url = f"{TELEGRAM_API_URL}{bot_token}/getMe"
         try:
             r = requests.get(url)
@@ -370,28 +372,15 @@ class TelegramGUI:
 
     async def telethon_send_start(self, bot_username):
         try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                self.log("ℹ️ [Telethon] First login detected, sending code request...")
-                await client.send_code_request(phone_number)
-                code = tk.simpledialog.askstring("Telegram Code", "Enter the code you received:")
-                if code:
-                    try:
-                        await client.sign_in(phone_number, code)
-                    except SessionPasswordNeededError:
-                        password = tk.simpledialog.askstring("2FA Password", "Enter your 2FA password:", show="*")
-                        await client.sign_in(password=password)
-                else:
-                    raise Exception("No code provided!")
+            await client.start(phone_number)
             self.log("✅ [Telethon] Logged in with your account.")
             if not bot_username.startswith("@"):
                 bot_username = "@" + bot_username
             await client.send_message(bot_username, "/start")
             self.log(f"✅ [Telethon] '/start' sent to {bot_username}.")
+            await asyncio.sleep(2)
         except Exception as e:
-            self.log(f"❌ [Telethon] Error: {e}")
-        finally:
-            await client.disconnect()
+            self.log(f"❌ [Telethon] Send error: {e}")
 
     def get_updates(self, bot_token):
         url = f"{TELEGRAM_API_URL}{bot_token}/getUpdates"
@@ -433,10 +422,9 @@ class TelegramGUI:
             return False
 
     def infiltration_process(self, attacker_id):
-        if not self.last_message_id:
-            self.log("❌ last_message_id is None, cannot proceed with infiltration.")
-            return
         found_any = False
+        if self.last_message_id is None:
+            self.last_message_id = 0
         start_id = self.last_message_id
         stop_id = max(1, self.last_message_id - self.max_older_attempts)
         self.log(f"Trying older IDs from {start_id} down to {stop_id}")
@@ -474,19 +462,8 @@ class TelegramGUI:
         messagebox.showinfo("getMe", f"Bot validated: @{bot_user}")
         self.bot_token = parsed_token
         self.bot_username = bot_user
-
-
-        def run_async():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.telethon_send_start(bot_user))
-            loop.close()
-
-            self.root.after(0, self.post_telethon_steps, parsed_token, bot_user)
-
-        threading.Thread(target=run_async).start()
-
-    def post_telethon_steps(self, parsed_token, bot_user):
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(self.telethon_send_start(bot_user))
         my_id, last_id = self.get_updates(parsed_token)
         if not my_id or not last_id:
             messagebox.showerror("Error", "getUpdates gave no valid results.")
@@ -525,9 +502,8 @@ class TelegramGUI:
 
     def forward_continuation(self, attacker_chat_id, start_id):
         def do_forward():
-            if not self.last_message_id:
-                self.root.after(0, lambda: self.log("❌ last_message_id is None, cannot forward messages."))
-                return
+            if self.last_message_id is None:
+                self.last_message_id = 0
             max_id = self.last_message_id
             success_count = 0
             for msg_id in range(start_id, max_id + 1):
