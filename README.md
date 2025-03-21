@@ -108,8 +108,8 @@ When you run the code for the first time, Telegram will send you a login code. Y
    - Similarly hunts for exposed tokens / chat IDs referencing `domain:api.telegram.org` using **URLScan**.  
    - Also logs them in the **Process Log**.
 
-5. **Export Logs**  
-   - Click **Export Logs** to save the **Process Log** to a `fofa_logs.txt` file.
+5. **Export captured messages**  
+   - captured Telegram messages are instantly saved to the "captured_messages" directory
 
 
 
