@@ -1,9 +1,7 @@
 # Matkap  
 Matkap - hunt down malicious Telegram bots  
 
-### Warning: Keep in mind that your Telegram account might get banned while using this tool. For completely safe usage, you can use the website instead: https://matkap.cti.monster
-Matkap is a powerful tool designed to infiltrate and monitor Telegram bots by utilizing the Telegram Bot API and Telethon. It automates the process of capturing messages from malicious bots and forwarding them to your own account.
-<br>
+
 ## Disclaimer (Legal & Ethical Use)
 Matkap is intended for educational and research purposes only. This tool is designed to help cybersecurity professionals analyze and understand Telegram bot interactions, particularly those that may pose security risks.
 
