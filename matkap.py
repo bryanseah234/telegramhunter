@@ -200,6 +200,21 @@ class TelegramGUI:
         self.current_msg_id = 0
         self.max_older_attempts = 200
         self.session = requests.Session()
+        # Skipping + failure tracking
+        self.skip_seen_messages = True
+        self.failed_400_ids = []  # list of IDs that returned HTTP 400
+        self.missing_ids = set()  # set of IDs already recorded as missing (400)
+
+        # UI: checkbox to toggle skipping
+        self.skip_var = tk.BooleanVar(value=True)
+        self.skip_checkbox = ttk.Checkbutton(
+            self.main_frame,
+            text="Skip Seen Messages",
+            variable=self.skip_var,
+            command=self.on_toggle_skip
+        )
+        # Place near theme selector row=0 if space; column 4 seems free
+        self.skip_checkbox.grid(row=0, column=4, padx=5, pady=5, sticky="w")
 
 
     def export_logs(self):
@@ -333,6 +348,88 @@ class TelegramGUI:
         self.log_text.insert("end", message + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+    # ===================== Skip / Seen Messages Helpers =====================
+    def on_toggle_skip(self):
+        self.skip_seen_messages = self.skip_var.get()
+        self.log(f"🔁 Skip seen messages set to {self.skip_seen_messages}")
+
+    def ensure_data_file(self, chat_id):
+        """Ensure the data file exists and has a header."""
+        if not self.bot_token:
+            return None
+        safe_token = self.bot_token.split(":")[0] if self.bot_token else "unknown"
+        filename = os.path.join("captured_messages", f"bot_{safe_token}_chat_{chat_id}_data.txt")
+        if not os.path.exists(filename):
+            try:
+                os.makedirs("captured_messages", exist_ok=True)
+                with open(filename, "w", encoding="utf-8") as f:
+                    f.write("=== Bot Information ===\n")
+                    f.write(f"Bot Token: {self.bot_token}\n")
+                    f.write(f"Bot Username: @{self.bot_username}\n")
+                    f.write(f"Chat ID: {chat_id}\n")
+                    f.write(f"Last Message ID: {self.last_message_id}\n")
+                    f.write("\n=== Captured Messages ===\n\n")
+            except Exception as e:
+                self.log(f"❌ Error creating data file: {e}")
+                return None
+        return filename
+
+    def get_seen_message_ids(self, chat_id):
+        """Extract unique message IDs (both successful and missing) from data file."""
+        if not self.bot_token:
+            return set()
+        safe_token = self.bot_token.split(":")[0]
+        filename = os.path.join("captured_messages", f"bot_{safe_token}_chat_{chat_id}_data.txt")
+        if not os.path.exists(filename):
+            return set()
+        seen = set()
+        try:
+            with open(filename, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if "Message ID:" in line:
+                        # Collect numeric tokens in the line
+                        parts = line.replace("-", " ").replace("(", " ").split()
+                        for p in parts:
+                            if p.isdigit():
+                                try:
+                                    seen.add(int(p))
+                                except ValueError:
+                                    pass
+        except Exception as e:
+            self.log(f"❌ Error reading seen IDs: {e}")
+        return seen
+
+    def compute_unseen_ranges(self, start_id, max_id, seen_ids):
+        if start_id > max_id:
+            return []
+        if not seen_ids:
+            return [(start_id, max_id)]
+        filtered = sorted(i for i in seen_ids if start_id <= i <= max_id)
+        ranges = []
+        cursor = start_id
+        for sid in filtered:
+            if sid < cursor:
+                continue
+            if sid > cursor:
+                ranges.append((cursor, sid - 1))
+            cursor = sid + 1
+        if cursor <= max_id:
+            ranges.append((cursor, max_id))
+        return ranges
+
+    def record_missing_message_id(self, chat_id, message_id):
+        if message_id in self.missing_ids:
+            return
+        filename = self.ensure_data_file(chat_id)
+        if not filename:
+            return
+        try:
+            with open(filename, "a", encoding="utf-8") as f:
+                f.write(f"\n--- Missing Message ID: {message_id} (HTTP 400 Not Found) ---\n")
+            self.missing_ids.add(message_id)
+        except Exception as e:
+            self.log(f"❌ Failed to record missing ID {message_id}: {e}")
 
     def save_message_to_file(self, chat_id, message_content):
         if message_content:
@@ -517,17 +614,25 @@ class TelegramGUI:
         }
         try:
             r = self.session.post(url, json=payload)
-            data = r.json()
-            if data.get("ok"):
+            try:
+                data = r.json()
+            except Exception:
+                data = {"raw": r.text}
+            if r.status_code == 200 and data.get("ok"):
                 self.log(f"✅ Forwarded message ID {message_id}.")
                 threading.Thread(
-                    target=self.async_save_message_content, 
-                    args=(bot_token, from_chat_id, message_id), 
+                    target=self.async_save_message_content,
+                    args=(bot_token, from_chat_id, message_id),
                     daemon=True
                 ).start()
                 return True
             else:
-                self.log(f"⚠️ Forward fail ID {message_id}, reason: {data}")
+                if r.status_code == 400:
+                    self.failed_400_ids.append(message_id)
+                    self.record_missing_message_id(from_chat_id, message_id)
+                    self.log(f"🚫 HTTP 400 (missing) message ID {message_id}. Data: {data}")
+                else:
+                    self.log(f"⚠️ Forward fail (status {r.status_code}) ID {message_id}, reason: {data}")
                 return False
         except Exception as e:
             self.log(f"❌ Forward error ID {message_id}: {e}")
@@ -619,16 +724,44 @@ class TelegramGUI:
                 self.last_message_id = 0
             max_id = self.last_message_id
             success_count = 0
-            for msg_id in range(start_id, max_id + 1):
+            seen_ids = set()
+            unseen_ranges = []
+            if self.skip_seen_messages:
+                seen_ids = self.get_seen_message_ids(attacker_chat_id)
+                unseen_ranges = self.compute_unseen_ranges(start_id, max_id, seen_ids)
+                skipped_cnt = len([i for i in range(start_id, max_id + 1) if i in seen_ids])
+                if seen_ids:
+                    # Show up to 8 unseen ranges
+                    display_ranges = ", ".join(
+                        f"{a}-{b}" if a != b else str(a) for a, b in unseen_ranges[:8]
+                    )
+                    if len(unseen_ranges) > 8:
+                        display_ranges += ", ..."
+                    self.root.after(0, lambda: self.log(
+                        f"🔁 Skipping {skipped_cnt} seen IDs. Unseen ranges: {display_ranges}"))
+            if not unseen_ranges:
+                unseen_ranges = [(start_id, max_id)] if start_id <= max_id else []
+
+            for a, b in unseen_ranges:
+                for msg_id in range(a, b + 1):
+                    if self.stop_flag:
+                        self.stopped_id = msg_id
+                        self.root.after(0, lambda m=msg_id: self.log(f"⏹️ Stopped at ID {m} by user."))
+                        break
+                    if msg_id in seen_ids:  # safety
+                        continue
+                    ok = self.forward_msg(self.bot_token, attacker_chat_id, self.my_chat_id, msg_id)
+                    if ok:
+                        success_count += 1
                 if self.stop_flag:
-                    self.stopped_id = msg_id
-                    self.root.after(0, lambda: self.log(f"⏹️ Stopped at ID {msg_id} by user."))
                     break
-                ok = self.forward_msg(self.bot_token, attacker_chat_id, self.my_chat_id, msg_id)
-                if ok:
-                    success_count += 1
             if not self.stop_flag:
                 txt = f"Forwarded from ID {start_id}..{max_id}, total success: {success_count}"
+                if self.failed_400_ids:
+                    preview = ", ".join(str(i) for i in self.failed_400_ids[:25])
+                    if len(self.failed_400_ids) > 25:
+                        preview += ", ..."
+                    txt += f"\nMissing (HTTP 400) IDs: {len(self.failed_400_ids)} [{preview}]"
                 self.root.after(0, lambda: [
                     self.log("[Result] " + txt.replace("\n", " | ")),
                     messagebox.showinfo("Result", txt)
@@ -638,6 +771,8 @@ class TelegramGUI:
                     f"Stopped at ID {self.stopped_id}, total success: {success_count}.\n"
                     "Resume if needed."
                 )
+                if self.failed_400_ids:
+                    partial_txt += f"\nMissing (HTTP 400) IDs so far: {len(self.failed_400_ids)}"
                 self.root.after(0, lambda: [
                     self.log("[Result] " + partial_txt.replace("\n", " | "))
                 ])
