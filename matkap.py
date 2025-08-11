@@ -209,7 +209,7 @@ class TelegramGUI:
         self.skip_var = tk.BooleanVar(value=True)
         self.skip_checkbox = ttk.Checkbutton(
             self.main_frame,
-            text="Skip Seen Msgs",
+            text="Skip Seen Messages",
             variable=self.skip_var,
             command=self.on_toggle_skip
         )
