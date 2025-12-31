@@ -357,16 +357,21 @@ class GithubService:
 
 class CensysService:
     def __init__(self):
-        self.api_id = settings.CENSYS_ID
-        self.api_secret = settings.CENSYS_SECRET
+        # Censys now uses a single API token (Personal Access Token)
+        self.api_token = settings.CENSYS_ID  # Token stored in CENSYS_ID
         self.base_url = "https://search.censys.io/api/v2/hosts/search"
 
     def search(self, query: str) -> List[Dict[str, Any]]:
-        if not self.api_id or not self.api_secret:
+        if not self.api_token:
+            print("    [Censys] No API token found in CENSYS_ID")
             return []
 
         try:
-            auth = (self.api_id, self.api_secret)
+            # Token-based auth via header (new Censys API)
+            headers = {
+                'Authorization': f'Bearer {self.api_token}',
+                'Accept': 'application/json'
+            }
             
             # Censys API requires field-specific queries
             # For finding "api.telegram.org" in HTTP responses/headers:
@@ -379,8 +384,8 @@ class CensysService:
             
             print(f"    [Censys] API Query: {api_query[:80]}...")
             
-            params = {'q': api_query, 'per_page': 50} 
-            res = requests.get(self.base_url, auth=auth, params=params, timeout=15)
+            params = {'q': api_query, 'per_page': 100} 
+            res = requests.get(self.base_url, headers=headers, params=params, timeout=15)
             res.raise_for_status()
             data = res.json()
             hits = data.get('result', {}).get('hits', [])
@@ -490,19 +495,31 @@ class HybridAnalysisService:
                 'User-Agent': 'Falcon Sandbox'
             }
             
-            # Use 'domain' key for searching domain/URL references
-            data = {'domain': query}
+            # Try multiple parameter formats (different key tiers have different access)
+            search_params = [
+                {'domain': query},
+                {'url': f"https://{query}"},
+                {'host': query}
+            ]
             
-            print(f"    [HybridAnalysis] POST to {url} with domain='{query}'...")
-            
-            res = requests.post(url, headers=headers, data=data, timeout=30)
-            
-            if res.status_code == 404:
-                print(f"    ❌ [HybridAnalysis] Endpoint 404. Key permissions or API change?")
-                return []
+            response_json = None
+            for params in search_params:
+                print(f"    [HybridAnalysis] POST to {url} with {list(params.keys())[0]}='{list(params.values())[0]}'...")
                 
-            res.raise_for_status()
-            response_json = res.json()
+                res = requests.post(url, headers=headers, data=params, timeout=30)
+                
+                if res.status_code == 200:
+                    response_json = res.json()
+                    break
+                elif res.status_code == 404:
+                    print(f"    ⚠️ [HybridAnalysis] Param '{list(params.keys())[0]}' returned 404, trying next...")
+                    continue
+                else:
+                    res.raise_for_status()
+            
+            if not response_json:
+                print(f"    ❌ [HybridAnalysis] All parameters returned 404. Check API key permissions.")
+                return []
             
             results = []
             

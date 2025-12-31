@@ -92,26 +92,7 @@ async def run_scanners():
     except Exception as e:
         print(f"  ❌ Censys Error: {e}")
 
-    # 3. Shodan
-    print("\n🌎 [Shodan] Starting Scan...")
-    shodan_queries = [
-        "http.html:\"api.telegram.org\"",
-        "http.html:\"bot_token\"", 
-        "http.title:\"Telegram Bot\"",
-        "http.title:\"Telegram Login\""
-    ]
-    
-    for q in shodan_queries:
-        print(f"  > Querying: {q}")
-        try:
-            results = shodan.search(q)
-            count = await save_manifest(results, "shodan")
-            print(f"    ✅ Saved {count} new credentials (from {len(results)} hits).")
-            time.sleep(1)
-        except Exception as e:
-            print(f"    ❌ Error: {e}")
-
-    # 4. GitHub
+    # 3. GitHub
     print("\n🐱 [GitHub] Starting Scan...")
     dorks = [
         "filename:.env api.telegram.org",
@@ -137,6 +118,25 @@ async def run_scanners():
         
         if i < len(dorks) - 1:
             time.sleep(2) # Respect rate limits slightly
+
+    # 4. Shodan
+    print("\n🌎 [Shodan] Starting Scan...")
+    shodan_queries = [
+        "http.html:\"api.telegram.org\"",
+        "http.html:\"bot_token\"", 
+        "http.title:\"Telegram Bot\"",
+        "http.title:\"Telegram Login\""
+    ]
+    
+    for q in shodan_queries:
+        print(f"  > Querying: {q}")
+        try:
+            results = shodan.search(q)
+            count = await save_manifest(results, "shodan")
+            print(f"    ✅ Saved {count} new credentials (from {len(results)} hits).")
+            time.sleep(1)
+        except Exception as e:
+            print(f"    ❌ Error: {e}")
 
     print("\n-------------------------------------------------")
     print("🏁 Full Scan Complete.")
