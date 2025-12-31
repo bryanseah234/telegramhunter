@@ -53,6 +53,10 @@ app.conf.update(
         "scan-censys-30min": {
             "task": "scanner.scan_censys",
             "schedule": 1800.0, # Every 30 minutes
+        },
+        "system-heartbeat-30min": {
+            "task": "flow.system_heartbeat",
+            "schedule": 1800.0, # Every 30 minutes
         }
     }
 )
