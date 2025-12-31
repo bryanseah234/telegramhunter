@@ -421,24 +421,54 @@ class HybridAnalysisService:
             results = []
             
             # Response 'result' is list of matches
-            # Each match has 'sha256', 'verdict', 'submit_name'
+            # Each match has 'sha256', 'verdict', 'submit_name', and potentially URL info
             hits = response_json.get('result', [])
             
-            print(f"    [HybridAnalysis] Found {len(hits)} hits.")
+            print(f"    [HybridAnalysis] Found {len(hits)} hits. Deep scanning any URLs...")
+
+            # URL regex to extract potential targets from metadata
+            url_pattern = re.compile(r'https?://[^\s"\'<>]+')
 
             for item in hits:
-                # We can't verify tokens without downloading the full sample (expensive/hard).
-                # We flag for review.
-                results.append({
-                    "token": "MANUAL_REVIEW_REQUIRED",
-                    "meta": {
-                        "source": "hybrid_analysis",
-                        "sha256": item.get('sha256'),
-                        "verdict": item.get('verdict'),
-                        "context": item.get('context'),
-                        "report_url": f"https://www.hybrid-analysis.com/sample/{item.get('sha256')}"
-                    }
-                })
+                # Try to find URLs in context, submit_name, or other fields
+                context = str(item.get('context', '')) + " " + str(item.get('submit_name', ''))
+                found_urls = url_pattern.findall(context)
+                
+                # Also check for domain names that might be IPs
+                # If HA gives us "host" or "domains" fields, use those too
+                hosts = item.get('hosts', []) or []
+                domains = item.get('domains', []) or []
+                
+                # Build list of targets to deep scan
+                targets = list(set(found_urls))
+                for h in hosts:
+                    if h: targets.append(f"http://{h}")
+                for d in domains:
+                    if d: targets.append(f"http://{d}")
+                
+                # Deep scan each target (limit to 3 per report)
+                for target_url in targets[:3]:
+                    try:
+                        tokens = _perform_active_deep_scan(target_url)
+                        for t in tokens:
+                            if _is_valid_token(t):
+                                results.append({
+                                    "token": t,
+                                    "meta": {
+                                        "source": "hybrid_analysis",
+                                        "sha256": item.get('sha256'),
+                                        "verdict": item.get('verdict'),
+                                        "scanned_url": target_url,
+                                        "report_url": f"https://www.hybrid-analysis.com/sample/{item.get('sha256')}"
+                                    }
+                                })
+                    except Exception:
+                        pass
+                
+                # If no URLs found, still log the report for manual review (but don't save)
+                if not targets:
+                    print(f"      [HA] No scannable URLs in report {item.get('sha256', 'unknown')[:12]}...")
+
             return results
 
         except Exception as e:
