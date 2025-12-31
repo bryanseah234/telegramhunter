@@ -162,14 +162,14 @@ class ShodanService:
             
             matches = data.get('matches', [])
             
-            # Filter: past 2 hours OR 200 results (whichever is more)
+            # Filter: past 3 hours OR 300 results (whichever is more)
             from datetime import datetime, timedelta
-            two_hours_ago = datetime.utcnow() - timedelta(hours=2)
+            three_hours_ago = datetime.utcnow() - timedelta(hours=3)
             
             # Sort by timestamp (most recent first)
             matches = sorted(matches, key=lambda x: x.get('timestamp', ''), reverse=True)
             
-            # Filter to last 2 hours
+            # Filter to last 3 hours
             recent_matches = []
             for m in matches:
                 try:
@@ -177,18 +177,18 @@ class ShodanService:
                     if ts:
                         # Shodan format: "2024-12-31T21:00:00.000000"
                         match_time = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
-                        if match_time >= two_hours_ago:
+                        if match_time >= three_hours_ago:
                             recent_matches.append(m)
                 except:
                     pass
             
-            # Take whichever is MORE: 2hr results or 200 cap
-            if len(recent_matches) > len(matches[:200]):
+            # Take whichever is MORE: 3hr results or 300 cap
+            if len(recent_matches) > len(matches[:300]):
                 matches = recent_matches
             else:
-                matches = matches[:200]
+                matches = matches[:300]
             
-            print(f"    [Shodan] Processing {len(matches)} hits (2hr filter or max 200)...")
+            print(f"    [Shodan] Processing {len(matches)} hits (3hr filter or max 300)...")
 
             for match in matches:
                 ip = match.get('ip_str')
@@ -259,7 +259,7 @@ class UrlScanService:
             
             params = {
                 'q': api_query,
-                'size': 100
+                'size': 500
             }
             
             print(f"    [URLScan] Searching: {api_query[:50]}...")
@@ -281,26 +281,26 @@ class UrlScanService:
             
             # Sort by scan time (most recent first) and limit
             from datetime import datetime, timedelta
-            two_hours_ago = datetime.utcnow() - timedelta(hours=2)
+            three_hours_ago = datetime.utcnow() - timedelta(hours=3)
             
             results_list = sorted(results_list, key=lambda x: x.get('task', {}).get('time', ''), reverse=True)
             
-            # Filter to recent or max 200
+            # Filter to recent or max 300
             recent_results = []
             for r in results_list:
                 try:
                     ts = r.get('task', {}).get('time', '')
                     if ts:
                         scan_time = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
-                        if scan_time >= two_hours_ago:
+                        if scan_time >= three_hours_ago:
                             recent_results.append(r)
                 except:
                     pass
             
-            if len(recent_results) > len(results_list[:200]):
+            if len(recent_results) > len(results_list[:300]):
                 results_list = recent_results
             else:
-                results_list = results_list[:200]
+                results_list = results_list[:300]
             
             results = []
             

