@@ -19,9 +19,20 @@ async def verify_telegram_bot():
         return
 
     try:
-        bot = Bot(token=token)
-        me = await bot.get_me()
-        print(f"✅ SUCCESS: Connected as @{me.username} (ID: {me.id})")
+        # Use httpx directly to avoid proxy issues with newer versions
+        import httpx
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("ok"):
+                    username = data["result"].get("username", "Unknown")
+                    bot_id = data["result"].get("id", "Unknown")
+                    print(f"✅ SUCCESS: Connected as @{username} (ID: {bot_id})")
+                else:
+                    print(f"❌ FAILED: {data.get('description', 'Unknown error')}")
+            else:
+                print(f"❌ FAILED: HTTP {resp.status_code}")
     except Exception as e:
         print(f"❌ FAILED: {e}")
 
@@ -60,10 +71,21 @@ def verify_supabase():
         return
 
     try:
-        client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
-        # Simple select to check connection
-        res = client.table("discovered_credentials").select("*", count="exact").limit(1).execute()
-        print(f"✅ SUCCESS: Connected. Found {res.count} records.")
+        # Use httpx directly to avoid library proxy issues
+        import httpx
+        headers = {
+            "apikey": settings.SUPABASE_KEY,
+            "Authorization": f"Bearer {settings.SUPABASE_KEY}"
+        }
+        resp = httpx.get(
+            f"{settings.SUPABASE_URL}/rest/v1/discovered_credentials?select=id&limit=1",
+            headers=headers,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            print(f"✅ SUCCESS: Connected. Database accessible.")
+        else:
+            print(f"❌ FAILED: HTTP {resp.status_code} - {resp.text[:100]}")
     except Exception as e:
         print(f"❌ FAILED: {e}")
 
