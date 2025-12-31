@@ -54,6 +54,68 @@ def _is_valid_token(token_str: str) -> bool:
     except Exception:
         return False
 
+def _perform_active_deep_scan(target_url: str) -> List[str]:
+    """
+    Connects to a URL, scans HTML body, finds <script src="..."> tags, 
+    fetches those JS files, and scans them too.
+    Returns a list of unique valid tokens found.
+    """
+    found_tokens = []
+    # Strict Regex: \b (boundary) + digits + : + 35 chars + \b
+    token_pattern = re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{35}\b')
+    
+    try:
+        # 1. Fetch Main HTML
+        print(f"      [DeepScan] Fetching: {target_url}")
+        res = requests.get(target_url, timeout=5, verify=False)
+        if res.status_code != 200: return []
+        
+        html_content = res.text
+        found_tokens.extend(token_pattern.findall(html_content))
+        
+        # 2. Find External JS
+        # Pattern: src=["'](path/to/script.js)["']
+        js_links = re.findall(r'src=["\'](.*?.js)["\']', html_content)
+        
+        # Limit JS files to avoid slow scans or traps
+        unique_js = list(set(js_links))[:5] # Max 5 scripts
+        
+        for js_path in unique_js:
+            # Handle relative URLs
+            if js_path.startswith("//"):
+                js_url = "https:" + js_path
+            elif js_path.startswith("http"):
+                js_url = js_path
+            elif js_path.startswith("/"):
+                # Absolute path from root of domain
+                # Need to parse target_url base
+                from urllib.parse import urljoin
+                js_url = urljoin(target_url, js_path)
+            else:
+                # Relative path
+                from urllib.parse import urljoin
+                js_url = urljoin(target_url, js_path)
+
+            try:
+                # print(f"      [DeepScan] Checking JS: {js_url}")
+                js_res = requests.get(js_url, timeout=3, verify=False)
+                if js_res.status_code == 200:
+                    found_tokens.extend(token_pattern.findall(js_res.text))
+            except Exception:
+                pass
+
+        # Validate tokens
+        valid_tokens = []
+        for t in set(found_tokens):
+            if _is_valid_token(t):
+                valid_tokens.append(t)
+                
+        return valid_tokens
+
+    except Exception as e:
+        # print(f"DeepScan Error: {e}")
+        return []
+
 class ShodanService:
     def __init__(self):
         self.api_key = settings.SHODAN_KEY
@@ -98,10 +160,8 @@ class ShodanService:
                         target_url = f"{proto}://{ip}:{port}"
                         
                         # Short timeout for active check
-                        active_res = requests.get(target_url, timeout=3, verify=False)
-                        if active_res.status_code == 200:
-                            # Parse body
-                            found.extend(token_pattern.findall(active_res.text))
+                        tokens = _perform_active_deep_scan(target_url)
+                        found.extend(tokens)
                     except Exception:
                         pass # Host might be down or firewall
 
@@ -302,10 +362,10 @@ class CensysService:
                         target_url = f"{proto}://{ip}:{port}"
                         
                         # Short timeout, verify=False for self-signed
-                        active_res = requests.get(target_url, timeout=3, verify=False)
-                        if active_res.status_code == 200:
-                             found_tokens.extend(token_pattern.findall(active_res.text))
-                             if found_tokens: break # Found connection, stop trying ports for this IP
+                        tokens = _perform_active_deep_scan(target_url)
+                        if tokens:
+                             found_tokens.extend(tokens)
+                             break # Found connection, stop trying ports for this IP
                     except Exception:
                         pass
                 
@@ -332,49 +392,55 @@ class HybridAnalysisService:
 
     def search(self, query: str) -> List[Dict[str, Any]]:
         """
-        Search Hybrid Analysis for string matches in malware sandbox reports.
-        Free tier limitations: Check quotas (often restricted).
+        Search Hybrid Analysis using 'api.telegram.org'.
+        Endpoint: POST /api/v2/search/terms
         """
         if not self.api_key:
             return []
 
+        # Ensure WWW is present to avoid redirection issues/404s
+        url = "https://www.hybrid-analysis.com/api/v2/search/terms"
+        
         try:
+            # Headers required by v2
             headers = {
                 'api-key': self.api_key,
                 'User-Agent': 'Falcon Sandbox'
             }
-            # Search query logic: 'verdict:malicious AND string:"api.telegram.org"'
-            # Or just query strings if allowed.
-            params = {'term': query}
             
-            res = requests.post(self.base_url, headers=headers, data=params, timeout=20)
+            # Param 'term' is correct for this endpoint (form-data)
+            data = {'term': query}
+            
+            print(f"    [HybridAnalysis] Querying: {url} with term='{query}'...")
+            
+            res = requests.post(url, headers=headers, data=data, timeout=30)
+            
+            if res.status_code == 404:
+                # If it fails, we can't do much but log it.
+                print(f"    ❌ [HybridAnalysis] Endpoint 404. Key permissions or API change?")
+                return []
+                
             res.raise_for_status()
-            data = res.json()
+            response_json = res.json()
             
             results = []
-            # 'result' usually contains list of items with 'sha256', 'context', etc.
-            # Hybrid Analysis search results might not give the full content, 
-            # just the fact that it matched. We might need to look at 'strings' or 'dropped_files'.
-            # For this MVP, we assume if we found a "Telegram" related malware report, 
-            # we might want to flag the hash or look deeper.
-            # Extraction of exact TOKEN from this API search result is hard without 
-            # downloading the full report/sample.    
-            # We will return the metadata pointing to the report.
             
-            for item in data.get('result', []):
-                # Placeholder logic: we can't easily extract the token without more calls.
-                # But if we assume the query WAS the token, we'd have it.
-                # If query is "api.telegram.org", we match reports. 
-                # We'll return a generic "manual review" entry or skip if no token found.
-                # Actually, HA API allows searching for specific strings.
-                
-                # We'll just pass basic metadata.
+            # Response 'result' is list of matches
+            # Each match has 'sha256', 'verdict', 'submit_name'
+            hits = response_json.get('result', [])
+            
+            print(f"    [HybridAnalysis] Found {len(hits)} hits.")
+
+            for item in hits:
+                # We can't verify tokens without downloading the full sample (expensive/hard).
+                # We flag for review.
                 results.append({
-                    "token": "MANUAL_REVIEW_REQUIRED", # Placeholder
+                    "token": "MANUAL_REVIEW_REQUIRED",
                     "meta": {
                         "source": "hybrid_analysis",
                         "sha256": item.get('sha256'),
                         "verdict": item.get('verdict'),
+                        "context": item.get('context'),
                         "report_url": f"https://www.hybrid-analysis.com/sample/{item.get('sha256')}"
                     }
                 })
