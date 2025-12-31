@@ -36,8 +36,16 @@ def _save_credentials(results, source_name: str):
                 "meta": item.get("meta", {})
             }
             
-            db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).execute()
-            saved_count += 1
+            res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).select("id").execute()
+            
+            # If inserted (or found?), we might want to trigger enrichment.
+            # Upsert response: if ignored, data might be empty or null.
+            if res.data:
+                new_id = res.data[0]['id']
+                # Import here to avoid circular dependency at top level if any
+                from app.workers.tasks.flow_tasks import enrich_credential
+                enrich_credential.delay(new_id)
+                saved_count += 1
         except Exception as e:
             pass
     return saved_count

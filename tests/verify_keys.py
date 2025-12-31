@@ -3,7 +3,8 @@ import sys
 import os
 
 # Ensure we can import app modules
-sys.path.append(os.getcwd())
+# Add project root (one level up) to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.core.config import settings
 from app.services.scanners import ShodanService, FofaService, GithubService, CensysService, HybridAnalysisService
@@ -31,15 +32,8 @@ def verify_shodan():
         return
 
     s = ShodanService()
-    # ShodanService.search does a real request. 
-    # We'll try a very simple query that should return something or at least not auth error.
-    # Note: Our service implementation returns a list or empty list on error.
-    # We should look at the internal implementation or just call search.
-    # Actually, let's call the API manually to see the specific error if any, 
-    # OR trust the service print output (which goes to stdout).
     try:
         results = s.search("product:Telegram limit:1")
-        # If we get here without exception, check if it printed error
         print(f"ℹ️  Scan executed. Result count: {len(results)}")
         print("✅ SUCCESS: API responded (check above for any detailed errors)")
     except Exception as e:
@@ -68,7 +62,6 @@ def verify_supabase():
     try:
         client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
         # Simple select to check connection
-        # Assuming table exists from init.sql
         res = client.table("discovered_credentials").select("*", count="exact").limit(1).execute()
         print(f"✅ SUCCESS: Connected. Found {res.count} records.")
     except Exception as e:
@@ -82,10 +75,8 @@ def verify_github_integration():
         
     gs = GithubService()
     try:
-        # Search for something benign or a dork that returns your own public key if possible, 
-        # or just "telegram" in a small timeframe. We'll use a specific dork.
+        # Search for something benign
         results = gs.search("filename:Dockerfile repo:bryanseah234/telegramhunter")
-        # Since we might not find our own repo immediately if not indexed, just checking API response.
         if isinstance(results, list):
              print(f"✅ SUCCESS: API responded. Found {len(results)} matches.")
         else:
@@ -98,7 +89,6 @@ def verify_censys():
     if not settings.CENSYS_ID:
         print("❌ SKIPPED: CENSYS_ID (Token) not set.")
         return
-    # Note: Secret is optional now for Bearer Auth
         
     cs = CensysService()
     try:
@@ -117,7 +107,6 @@ def verify_hybrid():
         
     ha = HybridAnalysisService()
     try:
-        # Tried /search/terms -> 404. 
         # Switching to /key/current to verify the KEY itself.
         headers = {
             'api-key': settings.HYBRID_ANALYSIS_KEY,
@@ -135,7 +124,6 @@ def verify_hybrid():
         print(f"❌ FAILED: {e}")
 
 
-
 async def main():
     print("Locked and Loaded. Verifying Integrations...")
     print(f"Environment: {settings.ENV}")
@@ -150,7 +138,9 @@ async def main():
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
-    load_dotenv()
+    # Load env from parent directory
+    load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+    
     # Force settings reload
     from app.core import config
     from importlib import reload

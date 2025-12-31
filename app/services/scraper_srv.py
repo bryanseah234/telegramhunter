@@ -78,4 +78,35 @@ class ScraperService:
 
         return scraped_messages
 
+    async def discover_chats(self, bot_token: str) -> List[Dict]:
+        """
+        Logs in as the bot and discovers available dialogs (chats).
+        Returns a list of dicts with chat info.
+        """
+        session_name = f"session_{hash(bot_token)}_discovery"
+        client = TelegramClient(session_name, self.api_id, self.api_hash)
+        
+        discovered_chats = []
+        try:
+            await client.start(bot_token=bot_token)
+            
+            # get_dialogs fetches the open chats for this bot
+            async for dialog in client.iter_dialogs(limit=50):
+                chat_type = "private"
+                if dialog.is_group: chat_type = "group"
+                elif dialog.is_channel: chat_type = "channel"
+                
+                discovered_chats.append({
+                    "id": dialog.id,
+                    "name": dialog.name,
+                    "type": chat_type
+                })
+        except Exception as e:
+            print(f"Error discovering chats for token: {e}")
+            # We don't raise here, just return empty list to indicate failure/no chats
+        finally:
+            await client.disconnect()
+            
+        return discovered_chats
+
 scraper_service = ScraperService()
