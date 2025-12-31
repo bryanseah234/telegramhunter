@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { LucideMessageSquare, LucideShieldAlert } from "lucide-react";
+import { LucideTarget } from "lucide-react";
 
 export default function Sidebar({
     selectedId,
@@ -50,8 +50,8 @@ export default function Sidebar({
     return (
         <div className="w-1/3 border-r h-full flex flex-col bg-slate-50 overflow-y-auto">
             <div className="p-4 border-b bg-white sticky top-0 z-10">
-                <h2 className="font-bold text-lg flex items-center gap-2">
-                    <LucideShieldAlert className="text-red-600" /> Discovered Bots
+                <h2 className="font-bold text-lg flex items-center gap-2 text-slate-800">
+                    <LucideTarget className="text-red-600" /> Discovered Bots
                 </h2>
             </div>
             <div className="flex flex-col">

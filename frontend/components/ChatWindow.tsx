@@ -50,7 +50,7 @@ export default function ChatWindow({ credentialId }: { credentialId: string }) {
 
     if (!credentialId) {
         return (
-            <div className="flex-1 flex items-center justify-center bg-slate-100 text-slate-400">
+            <div className="flex-1 flex items-center justify-center bg-slate-200 text-slate-600">
                 Select a chat to view exfiltrated messages
             </div>
         );
@@ -68,8 +68,8 @@ export default function ChatWindow({ credentialId }: { credentialId: string }) {
                     <div
                         key={msg.id}
                         className={`flex flex-col max-w-[70%] p-2 rounded-lg shadow-sm ${msg.sender_name === "me" || msg.sender_name?.toLowerCase().includes("bot")
-                                ? "self-end bg-[#DCF8C6] rounded-tr-none"
-                                : "self-start bg-white rounded-tl-none"
+                            ? "self-end bg-[#DCF8C6] rounded-tr-none"
+                            : "self-start bg-white rounded-tl-none"
                             }`}
                     >
                         <span className="text-xs font-bold text-sky-600 mb-0.5">
