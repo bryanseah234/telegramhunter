@@ -1,0 +1,25 @@
+name: Supabase Keep Alive
+
+on:
+    schedule:
+        - cron: "0 0 * * *" # Run daily at midnight UTC
+    workflow_dispatch:
+
+jobs:
+    ping-db:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Ping Supabase
+              env:
+                  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+                  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+              run: |
+                  if [ -z "$SUPABASE_URL" ]; then
+                    echo "SUPABASE_URL not set"
+                    exit 1
+                  fi
+                  # Simple curl to the root or a health endpoint if available.
+                  # PostgREST usually exposes / on the URL.
+                  curl -I "$SUPABASE_URL/rest/v1/" \
+                    -H "apikey: $SUPABASE_KEY" \
+                    -H "Authorization: Bearer $SUPABASE_KEY"
