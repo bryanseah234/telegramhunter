@@ -63,7 +63,51 @@ async def run_scanners():
     print("🚀 Starting LOCAL OSINT Scan (All Sources)...")
     print("-------------------------------------------------")
 
-    # 1. GitHub
+    # 1. Hybrid Analysis
+    print("\n🦠 [HybridAnalysis] Starting Scan...")
+    try:
+        query = "api.telegram.org"
+        print(f"  > Query: {query}")
+        results = hybrid.search(query)
+        # HA often returns manual review needed, but let's try
+        count = save_manifest(results, "hybrid_analysis")
+        print(f"  ✅ Processed {len(results)} reports ({count} tokens saved).")
+    except Exception as e:
+        print(f"  ❌ HybridAnalysis Error: {e}")
+
+    # 2. Censys
+    print("\n🔍 [Censys] Starting Scan...")
+    try:
+        # User requested simplified query + active verification
+        query = "\"api.telegram.org\""
+        print(f"  > Query: {query}")
+        print("  > Note: Active verification enabled (scanning ports 80/443)")
+        results = censys.search(query)
+        count = save_manifest(results, "censys")
+        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
+    except Exception as e:
+        print(f"  ❌ Censys Error: {e}")
+
+    # 3. Shodan
+    print("\n🌎 [Shodan] Starting Scan...")
+    shodan_queries = [
+        "http.html:\"api.telegram.org\"",
+        "http.html:\"bot_token\"", 
+        "http.title:\"Telegram Bot\"",
+        "http.title:\"Telegram Login\""
+    ]
+    
+    for q in shodan_queries:
+        print(f"  > Querying: {q}")
+        try:
+            results = shodan.search(q)
+            count = save_manifest(results, "shodan")
+            print(f"    ✅ Saved {count} new credentials (from {len(results)} hits).")
+            time.sleep(1)
+        except Exception as e:
+            print(f"    ❌ Error: {e}")
+
+    # 4. GitHub
     print("\n🐱 [GitHub] Starting Scan...")
     dorks = [
         "filename:.env api.telegram.org",
@@ -89,61 +133,6 @@ async def run_scanners():
         
         if i < len(dorks) - 1:
             time.sleep(2) # Respect rate limits slightly
-
-    # 2. Shodan
-    print("\n🌎 [Shodan] Starting Scan...")
-    shodan_queries = [
-        "http.html:\"api.telegram.org\"",
-        "http.html:\"bot_token\"", 
-        "http.title:\"Telegram Bot\"",
-        "http.title:\"Telegram Login\""
-    ]
-    
-    for q in shodan_queries:
-        print(f"  > Querying: {q}")
-        try:
-            results = shodan.search(q)
-            count = save_manifest(results, "shodan")
-            print(f"    ✅ Saved {count} new credentials (from {len(results)} hits).")
-            time.sleep(1)
-        except Exception as e:
-            print(f"    ❌ Error: {e}")
-
-    # 3. Censys
-    print("\n🔍 [Censys] Starting Scan...")
-    try:
-        # User requested simplified query + active verification
-        query = "\"api.telegram.org\""
-        print(f"  > Query: {query}")
-        print("  > Note: Active verification enabled (scanning ports 80/443)")
-        results = censys.search(query)
-        count = save_manifest(results, "censys")
-        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
-    except Exception as e:
-        print(f"  ❌ Censys Error: {e}")
-
-    # 4. FOFA
-    print("\n🦈 [FOFA] Starting Scan...")
-    try:
-        query = 'body="api.telegram.org"'
-        print(f"  > Query: {query}")
-        results = fofa.search(query)
-        count = save_manifest(results, "fofa")
-        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
-    except Exception as e:
-        print(f"  ❌ FOFA Error: {e}")
-
-    # 5. Hybrid Analysis
-    print("\n🦠 [HybridAnalysis] Starting Scan...")
-    try:
-        query = "api.telegram.org"
-        print(f"  > Query: {query}")
-        results = hybrid.search(query)
-        # HA often returns manual review needed, but let's try
-        count = save_manifest(results, "hybrid_analysis")
-        print(f"  ✅ Processed {len(results)} reports ({count} tokens saved).")
-    except Exception as e:
-        print(f"  ❌ HybridAnalysis Error: {e}")
 
     print("\n-------------------------------------------------")
     print("🏁 Full Scan Complete.")
