@@ -1,17 +1,15 @@
 from app.workers.celery_app import app
 import asyncio # Ensure asyncio is imported
 from app.services.broadcaster_srv import broadcaster_service
-from app.services.scanners import ShodanService, FofaService, GithubService, CensysService, HybridAnalysisService
+from app.services.scanners import ShodanService, GithubService, UrlScanService
 from app.core.security import security
 from app.core.database import db
 import hashlib
 
-# Instantiate services
+# Instantiate services (Fofa/Censys/HybridAnalysis REMOVED - API issues)
 shodan = ShodanService()
-fofa = FofaService()
 github = GithubService()
-censys = CensysService()
-hybrid = HybridAnalysisService()
+urlscan = UrlScanService()
 
 def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -132,19 +130,19 @@ def scan_shodan(query: str = None):
     _send_log_sync(f"🏁 [Shodan] Finished. Saved {total_saved} new credentials.")
     return result_msg
 
-@app.task(name="scanner.scan_fofa")
-def scan_fofa(query: str = 'body="api.telegram.org"'):
-    print(f"Starting FOFA scan: {query}")
-    _send_log_sync(f"🦈 [FOFA] Starting scan with query: `{query}`")
+@app.task(name="scanner.scan_urlscan")
+def scan_urlscan(query: str = "api.telegram.org"):
+    print(f"Starting URLScan scan: {query}")
+    _send_log_sync(f"🔍 [URLScan] Starting scan with query: `{query}`")
     try:
-        results = fofa.search(query)
-        saved = _save_credentials(results, "fofa")
-        msg = f"FOFA scan finished. Saved {saved} new credentials."
-        _send_log_sync(f"🏁 [FOFA] Finished. Saved {saved} new credentials.")
+        results = urlscan.search(query)
+        saved = _save_credentials(results, "urlscan")
+        msg = f"URLScan scan finished. Saved {saved} new credentials."
+        _send_log_sync(f"🏁 [URLScan] Finished. Saved {saved} new credentials.")
         return msg
     except Exception as e:
-        _send_log_sync(f"❌ [FOFA] Scan failed: {e}")
-        return f"FOFA scan failed: {e}"
+        _send_log_sync(f"❌ [URLScan] Scan failed: {e}")
+        return f"URLScan scan failed: {e}"
 
 @app.task(name="scanner.scan_github")
 def scan_github(query: str = None):
@@ -186,37 +184,5 @@ def scan_github(query: str = None):
     _send_log_sync(f"🏁 [GitHub] Finished. Saved {total_saved} unique credentials.")
     return result_msg
 
-@app.task(name="scanner.scan_censys")
-def scan_censys(query: str = "api.telegram.org"):
-    print(f"Starting Censys scan: {query}")
-    _send_log_sync(f"🔍 [Censys] Starting scan with query: `{query}`")
-    try:
-        results = censys.search(query)
-        saved = _save_credentials(results, "censys")
-        msg = f"Censys scan finished. Saved {saved} new credentials."
-        _send_log_sync(f"🏁 [Censys] Finished. Saved {saved} new credentials.")
-        return msg
-    except Exception as e:
-        _send_log_sync(f"❌ [Censys] Failed: {e}")
-        return f"Censys scan failed: {e}"
-
-@app.task(name="scanner.scan_hybrid")
-def scan_hybrid(query: str = "api.telegram.org"):
-    """
-    Scans Hybrid Analysis for malware reports containing the query.
-    Note: Token extraction is difficult without downloading samples.
-    """
-    print(f"Starting HybridAnalysis scan: {query}")
-    _send_log_sync(f"🦠 [HybridAnalysis] Starting scan for malware reports: `{query}`")
-    try:
-        results = hybrid.search(query)
-        # Note: Current logic skips saving if token is "MANUAL_REVIEW_REQUIRED"
-        # This is strictly for demonstration of integration. 
-        # Real extraction requires downloading the report JSON details.
-        saved = _save_credentials(results, "hybrid_analysis")
-        msg = f"HybridAnalysis scan finished. (Logged {len(results)} reports)"
-        _send_log_sync(f"🏁 [HybridAnalysis] Finished. Processed {len(results)} reports.")
-        return msg
-    except Exception as e:
-        _send_log_sync(f"❌ [HybridAnalysis] Failed: {e}")
-        return f"HybridAnalysis scan failed: {e}"
+# scan_censys REMOVED - Censys API access issues
+# scan_hybrid REMOVED - Hybrid Analysis API access issues
