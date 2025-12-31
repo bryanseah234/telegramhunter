@@ -92,17 +92,23 @@ async def run_scanners():
 
     # 2. Shodan
     print("\n🌎 [Shodan] Starting Scan...")
-    try:
-        # User requested scanning for api.telegram.org in body.
-        # "http.html" searches the full HTML response in Shodan's index.
-        query = "http.html:\"api.telegram.org\""
-        print(f"  > Query: {query}")
-        print("  > Note: Active verification enabled for hits (checking for tokens in live body)")
-        results = shodan.search(query)
-        count = save_manifest(results, "shodan")
-        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
-    except Exception as e:
-        print(f"  ❌ Shodan Error: {e}")
+    shodan_queries = [
+        "http.html:\"api.telegram.org\"",
+        "http.html:\"bot_token\"", 
+        "http.title:\"Telegram Bot\"",
+        "http.title:\"Telegram Login\"",
+        "product:\"Telegram\""
+    ]
+    
+    for q in shodan_queries:
+        print(f"  > Querying: {q}")
+        try:
+            results = shodan.search(q)
+            count = save_manifest(results, "shodan")
+            print(f"    ✅ Saved {count} new credentials (from {len(results)} hits).")
+            time.sleep(1)
+        except Exception as e:
+            print(f"    ❌ Error: {e}")
 
     # 3. Censys
     print("\n🔍 [Censys] Starting Scan...")

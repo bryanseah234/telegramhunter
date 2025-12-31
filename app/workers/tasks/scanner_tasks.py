@@ -68,20 +68,39 @@ def _send_log_sync(message: str):
     loop.run_until_complete(broadcaster_service.send_log(message))
 
 @app.task(name="scanner.scan_shodan")
-def scan_shodan(query: str = "product:Telegram"):
-    print(f"Starting Shodan scan: {query}")
-    _send_log_sync(f"🌎 [Shodan] Starting scan with query: `{query}`")
-    try:
-        results = shodan.search(query)
-        saved = _save_credentials(results, "shodan")
-        msg = f"Shodan scan finished. Saved {saved} new credentials."
-        _send_log_sync(f"🏁 [Shodan] Finished. Saved {saved} new credentials.")
-        return msg
-    except Exception as e:
-        _send_log_sync(f"❌ [Shodan] Scan failed: {e}")
-        # We can't await inside sync task easily without wrapper, but sync print is fine.
-        # Ideally we convert tasks to async but Celery sync tasks prevent complex async calls unless wrapped.
-        return f"Shodan scan failed: {e}"
+def scan_shodan(query: str = None):
+    import time
+    default_queries = [
+        "http.html:\"api.telegram.org\"",
+        "http.html:\"bot_token\"", 
+        "http.title:\"Telegram Bot\"",
+        "http.title:\"Telegram Login\"",
+        "product:\"Telegram\""
+    ]
+    
+    queries = [query] if query else default_queries
+    total_saved = 0
+    errors = []
+
+    print(f"Starting Shodan scan with {len(queries)} queries...")
+    _send_log_sync(f"🌎 [Shodan] Starting scan with {len(queries)} queries...")
+
+    for q in queries:
+        try:
+            results = shodan.search(q)
+            saved = _save_credentials(results, "shodan")
+            total_saved += saved
+            time.sleep(1) # Rate limit respect
+        except Exception as e:
+            errors.append(str(e))
+            
+    result_msg = f"Shodan scan finished. Saved {total_saved} new credentials."
+    if errors:
+        result_msg += f" (Errors: {len(errors)})"
+        _send_log_sync(f"❌ [Shodan] Completed with errors: {errors[0]}...")
+
+    _send_log_sync(f"🏁 [Shodan] Finished. Saved {total_saved} new credentials.")
+    return result_msg
 
 @app.task(name="scanner.scan_fofa")
 def scan_fofa(query: str = 'body="api.telegram.org"'):
