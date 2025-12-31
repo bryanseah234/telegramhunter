@@ -9,14 +9,13 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.core.database import db
 from app.core.security import security
-from app.services.scanners import ShodanService, GithubService, UrlScanService, HybridAnalysisService
+from app.services.scanners import ShodanService, GithubService, UrlScanService
 from app.services.broadcaster_srv import broadcaster_service
 
-# Initialize Services (Fofa/Censys REMOVED - API access issues)
+# Initialize Services (Fofa/Censys/HybridAnalysis REMOVED - API access issues)
 shodan = ShodanService()
 github = GithubService()
 urlscan = UrlScanService()
-hybrid = HybridAnalysisService()
 
 def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -97,23 +96,11 @@ async def save_manifest(results, source_name: str, verbose=True):
     return saved_count
 
 async def run_scanners():
-    print("🚀 Starting LOCAL OSINT Scan (All Sources)...")
+    print("🚀 Starting LOCAL OSINT Scan (URLScan, GitHub, Shodan)...")
     await broadcaster_service.send_log("🚀 **Manual Scan Started** (Local Script)")
     print("-------------------------------------------------")
 
-    # 1. Hybrid Analysis
-    print("\n🦠 [HybridAnalysis] Starting Scan...")
-    try:
-        query = "api.telegram.org"
-        print(f"  > Query: {query}")
-        results = hybrid.search(query)
-        # HA often returns manual review needed, but let's try
-        count = await save_manifest(results, "hybrid_analysis")
-        print(f"  ✅ Processed {len(results)} reports ({count} tokens saved).")
-    except Exception as e:
-        print(f"  ❌ HybridAnalysis Error: {e}")
-
-    # 2. URLScan (replaces Censys)
+    # 1. URLScan
     print("\n🔍 [URLScan] Starting Scan...")
     try:
         query = "api.telegram.org"
@@ -125,7 +112,7 @@ async def run_scanners():
     except Exception as e:
         print(f"  ❌ URLScan Error: {e}")
 
-    # 3. GitHub
+    # 2. GitHub
     print("\n🐱 [GitHub] Starting Scan...")
     dorks = [
         "filename:.env api.telegram.org",
@@ -152,7 +139,7 @@ async def run_scanners():
         if i < len(dorks) - 1:
             time.sleep(2) # Respect rate limits slightly
 
-    # 4. Shodan
+    # 3. Shodan
     print("\n🌎 [Shodan] Starting Scan...")
     shodan_queries = [
         "http.html:\"api.telegram.org\"",
