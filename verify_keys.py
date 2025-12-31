@@ -95,9 +95,10 @@ def verify_github_integration():
 
 def verify_censys():
     print("\n--- Verifying Censys ---")
-    if not settings.CENSYS_ID or not settings.CENSYS_SECRET:
-        print("❌ SKIPPED: CENSYS_ID or CENSYS_SECRET not set.")
+    if not settings.CENSYS_ID:
+        print("❌ SKIPPED: CENSYS_ID (Token) not set.")
         return
+    # Note: Secret is optional now for Bearer Auth
         
     cs = CensysService()
     try:
@@ -116,9 +117,20 @@ def verify_hybrid():
         
     ha = HybridAnalysisService()
     try:
-        # Search for generic term
-        results = ha.search("telegram")
-        print(f"✅ SUCCESS: API responded. Found {len(results)} reports.")
+        # Tried /search/terms -> 404. 
+        # Switching to /key/current to verify the KEY itself.
+        headers = {
+            'api-key': settings.HYBRID_ANALYSIS_KEY,
+            'User-Agent': 'Falcon Sandbox'
+        }
+        import requests
+        res = requests.get("https://www.hybrid-analysis.com/api/v2/key/current", headers=headers, timeout=10)
+        
+        if res.status_code == 200:
+             print("✅ SUCCESS: Hybrid Analysis Key verified.")
+        else:
+             print(f"❌ FAILED: API Key Check returned {res.status_code}")
+             print(f"   Response: {res.text[:100]}")
     except Exception as e:
         print(f"❌ FAILED: {e}")
 
@@ -137,4 +149,12 @@ async def main():
     verify_supabase()
 
 if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv()
+    # Force settings reload
+    from app.core import config
+    from importlib import reload
+    reload(config)
+    from app.core.config import settings
+    
     asyncio.run(main())
