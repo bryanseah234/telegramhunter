@@ -1,0 +1,47 @@
+# Railway Configuration for Telegram Hunter
+# Deploy: railway login && railway up
+# Or connect via Railway Dashboard > New Project > Deploy from GitHub
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+numReplicas = 1
+restartPolicyType = "ON_FAILURE"
+
+# ============================================
+# DEPLOYMENT INSTRUCTIONS
+# ============================================
+# 
+# Railway reads docker-compose.yml automatically!
+# Your existing docker-compose.yml will work.
+#
+# STEPS:
+# 1. Go to https://railway.app/new
+# 2. Click "Deploy from GitHub repo"
+# 3. Select your telegramhunter repository
+# 4. Railway will detect docker-compose.yml
+# 5. Add environment variables in the Railway Dashboard:
+#    - SUPABASE_URL
+#    - SUPABASE_KEY
+#    - ENCRYPTION_KEY
+#    - MONITOR_BOT_TOKEN
+#    - MONITOR_GROUP_ID
+#    - TELEGRAM_API_ID
+#    - TELEGRAM_API_HASH
+#    - GITHUB_TOKEN
+#    - SHODAN_KEY
+#    - CENSYS_ID
+#    - HYBRID_ANALYSIS_KEY
+#
+# Railway will automatically:
+# - Spin up Redis
+# - Spin up API service
+# - Spin up Worker service
+# - Spin up Beat scheduler
+#
+# FREE TIER LIMITS:
+# - $5 credit/month (enough for hobby projects)
+# - 512MB RAM per service
+# - No sleep/spin-down (runs 24/7)
