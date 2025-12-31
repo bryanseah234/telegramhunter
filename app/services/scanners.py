@@ -2,6 +2,7 @@ from typing import List, Dict, Any
 from app.core.config import settings
 import requests
 import base64
+import re
 
 class ShodanService:
     def __init__(self):
@@ -14,24 +15,11 @@ class ShodanService:
 
         try:
             params = {'key': self.api_key, 'query': query}
-            # Timeout to prevent hanging
             res = requests.get(self.base_url, params=params, timeout=15)
             res.raise_for_status()
             data = res.json()
             
-            # Simple extraction strategy: assume 'matches' has raw data.
-            # In reality, finding tokens in Shodan requires regex on 'data' or 'banner'
-            # Here, we assume the query targets something specific and we pass back metadata.
-            # The Worker Task handles exact token extraction if it's not pre-parsed.
-            # But the contract says we return a list of items with potential tokens.
-            # If the user is just searching for "product:Telegram", we get IPs.
-            # We'll just return matches for the worker to inspect/logging.
-            # BUT: The worker expects a 'token'.
-            # If we don't extract it here, the worker loop skips it.
-            # Let's try a regex for bot tokens in the 'data' field.
-            import re
             token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
-            
             results = []
             for match in data.get('matches', []):
                 banner = match.get('data', '')
@@ -46,21 +34,17 @@ class ShodanService:
                         }
                     })
             return results
-
         except Exception as e:
             print(f"Shodan Error: {e}")
             return []
 
 class FofaService:
     def __init__(self):
-        self.email = settings.FOFA_EMAIL # Use email if needed, or just key
+        self.email = settings.FOFA_EMAIL 
         self.key = settings.FOFA_KEY
         self.base_url = "https://fofa.info/api/v1/search/all"
 
     def search(self, query_str: str) -> List[Dict[str, Any]]:
-        """
-        FOFA requires base64 encoded query.
-        """
         if not self.key:
             return []
         
@@ -83,12 +67,9 @@ class FofaService:
                 print(f"FOFA Error: {data.get('errmsg')}")
                 return []
 
-            import re
             token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
-            
             results = []
             for result in data.get('results', []):
-                # result is [ip, port, body] based on 'fields'
                 if len(result) < 3:
                     continue
                 body = result[2]
@@ -103,7 +84,6 @@ class FofaService:
                         }
                     })
             return results
-            
         except Exception as e:
             print(f"FOFA Exception: {e}")
             return []
@@ -114,22 +94,7 @@ class UrlScanService:
         self.base_url = "https://urlscan.io/api/v1/search/"
         
     def search(self, query: str) -> List[Dict[str, Any]]:
-        if not self.api_key:
-            return []
-            
-        try:
-            headers = {'API-Key': self.api_key}
-            params = {'q': query, 'size': 100}
-            res = requests.get(self.base_url, headers=headers, params=params, timeout=15)
-            res.raise_for_status()
-            data = res.json()
-            
-            # URLScan doesn't give 'body' easily in search, usually links to result.
-            # This is complex. We might just search for 'task' results.
-            # Placeholder for now as it requires secondary requests to get DOM.
-            return [] 
-        except Exception:
-            return []
+        return []
 
 class GithubService:
     def __init__(self):
@@ -137,8 +102,8 @@ class GithubService:
         self.base_url = "https://api.github.com/search/code"
         
     def search(self, query: str) -> List[Dict[str, Any]]:
-        # GitHub search for 'filename:.env telegram_bot_token' etc.
         if not self.token:
+            print("GitHub Token missing")
             return []
             
         try:
@@ -147,13 +112,137 @@ class GithubService:
                 'Accept': 'application/vnd.github.v3+json'
             }
             params = {'q': query, 'per_page': 30}
+            
             res = requests.get(self.base_url, headers=headers, params=params, timeout=15)
+            if res.status_code == 403 or res.status_code == 429:
+                print("GitHub Rate Limit Exceeded")
+                return []
+            res.raise_for_status()
+            
+            data = res.json()
+            items = data.get('items', [])
+            
+            results = []
+            token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
+            
+            for item in items:
+                raw_url = item.get('html_url', '').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
+                try:
+                    raw_res = requests.get(raw_url, timeout=5)
+                    content = raw_res.text
+                    found = token_pattern.findall(content)
+                    for t in found:
+                         results.append({
+                            "token": t,
+                            "meta": {
+                                "source": "github",
+                                "repo": item.get('repository', {}).get('full_name'),
+                                "file_url": item.get('html_url')
+                            }
+                        })
+                except Exception:
+                    continue
+            return results
+        except Exception as e:
+            print(f"GitHub Error: {e}")
+            return []
+
+class CensysService:
+    def __init__(self):
+        self.api_id = settings.CENSYS_ID
+        self.api_secret = settings.CENSYS_SECRET
+        self.base_url = "https://search.censys.io/api/v2/hosts/search"
+
+    def search(self, query: str) -> List[Dict[str, Any]]:
+        if not self.api_id or not self.api_secret:
+            return []
+
+        try:
+            auth = (self.api_id, self.api_secret)
+            params = {'q': query, 'per_page': 50} 
+            res = requests.get(self.base_url, auth=auth, params=params, timeout=15)
+            res.raise_for_status()
+            data = res.json()
+            hits = data.get('result', {}).get('hits', [])
+            
+            token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
+            results = []
+            for hit in hits:
+                ip = hit.get('ip')
+                services = hit.get('services', [])
+                for service in services:
+                    service_str = str(service)
+                    found = token_pattern.findall(service_str)
+                    for t in found:
+                        results.append({
+                            "token": t,
+                            "meta": {
+                                "source": "censys",
+                                "ip": ip,
+                                "port": service.get('port'),
+                                "censys_hit": True
+                            }
+                        })
+            return results
+        except Exception as e:
+            print(f"Censys Error: {e}")
+            return []
+
+class HybridAnalysisService:
+    def __init__(self):
+        self.api_key = settings.HYBRID_ANALYSIS_KEY
+        self.base_url = "https://www.hybrid-analysis.com/api/v2/search/terms"
+
+    def search(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Search Hybrid Analysis for string matches in malware sandbox reports.
+        Free tier limitations: Check quotas (often restricted).
+        """
+        if not self.api_key:
+            return []
+
+        try:
+            headers = {
+                'api-key': self.api_key,
+                'User-Agent': 'Falcon Sandbox'
+            }
+            # Search query logic: 'verdict:malicious AND string:"api.telegram.org"'
+            # Or just query strings if allowed.
+            params = {'term': query}
+            
+            res = requests.post(self.base_url, headers=headers, data=params, timeout=20)
             res.raise_for_status()
             data = res.json()
             
-            # We strictly can't get code content easily in bulk search without hitting limits.
-            # We'll rely on user manually providing specific dorks that return raw url.
-            # For this stub, we return empty list to avoid rate limits abusing.
-            return []
-        except Exception:
+            results = []
+            # 'result' usually contains list of items with 'sha256', 'context', etc.
+            # Hybrid Analysis search results might not give the full content, 
+            # just the fact that it matched. We might need to look at 'strings' or 'dropped_files'.
+            # For this MVP, we assume if we found a "Telegram" related malware report, 
+            # we might want to flag the hash or look deeper.
+            # Extraction of exact TOKEN from this API search result is hard without 
+            # downloading the full report/sample.    
+            # We will return the metadata pointing to the report.
+            
+            for item in data.get('result', []):
+                # Placeholder logic: we can't easily extract the token without more calls.
+                # But if we assume the query WAS the token, we'd have it.
+                # If query is "api.telegram.org", we match reports. 
+                # We'll return a generic "manual review" entry or skip if no token found.
+                # Actually, HA API allows searching for specific strings.
+                
+                # We'll just pass basic metadata.
+                results.append({
+                    "token": "MANUAL_REVIEW_REQUIRED", # Placeholder
+                    "meta": {
+                        "source": "hybrid_analysis",
+                        "sha256": item.get('sha256'),
+                        "verdict": item.get('verdict'),
+                        "report_url": f"https://www.hybrid-analysis.com/sample/{item.get('sha256')}"
+                    }
+                })
+            return results
+
+        except Exception as e:
+            print(f"Hybrid Analysis Error: {e}")
             return []

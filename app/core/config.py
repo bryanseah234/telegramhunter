@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     FOFA_KEY: Optional[str] = None
     URLSCAN_KEY: Optional[str] = None
     GITHUB_TOKEN: Optional[str] = None
+    CENSYS_ID: Optional[str] = None
+    CENSYS_SECRET: Optional[str] = None
+    HYBRID_ANALYSIS_KEY: Optional[str] = None
 
     model_config = SettingsConfigDict(
         env_file=".env", 
