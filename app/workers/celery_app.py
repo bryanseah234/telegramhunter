@@ -19,17 +19,17 @@ app.conf.update(
             "task": "flow.broadcast_pending",
             "schedule": 60.0, # Every 60 seconds
         },
-        "scan-github-hourly": {
+        "scan-github-30min": {
             "task": "scanner.scan_github",
-            "schedule": 3600.0, # Every 1 hour
+            "schedule": 1800.0, # Every 30 minutes
         },
-        "scan-shodan-4hours": {
+        "scan-shodan-30min": {
             "task": "scanner.scan_shodan",
-            "schedule": 14400.0, # Every 4 hours
+            "schedule": 1800.0, # Every 30 minutes
         },
-        "scan-censys-4hours": {
+        "scan-censys-30min": {
             "task": "scanner.scan_censys",
-            "schedule": 14400.0, # Every 4 hours
+            "schedule": 1800.0, # Every 30 minutes
         }
     }
 )

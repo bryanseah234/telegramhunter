@@ -1,5 +1,11 @@
 import pytest
 import os
+import sys
+from pathlib import Path
+
+# Add project root to sys.path so we can import 'app'
+sys.path.append(str(Path(__file__).parent.parent))
+
 from fastapi.testclient import TestClient
 
 # Mock Environment Variables BEFORE importing app
@@ -24,5 +30,4 @@ from app.api.main import app
 @pytest.fixture(scope="module")
 def client():
     # Use TestClient for API tests
-    with TestClient(app) as c:
-        yield c
+    return TestClient(app)
