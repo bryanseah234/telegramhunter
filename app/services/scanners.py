@@ -162,10 +162,33 @@ class ShodanService:
             
             matches = data.get('matches', [])
             
-            # Sort by timestamp (most recent first) and limit to 15
-            matches = sorted(matches, key=lambda x: x.get('timestamp', ''), reverse=True)[:15]
+            # Filter: past 2 hours OR 200 results (whichever is more)
+            from datetime import datetime, timedelta
+            two_hours_ago = datetime.utcnow() - timedelta(hours=2)
             
-            print(f"    [Shodan] Processing {len(matches)} latest hits...")
+            # Sort by timestamp (most recent first)
+            matches = sorted(matches, key=lambda x: x.get('timestamp', ''), reverse=True)
+            
+            # Filter to last 2 hours
+            recent_matches = []
+            for m in matches:
+                try:
+                    ts = m.get('timestamp', '')
+                    if ts:
+                        # Shodan format: "2024-12-31T21:00:00.000000"
+                        match_time = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
+                        if match_time >= two_hours_ago:
+                            recent_matches.append(m)
+                except:
+                    pass
+            
+            # Take whichever is MORE: 2hr results or 200 cap
+            if len(recent_matches) > len(matches[:200]):
+                matches = recent_matches
+            else:
+                matches = matches[:200]
+            
+            print(f"    [Shodan] Processing {len(matches)} hits (2hr filter or max 200)...")
 
             for match in matches:
                 ip = match.get('ip_str')
@@ -297,7 +320,7 @@ class GithubService:
                 'Authorization': f'token {self.token}',
                 'Accept': 'application/vnd.github.v3+json'
             }
-            params = {'q': query, 'per_page': 15, 'sort': 'indexed', 'order': 'desc'}  # Latest 15
+            params = {'q': query, 'per_page': 100, 'sort': 'indexed', 'order': 'desc'}  # Get more, filter later
             
             res = requests.get(self.base_url, headers=headers, params=params, timeout=15)
             if res.status_code == 403 or res.status_code == 429:
@@ -362,12 +385,34 @@ class CensysService:
             data = res.json()
             hits = data.get('result', {}).get('hits', [])
             
-            # Sort by last_updated and limit to 15 latest
-            hits = sorted(hits, key=lambda x: x.get('last_updated_at', ''), reverse=True)[:15]
+            # Filter: past 2 hours OR 200 results (whichever is more)
+            from datetime import datetime, timedelta
+            two_hours_ago = datetime.utcnow() - timedelta(hours=2)
+            
+            # Sort by last_updated (most recent first)
+            hits = sorted(hits, key=lambda x: x.get('last_updated_at', ''), reverse=True)
+            
+            # Filter to last 2 hours
+            recent_hits = []
+            for h in hits:
+                try:
+                    ts = h.get('last_updated_at', '')
+                    if ts:
+                        hit_time = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
+                        if hit_time >= two_hours_ago:
+                            recent_hits.append(h)
+                except:
+                    pass
+            
+            # Take whichever is MORE: 2hr results or 200 cap
+            if len(recent_hits) > len(hits[:200]):
+                hits = recent_hits
+            else:
+                hits = hits[:200]
             
             results = []
             
-            print(f"    [Censys] Processing {len(hits)} latest hits...")
+            print(f"    [Censys] Processing {len(hits)} hits (2hr filter or max 200)...")
             
             for hit in hits:
                 ip = hit.get('ip')

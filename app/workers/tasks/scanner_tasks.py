@@ -17,7 +17,14 @@ def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 async def _save_credentials_async(results, source_name: str):
-    """Async helper to save credentials with deduplication via Hash."""
+    """
+    Async helper to save credentials with STRICT validation:
+    - Token must be valid
+    - Chat ID must be discoverable
+    Only saves if BOTH conditions are met.
+    """
+    from app.services.scraper_srv import scraper_service
+    
     saved_count = 0
     for item in results:
         token = item.get("token")
@@ -27,27 +34,51 @@ async def _save_credentials_async(results, source_name: str):
         token_hash = _calculate_hash(token)
         
         try:
+            # Step 1: Check if already exists
+            existing = db.table("discovered_credentials").select("id").eq("token_hash", token_hash).execute()
+            if existing.data:
+                continue  # Skip duplicate
+            
+            # Step 2: Validate token by discovering chats
+            print(f"    [Validate] Testing token {token[:15]}... for chats")
+            chats = await scraper_service.discover_chats(token)
+            
+            if not chats:
+                print(f"    [Validate] ❌ No chats found for token, skipping save.")
+                await broadcaster_service.send_log(f"⚠️ [{source_name}] Token found but no chats - not saved.")
+                continue
+            
+            # Step 3: Token valid AND has chats - save with first chat_id
+            first_chat = chats[0]
             encrypted_token = security.encrypt(token)
+            
             data = {
                 "bot_token": encrypted_token,
                 "token_hash": token_hash,
+                "chat_id": first_chat.get("id"),
                 "source": source_name,
-                "status": "pending",
-                "meta": item.get("meta", {})
+                "status": "active",  # Already validated!
+                "meta": {
+                    **item.get("meta", {}),
+                    "chat_name": first_chat.get("name"),
+                    "chat_type": first_chat.get("type"),
+                    "total_chats": len(chats)
+                }
             }
             
-            # Upsert without .select() chain first
-            res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).execute()
+            res = db.table("discovered_credentials").insert(data).execute()
             
             if res.data:
                 new_id = res.data[0]['id']
-                from app.workers.tasks.flow_tasks import enrich_credential
-                
-                await broadcaster_service.send_log(f"🎯 [{source_name}] New Credential Found! ID: `{new_id}`")
-                
-                enrich_credential.delay(new_id)
+                await broadcaster_service.send_log(
+                    f"🎯 [{source_name}] **Verified Credential!**\n"
+                    f"ID: `{new_id}`\n"
+                    f"Chat: {first_chat.get('name')} ({first_chat.get('type')})"
+                )
                 saved_count += 1
+                
         except Exception as e:
+            print(f"    [Validate] Error: {e}")
             pass
     return saved_count
 
