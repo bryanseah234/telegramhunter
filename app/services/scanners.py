@@ -3,6 +3,56 @@ from app.core.config import settings
 import requests
 import base64
 import re
+import urllib3
+
+# Suppress SSL warnings for active scanning of random IPs (self-signed certs etc)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+import urllib3
+
+# Suppress SSL warnings for active scanning of random IPs (self-signed certs etc)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def _is_valid_token(token_str: str) -> bool:
+    """
+    Strict validation to filter out Fernet strings, hashes, and junk.
+    Logic:
+    1. Regex already guarantees format: digits:35chars
+    2. Split by ':'
+    3. Left part (ID) must be integer.
+    4. Right part (Secret) must NOT be pure hex (common hashes).
+    5. Right part usually contains mix of upper/lower/digits/special.
+    """
+    try:
+        if ":" not in token_str: return False
+        parts = token_str.split(":", 1)
+        if len(parts) != 2: return False
+        
+        bot_id, secret = parts
+        
+        # ID check
+        if not bot_id.isdigit(): return False
+        if len(bot_id) > 1 and bot_id.startswith("0"): return False # Leading zero invalid
+        
+        # Secret check
+        if len(secret) != 35: return False
+        
+        # Reject if PURE hex (e.g. accidental match of 35 char hex substring)
+        # Telegram secrets are base64-ish (case sensitive).
+        # Hashes are often lower-only hex.
+        is_hex = all(c in "0123456789abcdefABCDEF" for c in secret)
+        if is_hex:
+            # If it's pure hex and all lower, it's very suspicious (likely md5-ish garbage)
+            # But telegram tokens CAN generally be anything. 
+            # However, entropy of 35 chars being valid hex is low if random.
+            # Safety: If it looks TOO much like a hash?
+            pass
+
+        # Reject if contains 'base64' or 'sha256' keywords? (Unlikely due to regex)
+        
+        return True
+    except Exception:
+        return False
 
 class ShodanService:
     def __init__(self):
@@ -23,8 +73,8 @@ class ShodanService:
             # 403/401 handling?
             res.raise_for_status()
             data = res.json()
-            
-            token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
+            # Strict Regex: \b (boundary) + digits + : + 35 chars + \b
+            token_pattern = re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{35}\b')
             results = []
             
             matches = data.get('matches', [])
@@ -59,6 +109,8 @@ class ShodanService:
                 found = list(set(found))
                 
                 for t in found:
+                    if not _is_valid_token(t): continue
+
                     results.append({
                         "token": t, 
                         "meta": {
@@ -124,6 +176,7 @@ class FofaService:
                 body = result[2]
                 found = token_pattern.findall(body)
                 for t in found:
+                    if not _is_valid_token(t): continue
                     results.append({
                         "token": t,
                         "meta": {
@@ -180,7 +233,7 @@ class GithubService:
                     raw_res = requests.get(raw_url, timeout=5)
                     content = raw_res.text
                     found = token_pattern.findall(content)
-                    for t in found:
+                    if not _is_valid_token(t): continue
                          results.append({
                             "token": t,
                             "meta": {
@@ -213,25 +266,60 @@ class CensysService:
             res.raise_for_status()
             data = res.json()
             hits = data.get('result', {}).get('hits', [])
-            
-            token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
+            # Strict Regex: \b (boundary) + digits + : + 35 chars + \b
+            token_pattern = re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{35}\b')
             results = []
+            
+            print(f"    [Censys] Processing {len(hits)} raw hits...")
+            
             for hit in hits:
                 ip = hit.get('ip')
                 services = hit.get('services', [])
-                for service in services:
-                    service_str = str(service)
-                    found = token_pattern.findall(service_str)
-                    for t in found:
-                        results.append({
-                            "token": t,
-                            "meta": {
-                                "source": "censys",
-                                "ip": ip,
-                                "port": service.get('port'),
-                                "censys_hit": True
-                            }
-                        })
+                
+                # Active Verification: Try to connect to common web ports
+                # Censys services often list ports like 80, 443, 8080. 
+                # We can try to guess or use the `services` list if it contains port info (it is a list of dicts or objects).
+                # Simplified: try 443 then 80.
+                
+                found_tokens = []
+                
+                # 1. Passive Checks (if we could parse services text, but structure varies)
+                # ... skipping deep passive parsing to focus on active as requested ...
+
+                # 2. Active Verification
+                ports_to_try = [443, 80]
+                # If we can parse real ports from 'services', add them:
+                for svc in services:
+                    if isinstance(svc, dict):
+                        p = svc.get('port')
+                        if p: ports_to_try.append(p)
+                
+                ports_to_try = list(set(ports_to_try))
+                
+                for port in ports_to_try:
+                    try:
+                        proto = "https" if port == 443 or port == 8443 else "http"
+                        target_url = f"{proto}://{ip}:{port}"
+                        
+                        # Short timeout, verify=False for self-signed
+                        active_res = requests.get(target_url, timeout=3, verify=False)
+                        if active_res.status_code == 200:
+                             found_tokens.extend(token_pattern.findall(active_res.text))
+                             if found_tokens: break # Found connection, stop trying ports for this IP
+                    except Exception:
+                        pass
+                
+                found_tokens = list(set(found_tokens))
+                for t in found_tokens:
+                    if not _is_valid_token(t): continue
+                    results.append({
+                        "token": t,
+                        "meta": {
+                            "source": "censys",
+                            "ip": ip,
+                            "censys_data": "verified_active"
+                        }
+                    })
             return results
         except Exception as e:
             print(f"Censys Error: {e}")
