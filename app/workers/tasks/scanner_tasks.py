@@ -36,7 +36,8 @@ async def _save_credentials_async(results, source_name: str):
                 "meta": item.get("meta", {})
             }
             
-            res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).select("id").execute()
+            # Upsert without .select() chain first
+            res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).execute()
             
             if res.data:
                 new_id = res.data[0]['id']

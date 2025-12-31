@@ -10,27 +10,61 @@ class ShodanService:
         self.base_url = "https://api.shodan.io/shodan/host/search"
 
     def search(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Shodan Search + Active Verification.
+        If query contains 'api.telegram.org', we fetch the IP content to look for tokens.
+        """
         if not self.api_key:
             return []
 
         try:
             params = {'key': self.api_key, 'query': query}
             res = requests.get(self.base_url, params=params, timeout=15)
+            # 403/401 handling?
             res.raise_for_status()
             data = res.json()
             
             token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
             results = []
-            for match in data.get('matches', []):
+            
+            matches = data.get('matches', [])
+            print(f"    [Shodan] Processing {len(matches)} raw hits...")
+
+            for match in matches:
+                ip = match.get('ip_str')
+                port = match.get('port')
                 banner = match.get('data', '')
+                
+                # 1. Passive Check (Banner)
                 found = token_pattern.findall(banner)
+                
+                # 2. Active Check (If requested or if banner looks interesting)
+                # "make sure resolves" -> Try to connect.
+                if not found:
+                    try:
+                        # Convert Shodan transport to protocol
+                        # fallback to http or https based on port
+                        proto = "https" if port == 443 else "http"
+                        target_url = f"{proto}://{ip}:{port}"
+                        
+                        # Short timeout for active check
+                        active_res = requests.get(target_url, timeout=3, verify=False)
+                        if active_res.status_code == 200:
+                            # Parse body
+                            found.extend(token_pattern.findall(active_res.text))
+                    except Exception:
+                        pass # Host might be down or firewall
+
+                # Deduplicate tokens on this host
+                found = list(set(found))
+                
                 for t in found:
                     results.append({
                         "token": t, 
                         "meta": {
-                            "ip": match.get('ip_str'),
-                            "port": match.get('port'),
-                            "shodan_data": "banner_match"
+                            "ip": ip,
+                            "port": port,
+                            "shodan_data": "verified_active" if ip else "banner_match"
                         }
                     })
             return results
@@ -48,6 +82,19 @@ class FofaService:
         if not self.key:
             return []
         
+        # Fallback for free accounts that can't search 'body'
+        # We try the original query first, if 820001 error, we downgrade.
+        results = self._perform_search(query_str)
+        if results == "PERMISSION_ERROR" and "body=" in query_str:
+            print("⚠️ FOFA 'body' search forbidden. Falling back to 'title' search.")
+            fallback_query = 'title="Telegram" && protocol="http"'
+            results = self._perform_search(fallback_query)
+        
+        if isinstance(results, list):
+            return results
+        return []
+
+    def _perform_search(self, query_str: str):
         try:
             qbase64 = base64.b64encode(query_str.encode()).decode()
             params = {
@@ -60,11 +107,13 @@ class FofaService:
                 params['email'] = self.email
 
             res = requests.get(self.base_url, params=params, timeout=15)
-            res.raise_for_status()
             data = res.json()
             
             if data.get('error'):
-                print(f"FOFA Error: {data.get('errmsg')}")
+                err_msg = data.get('errmsg', '')
+                if '820001' in str(data.get('error')) or 'privilege' in err_msg.lower():
+                    return "PERMISSION_ERROR"
+                print(f"FOFA Error: {err_msg}")
                 return []
 
             token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
