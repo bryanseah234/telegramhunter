@@ -4,9 +4,11 @@ import sys
 import os
 from dotenv import load_dotenv
 
-# Load env variables
-load_dotenv()
-sys.path.append(os.getcwd())
+# Load env variables from parent
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+
+# Add project root to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.core.config import settings
 from supabase import create_client
@@ -23,7 +25,7 @@ def test_rw():
         # 1. Insert Dummy
         dummy_data = {
             "bot_token": "TEST_TOKEN_ENCRYPTED_PLACEHOLDER",
-            "token_hash": "TEST_HASH_12345",
+            "token_hash": "TEST_HASH_123456",
             "source": "TEST_SCRIPT",
             "status": "pending"
         }
@@ -49,7 +51,6 @@ def test_rw():
 
     except Exception as e:
         print(f"\n❌ FAILED: {e}")
-        # Check for common RLS policies issues
         if "policy" in str(e).lower():
             print("   👉 Hint: Check your Supabase RLS policies. The Service Key should bypass them, but if using Anon key you might need policies.")
 

