@@ -16,8 +16,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Create a non-root user
+RUN useradd -m -u 1000 celery
+
 # Application Code
 COPY . .
+
+# Change ownership to the new user
+RUN chown -R celery:celery /app
+
+# Switch to non-root user
+USER celery
 
 # Default command (can be overridden)
 CMD ["bash"]
