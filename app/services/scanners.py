@@ -8,20 +8,28 @@ import urllib3
 # Suppress SSL warnings for active scanning of random IPs (self-signed certs etc)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-import urllib3
 
-# Suppress SSL warnings for active scanning of random IPs (self-signed certs etc)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# User-provided fingerprint for stealth settings
+SPOOFED_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-GB,en;q=0.9",  # Derived from "lang": "en-GB"
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Sec-Ch-Ua": '"Chrome";v="143", "Not=A?Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"'
+}
 
 def _is_valid_token(token_str: str) -> bool:
     """
     Strict validation to filter out Fernet strings, hashes, and junk.
-    Logic:
-    1. Regex already guarantees format: digits:35chars
-    2. Split by ':'
-    3. Left part (ID) must be integer.
-    4. Right part (Secret) must NOT be pure hex (common hashes).
-    5. Right part usually contains mix of upper/lower/digits/special.
     """
     try:
         if ":" not in token_str: return False
@@ -37,22 +45,18 @@ def _is_valid_token(token_str: str) -> bool:
         # Secret check
         if len(secret) != 35: return False
         
-        # Reject if PURE hex (e.g. accidental match of 35 char hex substring)
-        # Telegram secrets are base64-ish (case sensitive).
-        # Hashes are often lower-only hex.
+        # Heuristic check for hex dumps
         is_hex = all(c in "0123456789abcdefABCDEF" for c in secret)
         if is_hex:
-            # If it's pure hex and all lower, it's very suspicious (likely md5-ish garbage)
-            # But telegram tokens CAN generally be anything. 
-            # However, entropy of 35 chars being valid hex is low if random.
-            # Safety: If it looks TOO much like a hash?
+            # Pass for now, but suspicious
             pass
 
-        # Reject if contains 'base64' or 'sha256' keywords? (Unlikely due to regex)
-        
         return True
     except Exception:
         return False
+
+# Strict Regex: \b (boundary) + digits + : + 35 chars + \b
+TOKEN_PATTERN = re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{35}\b')
 
 def _perform_active_deep_scan(target_url: str) -> List[str]:
     """
@@ -61,17 +65,15 @@ def _perform_active_deep_scan(target_url: str) -> List[str]:
     Returns a list of unique valid tokens found.
     """
     found_tokens = []
-    # Strict Regex: \b (boundary) + digits + : + 35 chars + \b
-    token_pattern = re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{35}\b')
     
     try:
         # 1. Fetch Main HTML
         print(f"      [DeepScan] Fetching: {target_url}")
-        res = requests.get(target_url, timeout=5, verify=False)
+        res = requests.get(target_url, headers=SPOOFED_HEADERS, timeout=10, verify=False)
         if res.status_code != 200: return []
         
         html_content = res.text
-        found_tokens.extend(token_pattern.findall(html_content))
+        found_tokens.extend(TOKEN_PATTERN.findall(html_content))
         
         # 2. Find External JS
         # Pattern: src=["'](path/to/script.js)["']
@@ -88,7 +90,6 @@ def _perform_active_deep_scan(target_url: str) -> List[str]:
                 js_url = js_path
             elif js_path.startswith("/"):
                 # Absolute path from root of domain
-                # Need to parse target_url base
                 from urllib.parse import urljoin
                 js_url = urljoin(target_url, js_path)
             else:
@@ -97,10 +98,10 @@ def _perform_active_deep_scan(target_url: str) -> List[str]:
                 js_url = urljoin(target_url, js_path)
 
             try:
-                # print(f"      [DeepScan] Checking JS: {js_url}")
-                js_res = requests.get(js_url, timeout=3, verify=False)
+                # Use same headers for JS fetching
+                js_res = requests.get(js_url, headers=SPOOFED_HEADERS, timeout=5, verify=False)
                 if js_res.status_code == 200:
-                    found_tokens.extend(token_pattern.findall(js_res.text))
+                    found_tokens.extend(TOKEN_PATTERN.findall(js_res.text))
             except Exception:
                 pass
 
@@ -135,8 +136,6 @@ class ShodanService:
             # 403/401 handling?
             res.raise_for_status()
             data = res.json()
-            # Strict Regex: \b (boundary) + digits + : + 35 chars + \b
-            token_pattern = re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{35}\b')
             results = []
             
             matches = data.get('matches', [])
@@ -148,7 +147,7 @@ class ShodanService:
                 banner = match.get('data', '')
                 
                 # 1. Passive Check (Banner)
-                found = token_pattern.findall(banner)
+                found = TOKEN_PATTERN.findall(banner)
                 
                 # 2. Active Check (If requested or if banner looks interesting)
                 # "make sure resolves" -> Try to connect.
@@ -228,13 +227,12 @@ class FofaService:
                 print(f"FOFA Error: {err_msg}")
                 return []
 
-            token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
             results = []
             for result in data.get('results', []):
                 if len(result) < 3:
                     continue
                 body = result[2]
-                found = token_pattern.findall(body)
+                found = TOKEN_PATTERN.findall(body)
                 for t in found:
                     if not _is_valid_token(t): continue
                     results.append({
@@ -285,16 +283,15 @@ class GithubService:
             items = data.get('items', [])
             
             results = []
-            token_pattern = re.compile(r'\d{8,10}:[A-Za-z0-9_-]{35}')
-            
             for item in items:
                 raw_url = item.get('html_url', '').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
                 try:
                     raw_res = requests.get(raw_url, timeout=5)
                     content = raw_res.text
-                    found = token_pattern.findall(content)
-                    if not _is_valid_token(t): continue
-                         results.append({
+                    found = TOKEN_PATTERN.findall(content)
+                    for t in found:
+                        if not _is_valid_token(t): continue
+                        results.append({
                             "token": t,
                             "meta": {
                                 "source": "github",
@@ -326,8 +323,6 @@ class CensysService:
             res.raise_for_status()
             data = res.json()
             hits = data.get('result', {}).get('hits', [])
-            # Strict Regex: \b (boundary) + digits + : + 35 chars + \b
-            token_pattern = re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{35}\b')
             results = []
             
             print(f"    [Censys] Processing {len(hits)} raw hits...")
