@@ -9,6 +9,7 @@ app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    broker_connection_retry_on_startup=True,
     # Auto-discover tasks in these modules
     imports=[
         "app.workers.tasks.flow_tasks",

@@ -81,8 +81,6 @@ class ScraperService:
         finally:
             await client.disconnect()
 
-        return scraped_messages
-        
         print(f"✨ [Scraper] Scraped {len(scraped_messages)} messages (Processed {count} raw objects).")
         return scraped_messages
 
@@ -106,6 +104,9 @@ class ScraperService:
                 if dialog.is_group: chat_type = "group"
                 elif dialog.is_channel: chat_type = "channel"
                 
+                discovered_chats.append({
+                    "id": dialog.id,
+                    "name": dialog.name,
                     "type": chat_type
                 })
                 print(f"    - Found Chat: {dialog.name} (ID: {dialog.id}, Type: {chat_type})")

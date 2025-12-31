@@ -1,4 +1,6 @@
 from app.workers.celery_app import app
+import asyncio # Ensure asyncio is imported
+from app.services.broadcaster_srv import broadcaster_service
 from app.services.scanners import ShodanService, FofaService, GithubService, CensysService, HybridAnalysisService
 from app.core.security import security
 from app.core.database import db
@@ -14,14 +16,12 @@ hybrid = HybridAnalysisService()
 def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
-def _save_credentials(results, source_name: str):
-    """Helper to save credentials with deduplication via Hash."""
+async def _save_credentials_async(results, source_name: str):
+    """Async helper to save credentials with deduplication via Hash."""
     saved_count = 0
     for item in results:
         token = item.get("token")
         if not token or token == "MANUAL_REVIEW_REQUIRED":
-            # For HA manual review, we might want to log it differently or skip.
-            # Currently skipping manual review placeholders to keep DB clean of non-tokens.
             continue
         
         token_hash = _calculate_hash(token)
@@ -38,36 +38,62 @@ def _save_credentials(results, source_name: str):
             
             res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).select("id").execute()
             
-            # If inserted (or found?), we might want to trigger enrichment.
-            # Upsert response: if ignored, data might be empty or null.
             if res.data:
                 new_id = res.data[0]['id']
-                # Import here to avoid circular dependency at top level if any
                 from app.workers.tasks.flow_tasks import enrich_credential
+                
+                await broadcaster_service.send_log(f"🎯 [{source_name}] New Credential Found! ID: `{new_id}`")
+                
                 enrich_credential.delay(new_id)
                 saved_count += 1
         except Exception as e:
             pass
     return saved_count
 
+def _save_credentials(results, source_name: str):
+    """Sync wrapper for async save logic"""
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(_save_credentials_async(results, source_name))
+
+def _send_log_sync(message: str):
+    """Sync wrapper to send logs via broadcaster."""
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    loop.run_until_complete(broadcaster_service.send_log(message))
+
 @app.task(name="scanner.scan_shodan")
 def scan_shodan(query: str = "product:Telegram"):
     print(f"Starting Shodan scan: {query}")
+    _send_log_sync(f"🌎 [Shodan] Starting scan with query: `{query}`")
     try:
         results = shodan.search(query)
         saved = _save_credentials(results, "shodan")
-        return f"Shodan scan finished. Saved {saved} new credentials."
+        msg = f"Shodan scan finished. Saved {saved} new credentials."
+        _send_log_sync(f"🏁 [Shodan] Finished. Saved {saved} new credentials.")
+        return msg
     except Exception as e:
+        _send_log_sync(f"❌ [Shodan] Scan failed: {e}")
+        # We can't await inside sync task easily without wrapper, but sync print is fine.
+        # Ideally we convert tasks to async but Celery sync tasks prevent complex async calls unless wrapped.
         return f"Shodan scan failed: {e}"
 
 @app.task(name="scanner.scan_fofa")
 def scan_fofa(query: str = 'body="api.telegram.org"'):
     print(f"Starting FOFA scan: {query}")
+    _send_log_sync(f"🦈 [FOFA] Starting scan with query: `{query}`")
     try:
         results = fofa.search(query)
         saved = _save_credentials(results, "fofa")
-        return f"FOFA scan finished. Saved {saved} new credentials."
+        msg = f"FOFA scan finished. Saved {saved} new credentials."
+        _send_log_sync(f"🏁 [FOFA] Finished. Saved {saved} new credentials.")
+        return msg
     except Exception as e:
+        _send_log_sync(f"❌ [FOFA] Scan failed: {e}")
         return f"FOFA scan failed: {e}"
 
 @app.task(name="scanner.scan_github")
@@ -86,6 +112,7 @@ def scan_github(query: str = None):
     errors = []
 
     print(f"Starting GitHub scan with {len(queries)} queries...")
+    _send_log_sync(f"🐱 [GitHub] Starting scan with {len(queries)} dorks...")
 
     for q in queries:
         print(f"Executing GitHub Dork: {q}")
@@ -98,22 +125,26 @@ def scan_github(query: str = None):
             print(f"  > Error: {e}")
             errors.append(str(e))
         
-        if len(queries) > 1:
             time.sleep(5) 
 
     result_msg = f"GitHub scan finished. Saved {total_saved} unique credentials."
     if errors:
         result_msg += f" (Encountered {len(errors)} errors)"
+    _send_log_sync(f"🏁 [GitHub] Finished. Saved {total_saved} unique credentials.")
     return result_msg
 
 @app.task(name="scanner.scan_censys")
 def scan_censys(query: str = "services.port: 443 and services.http.response.body: \"api.telegram.org\""):
     print(f"Starting Censys scan: {query}")
+    _send_log_sync(f"🔍 [Censys] Starting scan with query: `{query}`")
     try:
         results = censys.search(query)
         saved = _save_credentials(results, "censys")
-        return f"Censys scan finished. Saved {saved} new credentials."
+        msg = f"Censys scan finished. Saved {saved} new credentials."
+        _send_log_sync(f"🏁 [Censys] Finished. Saved {saved} new credentials.")
+        return msg
     except Exception as e:
+        _send_log_sync(f"❌ [Censys] Failed: {e}")
         return f"Censys scan failed: {e}"
 
 @app.task(name="scanner.scan_hybrid")

