@@ -1,0 +1,28 @@
+name: Deploy Backend to Oracle Cloud
+
+on:
+    push:
+        branches: ["main", "master"]
+        paths-ignore:
+            - "frontend/**"
+            - "*.md"
+            - ".github/workflows/supabase-keep-alive.yml"
+
+jobs:
+    deploy:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Deploy via SSH
+              uses: appleboy/ssh-action@v1.0.3
+              with:
+                  host: ${{ secrets.ORACLE_HOST }}
+                  username: ${{ secrets.ORACLE_USERNAME }}
+                  key: ${{ secrets.ORACLE_KEY }}
+                  port: 22
+                  script: |
+                      cd telegramhunter
+                      git pull
+                      # Rebuild and restart only the backend services
+                      docker-compose up --build -d
+                      # Optional: Prune old images to save space
+                      docker image prune -f
