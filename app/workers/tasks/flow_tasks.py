@@ -127,9 +127,9 @@ async def _enrich_logic(cred_id: str):
 
     if not chats:
         # Valid token, but no open dialogs. 
-        # Mark as 'valid_no_chats' so we know it worked but nothing to scrape.
-        db.table("discovered_credentials").update({"status": "valid_no_chats"}).eq("id", cred_id).execute()
-        return "Token valid, but no chats found. Status updated to 'valid_no_chats'."
+        # Mark as 'active' - token works but no chats accessible
+        db.table("discovered_credentials").update({"status": "active"}).eq("id", cred_id).execute()
+        return "Token valid, but no chats found. Status updated to 'active'."
 
     # Update Logic
     # 1. Update the ORIGINAL record with the first chat found.
