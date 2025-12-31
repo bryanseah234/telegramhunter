@@ -6,7 +6,7 @@ import os
 sys.path.append(os.getcwd())
 
 from app.core.config import settings
-from app.services.scanners import ShodanService, FofaService
+from app.services.scanners import ShodanService, FofaService, GithubService, CensysService, HybridAnalysisService
 from telegram import Bot
 from supabase import create_client
 
@@ -74,6 +74,56 @@ def verify_supabase():
     except Exception as e:
         print(f"❌ FAILED: {e}")
 
+def verify_github_integration():
+    print("\n--- Verifying GitHub ---")
+    if not settings.GITHUB_TOKEN:
+        print("❌ SKIPPED: GITHUB_TOKEN not set.")
+        return
+        
+    gs = GithubService()
+    try:
+        # Search for something benign or a dork that returns your own public key if possible, 
+        # or just "telegram" in a small timeframe. We'll use a specific dork.
+        results = gs.search("filename:Dockerfile repo:bryanseah234/telegramhunter")
+        # Since we might not find our own repo immediately if not indexed, just checking API response.
+        if isinstance(results, list):
+             print(f"✅ SUCCESS: API responded. Found {len(results)} matches.")
+        else:
+             print("❌ FAILED: API return format invalid.")
+    except Exception as e:
+        print(f"❌ FAILED: {e}")
+
+def verify_censys():
+    print("\n--- Verifying Censys ---")
+    if not settings.CENSYS_ID or not settings.CENSYS_SECRET:
+        print("❌ SKIPPED: CENSYS_ID or CENSYS_SECRET not set.")
+        return
+        
+    cs = CensysService()
+    try:
+        # Simple query for verification
+        results = cs.search("services.port: 80 limit:1")
+        # should return list
+        print("✅ SUCCESS: API responded (Check account usage for credits)")
+    except Exception as e:
+        print(f"❌ FAILED: {e}")
+
+def verify_hybrid():
+    print("\n--- Verifying Hybrid Analysis ---")
+    if not settings.HYBRID_ANALYSIS_KEY:
+        print("❌ SKIPPED: HYBRID_ANALYSIS_KEY not set.")
+        return
+        
+    ha = HybridAnalysisService()
+    try:
+        # Search for generic term
+        results = ha.search("telegram")
+        print(f"✅ SUCCESS: API responded. Found {len(results)} reports.")
+    except Exception as e:
+        print(f"❌ FAILED: {e}")
+
+
+
 async def main():
     print("Locked and Loaded. Verifying Integrations...")
     print(f"Environment: {settings.ENV}")
@@ -81,6 +131,9 @@ async def main():
     await verify_telegram_bot()
     verify_shodan()
     verify_fofa()
+    verify_github_integration()
+    verify_censys()
+    verify_hybrid()
     verify_supabase()
 
 if __name__ == "__main__":

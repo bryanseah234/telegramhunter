@@ -4,6 +4,7 @@
 CREATE TABLE IF NOT EXISTS discovered_credentials (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     bot_token TEXT NOT NULL, -- Will store Encrypted String
+    token_hash TEXT NOT NULL UNIQUE, -- SHA256 hash for deduplication
     chat_id BIGINT,
     source TEXT,
     status TEXT CHECK (status IN ('pending', 'active', 'revoked')) DEFAULT 'pending',

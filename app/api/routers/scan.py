@@ -12,8 +12,8 @@ def trigger_scan(request: ScanRequest):
     task_name = f"scanner.scan_{request.source.lower()}"
     
     # Simple validation of supported sources
-    if request.source.lower() not in ["shodan", "fofa"]:
-        raise HTTPException(status_code=400, detail="Unsupported source. Use 'shodan' or 'fofa'.")
+    if request.source.lower() not in ["shodan", "fofa", "github", "censys", "hybrid"]:
+        raise HTTPException(status_code=400, detail="Unsupported source. Use 'shodan', 'fofa', 'github', 'censys', or 'hybrid'.")
 
     try:
         # Send task
