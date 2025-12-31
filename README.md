@@ -1,123 +1,115 @@
-# Matkap  
-Matkap - hunt down malicious Telegram bots  
+# Telegram Hunter
 
+**Telegram Hunter** is an automated, self-hosted system for harvesting, validating, and monitoring exposed Telegram bot tokens. It is built as a microservices architecture using **FastAPI**, **Celery**, **Redis**, and **Supabase**.
 
-## Disclaimer (Legal & Ethical Use)
-Matkap is intended for educational and research purposes only. This tool is designed to help cybersecurity professionals analyze and understand Telegram bot interactions, particularly those that may pose security risks.
+## 🚀 Features
 
-🔹 By using Matkap, you agree to the following terms:
+- **Automated Scanning**: periodically scans OSINT sources (Shodan, FOFA) for exposed tokens.
+- **Deep Scraping**: Logs in as the compromised bot (via Telethon) and scrapes chat history.
+- **Exfiltration**: Saves messages, credentials, and metadata to a secure PostgreSQL database.
+- **Real-time Monitoring**: Broadcasts finding summaries to your own private Telegram group.
+- **Encryption**: All discovered tokens are encrypted at rest using Fernet (symmetric encryption).
+- **Oracle Cloud Ready**: Optimized for ARM architectures (e.g., Oracle Always Free Tier).
 
-You must not use this tool for illegal activities or unauthorized access.
-You assume full responsibility for any actions performed with this tool.
-The developers and contributors are not liable for any misuse, damages, or legal consequences arising from the use of Matkap.
-Ensure you comply with Telegram's API Terms of Service and all applicable laws in your jurisdiction.
-📌 If you do not agree with these terms, you should not use this tool.
+## 🛠 Tech Stack
 
+- **Core**: Python 3.11 (AsyncIO)
+- **API**: FastAPI
+- **Workers**: Celery + Redis
+- **Database**: Supabase (PostgreSQL)
+- **Libs**: Telethon (MTProto), Python-Telegram-Bot, Pydantic
 
-## 📌 Features
- 
-- **FOFA & URLScan Integration** – Searches for leaked Bot Tokens / Chat IDs in websites
-- **export logs** - export hunt logs
-  
-  
+## 📋 Prerequisites
 
+1. **Oracle Cloud VM** (Ubuntu 22.04 recommended, ARM compatible).
+2. **Docker & Docker Compose**.
+3. **Supabase Project**: For the database.
+4. **Telegram API Keys**:
+    - `API_ID` & `API_HASH` (from [my.telegram.org](https://my.telegram.org)).
+    - **Monitoring Bot Token** (from [@BotFather](https://t.me/BotFather)).
+    - **Group ID**: The chat ID (or username) where you want alerts sent.
 
+## ⚙️ Installation & Setup
 
-
-https://github.com/user-attachments/assets/44599ccd-4b99-461b-9967-913908882771
-
-
-
-![image](https://github.com/user-attachments/assets/3b89f9c9-a7a5-48c4-b27d-ef2fc4d128dd)
-
-
-
-
-
-## 🛠 Installation
-
-### 🔹 Prerequisites
-Before running **Matkap**, ensure you have the following:
-
-- **Python 3.7+** installed on your system.
-- **Pip** to install packages.
-- An account on [my.telegram.org/apps](https://my.telegram.org/apps) to get your **Telegram API** credentials (`api_id`, `api_hash`, `phone_number`).
-- **(Optional)** [FOFA Account](https://fofa.info/) & [URLScan Account](https://urlscan.io/) if you want scanning functionality:
-  - **FOFA_EMAIL**, **FOFA_KEY** for FOFA
-  - **URLSCAN_API_KEY** for URLScan
-
-### 🔹 Telegram API Credentials (Using a `.env` File)
-
-1. **Visit** [my.telegram.org/apps](https://my.telegram.org/apps) and log in with your phone number.  
-2. **Create a new application** and note the following:
-   - **api_id**
-   - **api_hash**
-   - **phone_number** (the Telegram account you want to use).
-3. In your project folder, create a **`.env`** file and add:
-   ```dotenv
-   TELEGRAM_API_ID=123456
-   TELEGRAM_API_HASH=your_api_hash
-   TELEGRAM_PHONE=+900000000000
-
-   # (Optional) For FOFA & URLScan:
-   FOFA_EMAIL=your_fofa_email
-   FOFA_KEY=your_fofa_key
-   URLSCAN_API_KEY=your_urlscan_api_key
-
-
-
-
+### 1. Clone the Repository
 
 ```bash
-# Clone the repository
->>git clone https://github.com/0x6rss/matkap.git
-
-# Navigate into the project folder
->>cd matkap
-
-# Create and fill out your .env file 
-# with TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE 
-# (and FOFA_EMAIL, FOFA_KEY, URLSCAN_API_KEY if you plan to use them)
-
-# Install dependencies
->>pip install -r requirements.txt
-
-# Run Matkap
->>python matkap.py
+git clone https://github.com/bryanseah234/telegramhunter.git
+cd telegramhunter
 ```
 
-## Usage
-When you run the code for the first time, Telegram will send you a login code. You need to enter this code into the terminal where you ran the script.
-![image](https://github.com/user-attachments/assets/a4791bb2-2389-4fa9-bcab-b1fea962de4f)
+### 2. Environment Configuration
 
+Copy the example file and fill in your keys:
 
-1. **Start Attack**  
-   - Enter the malicious bot token (e.g., `bot12345678:ABC...`) and chat id.
+```bash
+cp .env.example .env
+nano .env
+```
 
-2. **Forward All Messages**  
-   - Forward older messages by iterating through message IDs.  
-   - You can **Stop** or **Resume** forwarding at any time.
+* **Essential**: `SUPABASE_URL`, `SUPABASE_KEY`, `ENCRYPTION_KEY`, `MONITOR_BOT_TOKEN`, `MONITOR_GROUP_ID`.
+- **Scraping**: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`.
+- **Scanning**: `SHODAN_KEY`, `FOFA_KEY`, etc.
 
-3. **Hunt With FOFA**  
-   - Searches for exposed Bot Tokens / Chat IDs on sites indexed by FOFA (`body="api.telegram.org"`).  
-   - Results appear in the **Process Log**.
+**Generating an Encryption Key:**
+You can generate a valid Fernet key with this Python 1-liner:
 
-4. **Hunt With URLScan**  
-   - Similarly hunts for exposed tokens / chat IDs referencing `domain:api.telegram.org` using **URLScan**.  
-   - Also logs them in the **Process Log**.
+```bash
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
-5. **Export captured messages**  
-   - captured Telegram messages are instantly saved to the "captured_messages" directory
+### 3. Database Initialization
 
+1. Log in to your Supabase Dashboard.
+2. Go to the **SQL Editor**.
+3. Copy the contents of `init.sql` and run it. This creates the `discovered_credentials` and `exfiltrated_messages` tables.
 
+### 4. Deploy (Oracle Cloud / Docker)
 
+Run the stack in detached mode:
 
+```bash
+docker-compose up -d --build
+```
 
+* **Note**: The Dockerfile uses `python:3.11-slim-bookworm` which is fully compatible with Oracle Cloud ARM instances (Ampere).
 
+## 🖥 Usage
 
+### Monitor API
 
+Check the status of the system:
 
+```bash
+curl http://localhost:8000/monitor/stats
+```
 
+### Trigger a Scan Manually
 
+```bash
+curl -X POST http://localhost:8000/scan/trigger \
+  -H "Content-Type: application/json" \
+  -d '{"source": "shodan", "query": "product:Telegram"}'
+```
 
+### Logs
 
+Tail the worker logs to see scanning/scraping in action:
+
+```bash
+docker-compose logs -f worker
+```
+
+## ☁️ Oracle Cloud Specifics
+
+- **Firewall**: Ensure you allow Ingress traffic on port `8000` (if you want public API access) and `22` (SSH) in your Oracle Cloud Subnet Security List.
+- **IPTables**: Oracle Ubuntu images usually have strict iptables. You might need to flush them or explicitly allow ports:
+
+    ```bash
+    sudo iptables -F
+    sudo netfilter-persistent save
+    ```
+
+## 🛡 Security Note
+
+This tool is for **educational and defensive research purposes only**. Only use this on systems you own or have explicit permission to test.
