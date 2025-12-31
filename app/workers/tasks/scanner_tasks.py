@@ -156,7 +156,7 @@ def scan_github(query: str = None):
     return result_msg
 
 @app.task(name="scanner.scan_censys")
-def scan_censys(query: str = "\"api.telegram.org\""):
+def scan_censys(query: str = "api.telegram.org"):
     print(f"Starting Censys scan: {query}")
     _send_log_sync(f"🔍 [Censys] Starting scan with query: `{query}`")
     try:
