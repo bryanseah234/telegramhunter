@@ -30,16 +30,14 @@ def trigger_scan(request: ScanRequest):
 @router.get("/trigger-dev/{source}")
 def trigger_scan_dev(source: str, request: Request):
     """
-    Dev-friendly GET endpoint to trigger standard scans from browser address bar.
-    Only enabled in Development mode AND from Localhost.
+    Dev-friendly GET endpoint.
+    DISABLED by user request. Use manual script or POST (if authenticated) during dev.
     """
-    if settings.ENV == "production":
-        raise HTTPException(status_code=403, detail="Dev endpoints disabled in production.")
+    raise HTTPException(status_code=403, detail="GET triggering is disabled. Use 'run_local_scan.bat' or authenticated POST.")
     
-    # Strict Host Check
-    host = request.headers.get("host", "").split(":")[0]
-    if host not in ["localhost", "127.0.0.1"]:
-        raise HTTPException(status_code=403, detail="Dev endpoints only accessible from localhost.")
+    # Previous Logic (Preserved for reference but unreachable):
+    # if settings.ENV == "production": ...
+    # if host not in ["localhost", "127.0.0.1"]: ...
         
     source = source.lower()
     default_queries = {

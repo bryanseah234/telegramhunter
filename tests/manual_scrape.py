@@ -39,12 +39,21 @@ def save_manifest(results, source_name: str, verbose=True):
                 "meta": item.get("meta", {})
             }
             
-            # Upsert
-            res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).select("id").execute()
+            # Upsert without .select() chain first
+            res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).execute()
             
             if res.data:
                 print(f"  🎯 [NEW] Saved Credential ID: {res.data[0]['id']}")
                 saved_count += 1
+            else:
+                # If ignore_duplicates=True and it existed, data might be empty.
+                # We need to fetch the ID to be sure (though this script only counts new ones, 
+                # strictly speaking we don't need the ID if we aren't using it immediately below).
+                # But for correctness, let's just log it.
+                # If you need the ID for enrichment downstream in this script (which we don't currently),
+                # you would query it here.
+                # saved_count += 0
+                pass
         except Exception as e:
             if verbose: print(f"  ❌ Save Error: {e}")
             pass
@@ -84,8 +93,11 @@ async def run_scanners():
     # 2. Shodan
     print("\n🌎 [Shodan] Starting Scan...")
     try:
-        query = "product:Telegram"
+        # User requested scanning for api.telegram.org in body.
+        # "http.html" searches the full HTML response in Shodan's index.
+        query = "http.html:\"api.telegram.org\""
         print(f"  > Query: {query}")
+        print("  > Note: Active verification enabled for hits (checking for tokens in live body)")
         results = shodan.search(query)
         count = save_manifest(results, "shodan")
         print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
