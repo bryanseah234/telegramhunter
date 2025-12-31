@@ -96,8 +96,7 @@ async def run_scanners():
         "http.html:\"api.telegram.org\"",
         "http.html:\"bot_token\"", 
         "http.title:\"Telegram Bot\"",
-        "http.title:\"Telegram Login\"",
-        "product:\"Telegram\""
+        "http.title:\"Telegram Login\""
     ]
     
     for q in shodan_queries:
@@ -113,8 +112,10 @@ async def run_scanners():
     # 3. Censys
     print("\n🔍 [Censys] Starting Scan...")
     try:
-        query = "services.port: 443 and services.http.response.body: \"api.telegram.org\""
+        # User requested simplified query + active verification
+        query = "\"api.telegram.org\""
         print(f"  > Query: {query}")
+        print("  > Note: Active verification enabled (scanning ports 80/443)")
         results = censys.search(query)
         count = save_manifest(results, "censys")
         print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")

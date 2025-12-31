@@ -74,8 +74,7 @@ def scan_shodan(query: str = None):
         "http.html:\"api.telegram.org\"",
         "http.html:\"bot_token\"", 
         "http.title:\"Telegram Bot\"",
-        "http.title:\"Telegram Login\"",
-        "product:\"Telegram\""
+        "http.title:\"Telegram Login\""
     ]
     
     queries = [query] if query else default_queries
@@ -157,7 +156,7 @@ def scan_github(query: str = None):
     return result_msg
 
 @app.task(name="scanner.scan_censys")
-def scan_censys(query: str = "services.port: 443 and services.http.response.body: \"api.telegram.org\""):
+def scan_censys(query: str = "\"api.telegram.org\""):
     print(f"Starting Censys scan: {query}")
     _send_log_sync(f"🔍 [Censys] Starting scan with query: `{query}`")
     try:
