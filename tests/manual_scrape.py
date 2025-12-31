@@ -83,7 +83,7 @@ async def run_scanners():
     print("\n🔍 [Censys] Starting Scan...")
     try:
         # User requested simplified query + active verification
-        query = "\"api.telegram.org\""
+        query = "api.telegram.org"
         print(f"  > Query: {query}")
         print("  > Note: Active verification enabled (scanning ports 80/443)")
         results = censys.search(query)
