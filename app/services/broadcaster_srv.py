@@ -66,4 +66,17 @@ class BroadcasterService:
         except TelegramError as e:
             print(f"Failed to send message: {e}")
 
+    async def send_log(self, message: str):
+        """
+        Sends a log message to the General topic of the monitor group.
+        """
+        try:
+            # Sending without message_thread_id usually targets the General topic in forum groups
+            await self.bot.send_message(
+                chat_id=settings.MONITOR_GROUP_ID,
+                text=f"🤖 [System Log]\n{message}"
+            )
+        except Exception as e:
+            print(f"Failed to send log: {e}")
+
 broadcaster_service = BroadcasterService()
