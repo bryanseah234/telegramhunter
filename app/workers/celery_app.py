@@ -55,8 +55,8 @@ app.conf.update(
             "task": "scanner.scan_shodan",
             "schedule": 1800.0, # Every 30 minutes
         },
-        "scan-censys-30min": {
-            "task": "scanner.scan_censys",
+        "scan-urlscan-30min": {
+            "task": "scanner.scan_urlscan",
             "schedule": 1800.0, # Every 30 minutes
         },
         "system-heartbeat-30min": {
