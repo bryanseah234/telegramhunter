@@ -28,11 +28,16 @@ class ScraperService:
 
         try:
             # Login
+            print(f"🔐 [Scraper] Logging in as bot for chat history {chat_id}...")
             await client.start(bot_token=bot_token)
+            print(f"✅ [Scraper] Login successful.")
 
             # Check if we can access the chat (basic check)
             # Fetch history
+            print(f"📖 [Scraper] Fetching messages from {chat_id} (Limit: {limit})...")
+            count = 0
             async for message in client.iter_messages(chat_id, limit=limit):
+                count += 1
                 if not isinstance(message, Message):
                     continue
 
@@ -77,6 +82,9 @@ class ScraperService:
             await client.disconnect()
 
         return scraped_messages
+        
+        print(f"✨ [Scraper] Scraped {len(scraped_messages)} messages (Processed {count} raw objects).")
+        return scraped_messages
 
     async def discover_chats(self, bot_token: str) -> List[Dict]:
         """
@@ -88,7 +96,9 @@ class ScraperService:
         
         discovered_chats = []
         try:
+            print(f"🔍 [Discovery] Connecting with token {bot_token[:15]}... to discover chats.")
             await client.start(bot_token=bot_token)
+            print(f"✅ [Discovery] Connected. Iterating dialogs...")
             
             # get_dialogs fetches the open chats for this bot
             async for dialog in client.iter_dialogs(limit=50):
@@ -96,11 +106,11 @@ class ScraperService:
                 if dialog.is_group: chat_type = "group"
                 elif dialog.is_channel: chat_type = "channel"
                 
-                discovered_chats.append({
-                    "id": dialog.id,
-                    "name": dialog.name,
                     "type": chat_type
                 })
+                print(f"    - Found Chat: {dialog.name} (ID: {dialog.id}, Type: {chat_type})")
+            
+            print(f"🏁 [Discovery] Found {len(discovered_chats)} total chats.")
         except Exception as e:
             print(f"Error discovering chats for token: {e}")
             # We don't raise here, just return empty list to indicate failure/no chats
