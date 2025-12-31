@@ -298,12 +298,104 @@ class FofaService:
             return []
 
 class UrlScanService:
+    """
+    URLScan.io API - Search for pages containing api.telegram.org
+    Free tier: 1000 searches/day, 100 results/search
+    """
     def __init__(self):
         self.api_key = settings.URLSCAN_KEY
-        self.base_url = "https://urlscan.io/api/v1/search/"
+        self.search_url = "https://urlscan.io/api/v1/search/"
         
     def search(self, query: str) -> List[Dict[str, Any]]:
-        return []
+        if not self.api_key:
+            print("    [URLScan] No API key found")
+            return []
+            
+        try:
+            headers = {
+                'API-Key': self.api_key,
+                'Content-Type': 'application/json'
+            }
+            
+            # URLScan query format: search in page content
+            # Query format: page.domain:X OR page.url:*X* OR filename:X
+            api_query = f'page.body:"{query}" OR page.url:*{query}*'
+            
+            params = {
+                'q': api_query,
+                'size': 100
+            }
+            
+            print(f"    [URLScan] Searching: {api_query[:50]}...")
+            
+            res = requests.get(self.search_url, headers=headers, params=params, timeout=15)
+            
+            if res.status_code == 401:
+                print(f"    ❌ [URLScan] 401 Unauthorized - Check API key")
+                return []
+            elif res.status_code == 429:
+                print(f"    ❌ [URLScan] Rate limit exceeded")
+                return []
+            
+            res.raise_for_status()
+            data = res.json()
+            
+            results_list = data.get('results', [])
+            print(f"    [URLScan] Found {len(results_list)} hits. Deep scanning...")
+            
+            # Sort by scan time (most recent first) and limit
+            from datetime import datetime, timedelta
+            two_hours_ago = datetime.utcnow() - timedelta(hours=2)
+            
+            results_list = sorted(results_list, key=lambda x: x.get('task', {}).get('time', ''), reverse=True)
+            
+            # Filter to recent or max 200
+            recent_results = []
+            for r in results_list:
+                try:
+                    ts = r.get('task', {}).get('time', '')
+                    if ts:
+                        scan_time = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
+                        if scan_time >= two_hours_ago:
+                            recent_results.append(r)
+                except:
+                    pass
+            
+            if len(recent_results) > len(results_list[:200]):
+                results_list = recent_results
+            else:
+                results_list = results_list[:200]
+            
+            results = []
+            
+            for item in results_list:
+                page_url = item.get('page', {}).get('url', '')
+                if not page_url:
+                    continue
+                
+                # Deep scan the URL for tokens
+                try:
+                    tokens = _perform_active_deep_scan(page_url)
+                    for t in tokens:
+                        if _is_valid_token(t):
+                            results.append({
+                                "token": t,
+                                "meta": {
+                                    "source": "urlscan",
+                                    "url": page_url,
+                                    "domain": item.get('page', {}).get('domain'),
+                                    "scan_id": item.get('_id')
+                                }
+                            })
+                except Exception:
+                    continue
+            
+            print(f"    [URLScan] Deep scan complete. {len(results)} valid tokens found.")
+            return results
+            
+        except Exception as e:
+            print(f"URLScan Error: {e}")
+            return []
 
 class GithubService:
     def __init__(self):
@@ -357,9 +449,10 @@ class GithubService:
 
 class CensysService:
     def __init__(self):
-        # Censys now uses a single API token (Personal Access Token)
-        self.api_token = settings.CENSYS_ID  # Token stored in CENSYS_ID
-        self.base_url = "https://search.censys.io/api/v2/hosts/search"
+        # Censys Platform API uses Personal Access Token (PAT)
+        self.api_token = settings.CENSYS_ID
+        # New Platform API endpoint (replaces search.censys.io)
+        self.base_url = "https://api.platform.censys.io/v3/global-data/hosts/search"
 
     def search(self, query: str) -> List[Dict[str, Any]]:
         if not self.api_token:
@@ -367,14 +460,14 @@ class CensysService:
             return []
 
         try:
-            # Token-based auth via header (new Censys API)
+            # Platform API uses Bearer token auth
             headers = {
                 'Authorization': f'Bearer {self.api_token}',
-                'Accept': 'application/json'
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
             }
             
             # Censys API requires field-specific queries
-            # For finding "api.telegram.org" in HTTP responses/headers:
             api_query = (
                 f'services.http.response.html_title: "{query}" OR '
                 f'services.http.response.body: "{query}" OR '
@@ -382,10 +475,24 @@ class CensysService:
                 f'web.endpoints.http.headers.value: "{query}"'
             )
             
-            print(f"    [Censys] API Query: {api_query[:80]}...")
+            print(f"    [Censys] Platform API Query: {api_query[:60]}...")
             
-            params = {'q': api_query, 'per_page': 100} 
-            res = requests.get(self.base_url, headers=headers, params=params, timeout=15)
+            # Platform API uses POST with JSON body
+            payload = {
+                'q': api_query,
+                'per_page': 100
+            }
+            
+            res = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
+            
+            if res.status_code == 401:
+                print(f"    ❌ [Censys] 401 Unauthorized - Check API token permissions")
+                return []
+            elif res.status_code == 403:
+                print(f"    ❌ [Censys] 403 Forbidden - Free accounts may not have search access")
+                print(f"    ℹ️  Try upgrading to Starter tier for full search API access")
+                return []
+            
             res.raise_for_status()
             data = res.json()
             hits = data.get('result', {}).get('hits', [])
