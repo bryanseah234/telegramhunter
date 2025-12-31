@@ -260,3 +260,17 @@ async def _broadcast_logic():
             continue
             
     return f"Broadcasted {sent_count} messages."
+
+@app.task(name="flow.system_heartbeat")
+def system_heartbeat():
+    """
+    Periodic ping to confirm system uptime.
+    """
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    msg = "💓 **System Heartbeat**: Worker is active and scanning."
+    loop.run_until_complete(broadcaster_service.send_log(msg))
+    return "Heartbeat sent."
