@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # OSINT API Keys
     SHODAN_KEY: Optional[str] = None
+    FOFA_EMAIL: Optional[str] = None
     FOFA_KEY: Optional[str] = None
     URLSCAN_KEY: Optional[str] = None
     GITHUB_TOKEN: Optional[str] = None
