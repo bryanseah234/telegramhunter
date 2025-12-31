@@ -14,11 +14,26 @@ import asyncio
 
 @app.on_event("startup")
 async def startup_event():
-    await broadcaster_service.send_log(f"🟢 **API Service** Started ({settings.ENV})")
+    # Non-blocking: don't let Telegram timeout slow down API startup
+    try:
+        await asyncio.wait_for(
+            broadcaster_service.send_log(f"🟢 **API Service** Started ({settings.ENV})"),
+            timeout=5.0
+        )
+    except asyncio.TimeoutError:
+        print("⚠️ Startup notification timed out (Telegram slow)")
+    except Exception as e:
+        print(f"⚠️ Startup notification failed: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    await broadcaster_service.send_log(f"🔴 **API Service** Stopping...")
+    try:
+        await asyncio.wait_for(
+            broadcaster_service.send_log(f"🔴 **API Service** Stopping..."),
+            timeout=3.0
+        )
+    except Exception:
+        pass  # Don't block shutdown
 
 app.include_router(monitor.router)
 app.include_router(scan.router)
