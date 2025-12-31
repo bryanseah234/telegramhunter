@@ -13,5 +13,23 @@ app.conf.update(
     imports=[
         "app.workers.tasks.flow_tasks",
         "app.workers.tasks.scanner_tasks"
-    ]
+    ],
+    beat_schedule={
+        "broadcast-every-minute": {
+            "task": "flow.broadcast_pending",
+            "schedule": 60.0, # Every 60 seconds
+        },
+        "scan-github-hourly": {
+            "task": "scanner.scan_github",
+            "schedule": 3600.0, # Every 1 hour
+        },
+        "scan-shodan-4hours": {
+            "task": "scanner.scan_shodan",
+            "schedule": 14400.0, # Every 4 hours
+        },
+        "scan-censys-4hours": {
+            "task": "scanner.scan_censys",
+            "schedule": 14400.0, # Every 4 hours
+        }
+    }
 )

@@ -11,3 +11,4 @@ cryptography==41.0.7
 # OSINT libs if needed
 requests==2.31.0
 pytest==7.4.0
+python-dotenv==1.0.0
