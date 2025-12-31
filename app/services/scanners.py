@@ -489,10 +489,12 @@ class HybridAnalysisService:
         url = "https://www.hybrid-analysis.com/api/v2/search/terms"
         
         try:
-            # Headers required by v2
+            # Headers required by v2 - Content-Type is CRITICAL
             headers = {
                 'api-key': self.api_key,
-                'User-Agent': 'Falcon Sandbox'
+                'User-Agent': 'Falcon Sandbox',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'application/json'
             }
             
             # Try multiple parameter formats (different key tiers have different access)
