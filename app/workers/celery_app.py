@@ -11,9 +11,14 @@ def _send_signal_log(msg):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(broadcaster_service.send_log(msg))
-    except Exception:
-        pass
+        # 5 second timeout to prevent blocking
+        loop.run_until_complete(
+            asyncio.wait_for(broadcaster_service.send_log(msg), timeout=5.0)
+        )
+    except asyncio.TimeoutError:
+        print(f"⚠️ Signal notification timed out: {msg[:30]}...")
+    except Exception as e:
+        print(f"⚠️ Signal notification failed: {e}")
     finally:
         loop.close()
 
