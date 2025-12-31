@@ -104,7 +104,10 @@ def scan_github(query: str = None):
         "path:config api.telegram.org",
         "\"TELEGRAM_BOT_TOKEN\"",
         "language:python \"ApplicationBuilder\" \"token\"",
-        "language:python \"Telethon\" \"api_id\""
+        "language:python \"Telethon\" \"api_id\"",
+        "filename:config.json \"bot_token\"",
+        "filename:settings.py \"TELEGRAM_TOKEN\"",
+        "\"api.telegram.org\""  # Catch-all for any file containing the API URL
     ]
     
     queries = [query] if query else default_dorks
@@ -154,12 +157,16 @@ def scan_hybrid(query: str = "api.telegram.org"):
     Note: Token extraction is difficult without downloading samples.
     """
     print(f"Starting HybridAnalysis scan: {query}")
+    _send_log_sync(f"🦠 [HybridAnalysis] Starting scan for malware reports: `{query}`")
     try:
         results = hybrid.search(query)
         # Note: Current logic skips saving if token is "MANUAL_REVIEW_REQUIRED"
         # This is strictly for demonstration of integration. 
         # Real extraction requires downloading the report JSON details.
         saved = _save_credentials(results, "hybrid_analysis")
-        return f"HybridAnalysis scan finished. (Logged {len(results)} reports - check logic for extraction)"
+        msg = f"HybridAnalysis scan finished. (Logged {len(results)} reports)"
+        _send_log_sync(f"🏁 [HybridAnalysis] Finished. Processed {len(results)} reports.")
+        return msg
     except Exception as e:
+        _send_log_sync(f"❌ [HybridAnalysis] Failed: {e}")
         return f"HybridAnalysis scan failed: {e}"

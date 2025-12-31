@@ -3,6 +3,28 @@ from app.core.config import settings
 
 app = Celery("telegram_hunter", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
 
+from celery.signals import worker_ready, worker_shutdown
+from app.services.broadcaster_srv import broadcaster_service
+import asyncio
+
+def _send_signal_log(msg):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(broadcaster_service.send_log(msg))
+    except Exception:
+        pass
+    finally:
+        loop.close()
+
+@worker_ready.connect
+def on_worker_ready(**kwargs):
+    _send_signal_log("🟢 **Worker Service** Started (Celery)")
+
+@worker_shutdown.connect
+def on_worker_shutdown(**kwargs):
+    _send_signal_log("🔴 **Worker Service** Stopping...")
+
 app.conf.update(
     task_serializer="json",
     accept_content=["json"],
