@@ -7,7 +7,7 @@ class BroadcasterService:
         self.bot_token = settings.MONITOR_BOT_TOKEN
         self.bot = Bot(token=self.bot_token)
 
-    async def ensure_topic(self, group_id: int, topic_name: str) -> int:
+    async def ensure_topic(self, group_id: int | str, topic_name: str) -> int:
         """
         Ensures a forum topic exists for the credential.
         In a real scenario, we might need to store topic IDs in DB to avoid re-creation errors 
@@ -27,7 +27,7 @@ class BroadcasterService:
             # Fallback to main thread or handled by caller
             raise e
 
-    async def send_message(self, group_id: int, thread_id: int, msg_obj: dict):
+    async def send_message(self, group_id: int | str, thread_id: int, msg_obj: dict):
         """
         Sends a message to the specific topic.
         """
