@@ -9,54 +9,88 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.core.database import db
 from app.core.security import security
-from app.services.scanners import ShodanService, FofaService, GithubService, CensysService, HybridAnalysisService
+from app.services.scanners import ShodanService, GithubService, UrlScanService, HybridAnalysisService
 from app.services.broadcaster_srv import broadcaster_service
 
-# Initialize Services
+# Initialize Services (Fofa/Censys REMOVED - API access issues)
 shodan = ShodanService()
-fofa = FofaService()
 github = GithubService()
-censys = CensysService()
+urlscan = UrlScanService()
 hybrid = HybridAnalysisService()
 
 def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 async def save_manifest(results, source_name: str, verbose=True):
+    """
+    STRICT validation: Only saves if BOTH token is valid AND chat_id can be discovered.
+    """
+    from app.services.scraper_srv import scraper_service
+    from app.services.scanners import _is_valid_token
+    
     saved_count = 0
     for item in results:
         token = item.get("token")
         if not token or token == "MANUAL_REVIEW_REQUIRED":
             continue
         
+        # Step 0: Validate token format FIRST
+        if not _is_valid_token(token):
+            if verbose:
+                print(f"  ❌ Invalid token format (Fernet/hash?): {token[:20]}...")
+            continue
+        
         token_hash = _calculate_hash(token)
+        
         try:
+            # Step 1: Check if already exists
+            existing = db.table("discovered_credentials").select("id").eq("token_hash", token_hash).execute()
+            if existing.data:
+                if verbose:
+                    print(f"  ⏭️ Token already exists, skipping.")
+                continue
+            
+            # Step 2: STRICT - Validate by discovering chats (REQUIRED)
+            if verbose:
+                print(f"  🔍 Validating token {token[:15]}... via Telegram API")
+            chats = await scraper_service.discover_chats(token)
+            
+            if not chats:
+                if verbose:
+                    print(f"  ❌ No chats found - NOT SAVING (strict mode)")
+                await broadcaster_service.send_log(f"⚠️ [{source_name}] Token found but no chats - not saved.")
+                continue
+            
+            # Step 3: Token valid AND has chats - save with chat_id
+            first_chat = chats[0]
             encrypted_token = security.encrypt(token)
+            
             data = {
                 "bot_token": encrypted_token,
                 "token_hash": token_hash,
+                "chat_id": first_chat.get("id"),  # REQUIRED!
                 "source": source_name,
-                "status": "pending",
-                "meta": item.get("meta", {})
+                "status": "active",  # Already validated!
+                "meta": {
+                    **item.get("meta", {}),
+                    "chat_name": first_chat.get("name"),
+                    "chat_type": first_chat.get("type"),
+                    "total_chats": len(chats)
+                }
             }
             
-            # Upsert without .select() chain first
-            res = db.table("discovered_credentials").upsert(data, on_conflict="token_hash", ignore_duplicates=True).execute()
+            res = db.table("discovered_credentials").insert(data).execute()
             
             if res.data:
-                print(f"  🎯 [NEW] Saved Credential ID: {res.data[0]['id']}")
-                # Log to Telegram
-                await broadcaster_service.send_log(f"🎯 [{source_name}] New Credential Found! ID: `{res.data[0]['id']}`")
+                if verbose:
+                    print(f"  🎯 [NEW] Verified Credential ID: {res.data[0]['id']}")
+                await broadcaster_service.send_log(
+                    f"🎯 [{source_name}] **Verified Credential!**\n"
+                    f"ID: `{res.data[0]['id']}`\n"
+                    f"Chat: {first_chat.get('name')} ({first_chat.get('type')})"
+                )
                 saved_count += 1
-            else:
-                # If ignore_duplicates=True and it existed, data might be empty.
-                # We need to fetch the ID to be sure (though this script only counts new ones, 
-                # strictly speaking we don't need the ID if we aren't using it immediately below).
-                # But for correctness, let's just log it.
-                # If you need the ID for enrichment downstream in this script (which we don't currently),
-                # you would query it here.
-                # saved_count += 0
-                pass
+                
         except Exception as e:
             if verbose: print(f"  ❌ Save Error: {e}")
             pass
@@ -79,18 +113,17 @@ async def run_scanners():
     except Exception as e:
         print(f"  ❌ HybridAnalysis Error: {e}")
 
-    # 2. Censys
-    print("\n🔍 [Censys] Starting Scan...")
+    # 2. URLScan (replaces Censys)
+    print("\n🔍 [URLScan] Starting Scan...")
     try:
-        # User requested simplified query + active verification
         query = "api.telegram.org"
         print(f"  > Query: {query}")
-        print("  > Note: Active verification enabled (scanning ports 80/443)")
-        results = censys.search(query)
-        count = await save_manifest(results, "censys")
+        print("  > Note: Deep scanning each result URL for tokens")
+        results = urlscan.search(query)
+        count = await save_manifest(results, "urlscan")
         print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
     except Exception as e:
-        print(f"  ❌ Censys Error: {e}")
+        print(f"  ❌ URLScan Error: {e}")
 
     # 3. GitHub
     print("\n🐱 [GitHub] Starting Scan...")
