@@ -63,6 +63,10 @@ def _is_valid_token(token_str: str) -> bool:
         if not all(c in allowed for c in secret):
             return False
         
+        # Telegram secrets ALWAYS start with "AA"
+        if not secret.startswith("AA"):
+            return False
+        
         # Suspicious: Pure hex (likely hash collision)
         is_pure_hex = all(c in "0123456789abcdefABCDEF" for c in secret)
         if is_pure_hex:
@@ -157,7 +161,11 @@ class ShodanService:
             results = []
             
             matches = data.get('matches', [])
-            print(f"    [Shodan] Processing {len(matches)} raw hits...")
+            
+            # Sort by timestamp (most recent first) and limit to 15
+            matches = sorted(matches, key=lambda x: x.get('timestamp', ''), reverse=True)[:15]
+            
+            print(f"    [Shodan] Processing {len(matches)} latest hits...")
 
             for match in matches:
                 ip = match.get('ip_str')
@@ -289,7 +297,7 @@ class GithubService:
                 'Authorization': f'token {self.token}',
                 'Accept': 'application/vnd.github.v3+json'
             }
-            params = {'q': query, 'per_page': 30}
+            params = {'q': query, 'per_page': 15, 'sort': 'indexed', 'order': 'desc'}  # Latest 15
             
             res = requests.get(self.base_url, headers=headers, params=params, timeout=15)
             if res.status_code == 403 or res.status_code == 429:
@@ -336,14 +344,30 @@ class CensysService:
 
         try:
             auth = (self.api_id, self.api_secret)
-            params = {'q': query, 'per_page': 50} 
+            
+            # Censys API requires field-specific queries
+            # For finding "api.telegram.org" in HTTP responses/headers:
+            api_query = (
+                f'services.http.response.html_title: "{query}" OR '
+                f'services.http.response.body: "{query}" OR '
+                f'services.http.response.headers.value: "{query}" OR '
+                f'web.endpoints.http.headers.value: "{query}"'
+            )
+            
+            print(f"    [Censys] API Query: {api_query[:80]}...")
+            
+            params = {'q': api_query, 'per_page': 50} 
             res = requests.get(self.base_url, auth=auth, params=params, timeout=15)
             res.raise_for_status()
             data = res.json()
             hits = data.get('result', {}).get('hits', [])
+            
+            # Sort by last_updated and limit to 15 latest
+            hits = sorted(hits, key=lambda x: x.get('last_updated_at', ''), reverse=True)[:15]
+            
             results = []
             
-            print(f"    [Censys] Processing {len(hits)} raw hits...")
+            print(f"    [Censys] Processing {len(hits)} latest hits...")
             
             for hit in hits:
                 ip = hit.get('ip')
@@ -421,15 +445,14 @@ class HybridAnalysisService:
                 'User-Agent': 'Falcon Sandbox'
             }
             
-            # Param 'term' is correct for this endpoint (form-data)
-            data = {'term': query}
+            # Use 'domain' key for searching domain/URL references
+            data = {'domain': query}
             
-            print(f"    [HybridAnalysis] Querying: {url} with term='{query}'...")
+            print(f"    [HybridAnalysis] POST to {url} with domain='{query}'...")
             
             res = requests.post(url, headers=headers, data=data, timeout=30)
             
             if res.status_code == 404:
-                # If it fails, we can't do much but log it.
                 print(f"    ❌ [HybridAnalysis] Endpoint 404. Key permissions or API change?")
                 return []
                 
@@ -439,21 +462,35 @@ class HybridAnalysisService:
             results = []
             
             # Response 'result' is list of matches
-            # Each match has 'sha256', 'verdict', 'submit_name', and potentially URL info
             hits = response_json.get('result', [])
             
-            print(f"    [HybridAnalysis] Found {len(hits)} hits. Deep scanning any URLs...")
+            print(f"    [HybridAnalysis] Found {len(hits)} hits. Filtering executables...")
 
             # URL regex to extract potential targets from metadata
             url_pattern = re.compile(r'https?://[^\s"\'<>]+')
-
+            
+            # Executable file type keywords to filter out
+            exe_keywords = ['exe', 'pe32', 'pe64', 'executable', 'dll', 'msi', 'bat', 'cmd', 'scr']
+            
+            filtered_count = 0
             for item in hits:
+                # Skip executable files
+                file_type = str(item.get('type', '')).lower()
+                file_type_str = str(item.get('type_short', '')).lower()
+                submit_name = str(item.get('submit_name', '')).lower()
+                
+                is_executable = any(kw in file_type or kw in file_type_str or submit_name.endswith(f'.{kw}') 
+                                   for kw in exe_keywords)
+                
+                if is_executable:
+                    filtered_count += 1
+                    continue
+                
                 # Try to find URLs in context, submit_name, or other fields
                 context = str(item.get('context', '')) + " " + str(item.get('submit_name', ''))
                 found_urls = url_pattern.findall(context)
                 
                 # Also check for domain names that might be IPs
-                # If HA gives us "host" or "domains" fields, use those too
                 hosts = item.get('hosts', []) or []
                 domains = item.get('domains', []) or []
                 
@@ -486,6 +523,8 @@ class HybridAnalysisService:
                 # If no URLs found, still log the report for manual review (but don't save)
                 if not targets:
                     print(f"      [HA] No scannable URLs in report {item.get('sha256', 'unknown')[:12]}...")
+
+            print(f"    [HybridAnalysis] Filtered out {filtered_count} executables.")
 
             return results
 
