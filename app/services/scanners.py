@@ -30,26 +30,44 @@ SPOOFED_HEADERS = {
 def _is_valid_token(token_str: str) -> bool:
     """
     Strict validation to filter out Fernet strings, hashes, and junk.
+    Valid Telegram token: 123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (digits:35chars)
     """
     try:
-        if ":" not in token_str: return False
-        parts = token_str.split(":", 1)
-        if len(parts) != 2: return False
+        # Explicit Fernet rejection (starts with gAAAA)
+        if token_str.startswith("gAAAA"):
+            return False
         
+        # Must contain exactly one colon
+        if ":" not in token_str:
+            return False
+        if token_str.count(":") != 1:
+            return False
+            
+        parts = token_str.split(":", 1)
         bot_id, secret = parts
         
-        # ID check
-        if not bot_id.isdigit(): return False
-        if len(bot_id) > 1 and bot_id.startswith("0"): return False # Leading zero invalid
+        # Bot ID must be 8-10 digits, no leading zeros
+        if not bot_id.isdigit():
+            return False
+        if len(bot_id) < 8 or len(bot_id) > 10:
+            return False
+        if len(bot_id) > 1 and bot_id.startswith("0"):
+            return False
         
-        # Secret check
-        if len(secret) != 35: return False
+        # Secret must be exactly 35 characters
+        if len(secret) != 35:
+            return False
         
-        # Heuristic check for hex dumps
-        is_hex = all(c in "0123456789abcdefABCDEF" for c in secret)
-        if is_hex:
-            # Pass for now, but suspicious
-            pass
+        # Secret must only contain allowed chars (base64-ish)
+        allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+        if not all(c in allowed for c in secret):
+            return False
+        
+        # Suspicious: Pure hex (likely hash collision)
+        is_pure_hex = all(c in "0123456789abcdefABCDEF" for c in secret)
+        if is_pure_hex:
+            # Real tokens have mixed case and special chars, pure hex is suspicious
+            return False
 
         return True
     except Exception:
