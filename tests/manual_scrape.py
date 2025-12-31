@@ -10,6 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.core.database import db
 from app.core.security import security
 from app.services.scanners import ShodanService, FofaService, GithubService, CensysService, HybridAnalysisService
+from app.services.broadcaster_srv import broadcaster_service
 
 # Initialize Services
 shodan = ShodanService()
@@ -21,7 +22,7 @@ hybrid = HybridAnalysisService()
 def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
-def save_manifest(results, source_name: str, verbose=True):
+async def save_manifest(results, source_name: str, verbose=True):
     saved_count = 0
     for item in results:
         token = item.get("token")
@@ -44,6 +45,8 @@ def save_manifest(results, source_name: str, verbose=True):
             
             if res.data:
                 print(f"  🎯 [NEW] Saved Credential ID: {res.data[0]['id']}")
+                # Log to Telegram
+                await broadcaster_service.send_log(f"🎯 [{source_name}] New Credential Found! ID: `{res.data[0]['id']}`")
                 saved_count += 1
             else:
                 # If ignore_duplicates=True and it existed, data might be empty.
@@ -61,6 +64,7 @@ def save_manifest(results, source_name: str, verbose=True):
 
 async def run_scanners():
     print("🚀 Starting LOCAL OSINT Scan (All Sources)...")
+    await broadcaster_service.send_log("🚀 **Manual Scan Started** (Local Script)")
     print("-------------------------------------------------")
 
     # 1. Hybrid Analysis
@@ -70,7 +74,7 @@ async def run_scanners():
         print(f"  > Query: {query}")
         results = hybrid.search(query)
         # HA often returns manual review needed, but let's try
-        count = save_manifest(results, "hybrid_analysis")
+        count = await save_manifest(results, "hybrid_analysis")
         print(f"  ✅ Processed {len(results)} reports ({count} tokens saved).")
     except Exception as e:
         print(f"  ❌ HybridAnalysis Error: {e}")
@@ -83,7 +87,7 @@ async def run_scanners():
         print(f"  > Query: {query}")
         print("  > Note: Active verification enabled (scanning ports 80/443)")
         results = censys.search(query)
-        count = save_manifest(results, "censys")
+        count = await save_manifest(results, "censys")
         print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
     except Exception as e:
         print(f"  ❌ Censys Error: {e}")
@@ -101,7 +105,7 @@ async def run_scanners():
         print(f"  > Querying: {q}")
         try:
             results = shodan.search(q)
-            count = save_manifest(results, "shodan")
+            count = await save_manifest(results, "shodan")
             print(f"    ✅ Saved {count} new credentials (from {len(results)} hits).")
             time.sleep(1)
         except Exception as e:
@@ -125,7 +129,7 @@ async def run_scanners():
         print(f"  > Dorking: {dork}")
         try:
             results = github.search(dork)
-            count = save_manifest(results, "github")
+            count = await save_manifest(results, "github")
             total_gh += count
             print(f"    Found {len(results)} matches, {count} new.")
         except Exception as e:
@@ -136,6 +140,7 @@ async def run_scanners():
 
     print("\n-------------------------------------------------")
     print("🏁 Full Scan Complete.")
+    await broadcaster_service.send_log("🏁 **Manual Scan Complete.** Check Monitor Group for details.")
     print("   Check your Railway Worker logs (General Topic) for Enrichment alerts!")
     print("   (The worker will see the new 'pending' rows and enrich them automatically)")
 
