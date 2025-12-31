@@ -6,7 +6,7 @@ supabase==2.3.0
 httpx==0.24.1
 celery==5.3.6
 redis==5.0.1
-python-telegram-bot[job-queue]==20.7
+python-telegram-bot[job-queue]==20.3
 Telethon==1.33.0
 cryptography==41.0.7
 # OSINT libs if needed
