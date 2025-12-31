@@ -9,6 +9,17 @@ app = FastAPI(
     openapi_url=None if settings.ENV == "production" else "/openapi.json"
 )
 
+from app.services.broadcaster_srv import broadcaster_service
+import asyncio
+
+@app.on_event("startup")
+async def startup_event():
+    await broadcaster_service.send_log(f"🟢 **API Service** Started ({settings.ENV})")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await broadcaster_service.send_log(f"🔴 **API Service** Stopping...")
+
 app.include_router(monitor.router)
 app.include_router(scan.router)
 
