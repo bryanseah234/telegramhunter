@@ -35,12 +35,31 @@ class BroadcasterService:
     async def ensure_topic(self, group_id: int | str, topic_name: str) -> int:
         """
         Ensures a forum topic exists for the credential.
+        Checks ALL available topics via UserAgent first to avoid duplicates.
         """
+        # 1. Try to find existing topic via UserAgent (User strict requirement)
+        try:
+            from app.services.user_agent_srv import user_agent
+            existing_id = await user_agent.find_topic_id(group_id, topic_name)
+            if existing_id:
+                return existing_id
+        except Exception as e:
+            print(f"⚠️ Failed to check existing topics via UserAgent: {e}")
+
+        # 2. Create if not found
         try:
             topic = await self._retry_on_flood(
                 self.bot.create_forum_topic, chat_id=group_id, name=topic_name
             )
-            return topic.message_thread_id
+            thread_id = topic.message_thread_id
+            
+            # 3. Lay the ground: Send Topic Name as first message
+            try:
+                await self.send_topic_header(group_id, thread_id, topic_name)
+            except Exception as e:
+                print(f"⚠️ Failed to send header for new topic: {e}")
+                
+            return thread_id
         except TelegramError as e:
             print(f"Error creating topic: {e}")
             raise e
