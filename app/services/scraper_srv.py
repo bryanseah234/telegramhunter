@@ -1,6 +1,6 @@
-import asyncio
 from typing import List, Dict, Optional
 from telethon import TelegramClient
+from telethon.sessions import MemorySession
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
 from app.core.config import settings
 
@@ -244,8 +244,8 @@ class ScraperService:
         Fetches messages by ID batches (GetMessages) instead of listing history (GetHistory).
         Bypasses 'API restricted' error for listing history.
         """
-        session_name = f"session_{hash(bot_token)}"
-        client = TelegramClient(session_name, self.api_id, self.api_hash)
+        # Use MemorySession to avoid creating files
+        client = TelegramClient(MemorySession(), self.api_id, self.api_hash)
         msgs = []
         try:
             await client.start(bot_token=bot_token)
@@ -312,8 +312,8 @@ class ScraperService:
         return msgs
 
     async def _scrape_via_telethon(self, bot_token: str, chat_id: int, limit: int) -> List[Dict]:
-        session_name = f"session_{hash(bot_token)}"
-        client = TelegramClient(session_name, self.api_id, self.api_hash)
+        # Use MemorySession to avoid creating files
+        client = TelegramClient(MemorySession(), self.api_id, self.api_hash)
         msgs = []
         try:
             print(f"🔐 [Scraper] Logging in as bot (Telethon)...")

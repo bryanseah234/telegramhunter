@@ -52,6 +52,11 @@ async def run_manual_worker():
             saved_count = 0
             for msg in messages:
                 msg["credential_id"] = cred_id
+                
+                # Sanitize: Remove keys that are not columns in exfiltrated_messages
+                # The scraper adds 'chat_id' for tracking, but the table relies on credential_id reference
+                msg.pop('chat_id', None) 
+                
                 try:
                     db.table("exfiltrated_messages").insert(msg).execute()
                     saved_count += 1
