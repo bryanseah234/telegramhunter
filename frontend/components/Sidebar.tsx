@@ -4,6 +4,23 @@ import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { LucideTarget } from "lucide-react";
 
+interface Credential {
+    id: string;
+    created_at: string;
+    source: string;
+    meta?: {
+        chat_title?: string;
+        bot_username?: string;
+        bot_id?: string;
+        [key: string]: unknown;
+    };
+}
+
+interface MessageWithCredential {
+    credential_id: string;
+    discovered_credentials: Credential | null;
+}
+
 export default function Sidebar({
     selectedId,
     onSelect,
@@ -11,18 +28,6 @@ export default function Sidebar({
     selectedId: string | null;
     onSelect: (id: string) => void;
 }) {
-    interface Credential {
-        id: string;
-        created_at: string;
-        source: string;
-        meta?: {
-            chat_title?: string;
-            bot_username?: string;
-            bot_id?: string;
-            [key: string]: unknown;
-        };
-    }
-
     const [credentials, setCredentials] = useState<Credential[]>([]);
     // Use ref to access current credentials in realtime callback without causing re-subscription
     const credentialsRef = useRef<Credential[]>([]);
@@ -55,7 +60,7 @@ export default function Sidebar({
                 // Group by credential_id to get unique credentials
                 const uniqueCredMap = new Map<string, Credential>();
 
-                data.forEach((msg: any) => {
+                data.forEach((msg: MessageWithCredential) => {
                     const credId = msg.credential_id;
                     const credInfo = msg.discovered_credentials;
 
@@ -91,7 +96,7 @@ export default function Sidebar({
                     table: 'exfiltrated_messages',
                 },
                 async (payload) => {
-                    const newMsg = payload.new as any;
+                    const newMsg = payload.new as { credential_id: string };
                     const credId = newMsg.credential_id;
 
                     // Use ref to check current credentials without causing re-subscription

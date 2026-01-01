@@ -38,10 +38,17 @@ app.conf.update(
     enable_utc=True,
     broker_connection_retry_on_startup=True,
     
-    # Redis Memory Optimization (Auto-Cleanup)
-    result_expires=3600, # Results expire after 1 hour
+    # ============================================
+    # Railway Free Tier Optimization (512MB RAM)
+    # ============================================
+    result_expires=1800, # Results expire after 30 min (was 1 hour)
     task_ignore_result=True, # Do not store results by default (saves space)
-    worker_max_memory_per_child=100000, # Restart worker if memory exceeds ~100MB
+    worker_max_memory_per_child=80000, # Restart worker if memory exceeds ~80MB (was 100MB)
+    worker_prefetch_multiplier=1, # Fetch 1 task at a time (prevents memory spikes)
+    task_acks_late=True, # Acknowledge after task completes (prevents lost tasks on crash)
+    task_soft_time_limit=300, # 5 min soft limit (raises exception)
+    task_time_limit=360, # 6 min hard limit (kills task)
+    broker_pool_limit=1, # Minimal Redis connections
     
     # Auto-discover tasks in these modules
     imports=[
