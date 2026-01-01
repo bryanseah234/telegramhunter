@@ -113,6 +113,8 @@ async def run_manual_broadcast():
                         # Update DB
                         meta["topic_id"] = thread_id
                         db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id).execute()
+                        # Update Cache so subsequent messages in this batch don't recreate again
+                        cached_topic_ids[cred_id] = thread_id
                         # Retry Send
                         await broadcaster_service.send_message(settings.MONITOR_GROUP_ID, thread_id, msg)
                     else:

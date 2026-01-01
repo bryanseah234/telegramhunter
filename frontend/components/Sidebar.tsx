@@ -20,7 +20,7 @@ export default function Sidebar({
             chat_title?: string;
             bot_username?: string;
             bot_id?: string;
-            [key: string]: any;
+            [key: string]: unknown;
         };
     }
 
