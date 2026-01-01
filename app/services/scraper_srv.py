@@ -1,4 +1,5 @@
 from typing import List, Dict, Optional
+import asyncio
 from telethon import TelegramClient
 from telethon.sessions import MemorySession
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
