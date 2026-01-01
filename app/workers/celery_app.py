@@ -84,23 +84,25 @@ app.conf.update(
         },
         # ============================================
         # STAGGERED SCANS (Every 4 hours)
-        # Staggered by 5 mins to prevent CPU spikes
+        # 20 minutes apart to prevent load spikes
+        # Chain: 00:00 -> 00:20 -> 00:40 -> 01:00
         # ============================================
         "scan-github-4hours": {
             "task": "scanner.scan_github",
-            "schedule": crontab(minute=0, hour="*/4"), # 00:00, 04:00, ...
+            "schedule": crontab(minute=0, hour="*/4"), # 00:00, 04:00...
         },
         "scan-shodan-4hours": {
             "task": "scanner.scan_shodan",
-            "schedule": crontab(minute=5, hour="*/4"), # 00:05, 04:05, ...
+            "schedule": crontab(minute=20, hour="*/4"), # 00:20, 04:20...
         },
         "scan-urlscan-4hours": {
             "task": "scanner.scan_urlscan",
-            "schedule": crontab(minute=10, hour="*/4"), # 00:10, 04:10, ...
+            "schedule": crontab(minute=40, hour="*/4"), # 00:40, 04:40...
         },
         "rescrape-active-4hours": {
             "task": "flow.rescrape_active",
-            "schedule": crontab(minute=15, hour="*/4"), # 00:15, 04:15, ...
+            # Runs at hour 1, 5, 9... (1 hour after the block starts)
+            "schedule": crontab(minute=0, hour="1-23/4"), # 01:00, 05:00...
         }
     }
 )
