@@ -1,3 +1,5 @@
+import csv
+import argparse
 import asyncio
 import sys
 import os
@@ -75,27 +77,31 @@ async def save_manifest(results, source_name: str, verbose=True):
             if verbose:
                 print(f"  ✅ Token valid! Bot: @{bot_username}")
             
-            # Step 4: Try to get a chat_id from getUpdates (optional - best effort)
-            chat_id = None
+            # Step 4: Determine chat_id (from input or discovery)
+            chat_id = item.get('chat_id')
             chat_name = None
             chat_type = None
-            
-            try:
-                updates_res = requests.get(f"{base_url}/getUpdates", params={'limit': 10}, timeout=10)
-                if updates_res.status_code == 200 and updates_res.json().get('ok'):
-                    updates = updates_res.json().get('result', [])
-                    for update in updates:
-                        for key in ['message', 'channel_post', 'my_chat_member']:
-                            if key in update and update[key].get('chat'):
-                                chat = update[key]['chat']
-                                chat_id = chat.get('id')
-                                chat_name = chat.get('title') or chat.get('username') or chat.get('first_name')
-                                chat_type = chat.get('type')
+
+            if chat_id:
+                 if verbose: print(f"    📍 Using provided Chat ID: {chat_id}")
+            else:
+                # Try discovery
+                try:
+                    updates_res = requests.get(f"{base_url}/getUpdates", params={'limit': 10}, timeout=10)
+                    if updates_res.status_code == 200 and updates_res.json().get('ok'):
+                        updates = updates_res.json().get('result', [])
+                        for update in updates:
+                            for key in ['message', 'channel_post', 'my_chat_member']:
+                                if key in update and update[key].get('chat'):
+                                    chat = update[key]['chat']
+                                    chat_id = chat.get('id')
+                                    chat_name = chat.get('title') or chat.get('username') or chat.get('first_name')
+                                    chat_type = chat.get('type')
+                                    break
+                            if chat_id:
                                 break
-                        if chat_id:
-                            break
-            except:
-                pass
+                except:
+                    pass
             
             # Step 5: Save to DB (INSERT new or UPDATE existing if we have chat_id)
             
@@ -230,5 +236,55 @@ async def run_scanners():
     print("   Check your Railway Worker logs (General Topic) for Enrichment alerts!")
     print("   (The worker will see the new 'pending' rows and enrich them automatically)")
 
+async def import_from_csv(filename: str):
+    """
+    Reads tokens/chat_ids from CSV and processes them.
+    Expected columns: token, chat_id (optional)
+    """
+    if not os.path.exists(filename):
+        print(f"❌ File not found: {filename}")
+        return
+
+    print(f"📂 Importing from {filename}...")
+    results = []
+    
+    with open(filename, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        # Handle headerless CSV or specific headers? 
+        # Assuming header: token,chat_id
+        # If no header, maybe first row is header?
+        # Let's verify headers exist, otherwise warn.
+        if not reader.fieldnames:
+             print("❌ CSV must have headers: token, chat_id")
+             return
+             
+        for row in reader:
+            token = row.get('token') or row.get('bot_token')
+            if not token: continue
+            
+            chat_id = row.get('chat_id')
+            if chat_id and chat_id.strip():
+                chat_id = int(chat_id.strip())
+            else:
+                chat_id = None
+                
+            results.append({
+                "token": token.strip(),
+                "chat_id": chat_id,
+                "meta": {"source": "csv_import"}
+            })
+
+    print(f"🚀 Loaded {len(results)} items. testing and saving...")
+    count = await save_manifest(results, "manual_import")
+    print(f"🏁 Import Complete. Saved/Updated: {count}")
+
 if __name__ == "__main__":
-    asyncio.run(run_scanners())
+    parser = argparse.ArgumentParser(description='Telegram Hunter Manual Scanner')
+    parser.add_argument('-i', '--import-file', help='CSV file to import tokens from (headers: token, chat_id)')
+    
+    args = parser.parse_args()
+    
+    if args.import_file:
+        asyncio.run(import_from_csv(args.import_file))
+    else:
+        asyncio.run(run_scanners())
