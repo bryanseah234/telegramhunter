@@ -15,9 +15,17 @@ class Database:
 
     @classmethod
     def get_client(cls) -> Client:
+        """
+        Returns a Supabase client using the SERVICE ROLE KEY.
+        This bypasses Row Level Security (RLS) for backend operations.
+        
+        IMPORTANT: Never expose this client or key to the frontend.
+        Frontend should use SUPABASE_KEY (anon) which respects RLS.
+        """
         if cls._client is None:
-            cls._client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+            cls._client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
         return cls._client
 
-# Global instance accessor
+# Global instance accessor (backend use only - bypasses RLS)
 db = Database.get_client()
+
