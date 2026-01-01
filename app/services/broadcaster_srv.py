@@ -1,5 +1,7 @@
 from telegram import Bot
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter
+import asyncio
+import time
 from app.core.config import settings
 
 class BroadcasterService:
@@ -7,24 +9,40 @@ class BroadcasterService:
         self.bot_token = settings.MONITOR_BOT_TOKEN
         self.bot = Bot(token=self.bot_token)
 
+    async def _retry_on_flood(self, func, *args, **kwargs):
+        """
+        Executes an async function with retry logic for Flood Control (429).
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return await func(*args, **kwargs)
+            except RetryAfter as e:
+                wait_time = e.retry_after + 1  # Add buffer
+                print(f"⚠️ Flood control exceeded. Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            except TelegramError as e:
+                # If it's a generic buffer error (sometimes happens with 429 without RetryAfter type)
+                if "Flood control exceeded" in str(e) or "Too Many Requests" in str(e):
+                     # Parse time or default
+                     print(f"⚠️ Flood control exceeded (Generic). Retrying in 10s... ({e})")
+                     await asyncio.sleep(10)
+                else:
+                    raise e
+        # Final attempt
+        return await func(*args, **kwargs)
+
     async def ensure_topic(self, group_id: int | str, topic_name: str) -> int:
         """
         Ensures a forum topic exists for the credential.
-        In a real scenario, we might need to store topic IDs in DB to avoid re-creation errors 
-        or searching through all topics.
-        For now, we will TRY to create it. If it fails (maybe duplicates?), we might need a workaround.
-        However, the Bot API 'createForumTopic' returns the created topic.
-        If we want to be idempotent, we'd store the topic_id in 'discovered_credentials.meta'.
         """
         try:
-            topic = await self.bot.create_forum_topic(chat_id=group_id, name=topic_name)
+            topic = await self._retry_on_flood(
+                self.bot.create_forum_topic, chat_id=group_id, name=topic_name
+            )
             return topic.message_thread_id
         except TelegramError as e:
-            # If error is "topic already exists" (hard to detect via basic API without error codes),
-            # we might default to 0 (General) or handle it.
-            # BUT: Telegram allows multiple topics with same name.
             print(f"Error creating topic: {e}")
-            # Fallback to main thread or handled by caller
             raise e
 
     async def send_message(self, group_id: int | str, thread_id: int, msg_obj: dict):
@@ -41,28 +59,18 @@ class BroadcasterService:
             caption = caption[:1021] + "..."
 
         try:
-            if media_type == "text":
-                await self.bot.send_message(
-                    chat_id=group_id,
-                    message_thread_id=thread_id,
-                    text=caption
-                )
-            elif media_type == "photo":
-                # If we had the file_id from TELETHON, it is NOT compatible with BOT API.
-                # Telethon file_id != Bot API file_id.
-                # We would normally need to download the file in Scraper and upload here.
-                # Since we didn't implement download, we will purely notify about the photo.
-                await self.bot.send_message(
-                    chat_id=group_id,
-                    message_thread_id=thread_id,
-                    text=f"{caption}\n\n[Photo Media Detected - Not downloaded]"
-                )
-            else:
-                 await self.bot.send_message(
-                    chat_id=group_id,
-                    message_thread_id=thread_id,
-                    text=f"{caption}\n\n[{media_type} Media Detected]"
-                )
+            to_send_text = caption
+            if media_type == "photo":
+                to_send_text = f"{caption}\n\n[Photo Media Detected - Not downloaded]"
+            elif media_type != "text":
+                to_send_text = f"{caption}\n\n[{media_type} Media Detected]"
+
+            await self._retry_on_flood(
+                self.bot.send_message,
+                chat_id=group_id, 
+                message_thread_id=thread_id, 
+                text=to_send_text
+            )
         except TelegramError as e:
             print(f"Failed to send message: {e}")
 
@@ -71,8 +79,8 @@ class BroadcasterService:
         Sends a log message to the General topic of the monitor group.
         """
         try:
-            # Sending without message_thread_id usually targets the General topic in forum groups
-            await self.bot.send_message(
+            await self._retry_on_flood(
+                self.bot.send_message,
                 chat_id=settings.MONITOR_GROUP_ID,
                 text=f"🤖 [System Log]\n{message}"
             )
