@@ -253,7 +253,7 @@ async def _broadcast_logic():
         .select("*, discovered_credentials!inner(meta)")\
         .eq("is_broadcasted", False)\
         .order("telegram_msg_id", desc=False)\
-        .limit(50)\
+        .limit(20)\
         .execute()
     
     messages = response.data
