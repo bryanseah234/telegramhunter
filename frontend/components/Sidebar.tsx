@@ -11,14 +11,31 @@ export default function Sidebar({
     selectedId: string | null;
     onSelect: (id: string) => void;
 }) {
-    const [credentials, setCredentials] = useState<any[]>([]);
+    interface Credential {
+        id: string;
+        created_at: string;
+        bot_token: string;
+        source: string;
+        meta?: {
+            chat_title?: string;
+            bot_username?: string;
+            bot_id?: string;
+            [key: string]: any;
+        };
+    }
+
+    const [credentials, setCredentials] = useState<Credential[]>([]);
 
     useEffect(() => {
         async function fetchCreds() {
             // Fetch all credentials
-            const { data, error } = await supabase
+            const { data } = await supabase
                 .from("discovered_credentials")
-                .select("*")
+                // Use !inner to ensure we ONLY get creds that have at least one message.
+                // We select count for efficiency (requires head:false, count:'exact' usually, but selects work too)
+                // Actually, selecting 'id' is safer for join logic in standard JS client if we don't want the whole object.
+                // However, Supabase PostgREST allows count in select.
+                .select("*, exfiltrated_messages!inner(count)")
                 .order("created_at", { ascending: false });
 
             if (data) setCredentials(data);
@@ -66,7 +83,7 @@ export default function Sidebar({
                             <span className="font-semibold text-slate-800 truncate">
                                 {cred.meta?.bot_username
                                     ? `@${cred.meta.bot_username} / ${cred.meta.bot_id || '?'}`
-                                    : (cred.meta?.chat_title || "Unknown Chat")}
+                                    : (cred.meta?.bot_id ? `@unknown / ${cred.meta.bot_id}` : (cred.meta?.chat_title || "Unknown Chat"))}
                             </span>
                             <span className="text-xs text-slate-400">
                                 {new Date(cred.created_at).toLocaleDateString()}

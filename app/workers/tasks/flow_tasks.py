@@ -257,11 +257,40 @@ async def _broadcast_logic():
 
             if not thread_id:
                 # Determine Topic Name only if we need to create
-                # Priority: Chat Name -> Bot Name -> Cred ID
-                topic_name = meta.get("chat_name") or meta.get("bot_name") or f"Cred-{cred_id[:8]}"
+                # Priority: @username / botid
+                bot_username = meta.get("bot_username")
+                bot_id = meta.get("bot_id")
+                
+                # If we lack bot info (Legacy data), try to fetch and extract it from token
+                if not bot_id:
+                    try:
+                        # Fetch token to extract ID
+                        cred_res = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).single().execute()
+                        if cred_res.data:
+                            decrypted = security.decrypt(cred_res.data["bot_token"])
+                            # Token format: 123456789:ABC...
+                            if ":" in decrypted:
+                                bot_id = decrypted.split(":")[0]
+                                # Save for future
+                                meta["bot_id"] = bot_id
+                    except Exception as e:
+                        print(f"    ⚠️ [Broadcast] Failed to extract bot_id for legacy cred: {e}")
+
+                if bot_username and bot_id:
+                     topic_name = f"@{bot_username} / {bot_id}"
+                elif bot_id:
+                     # We have ID but no username (common for legacy)
+                     topic_name = f"@unknown / {bot_id}"
+                else:
+                     # True fallback if everything fails
+                     topic_name = f"Cred-{cred_id[:8]}"
                 
                 # Ensure Topic
                 thread_id = await broadcaster_service.ensure_topic(group_id, topic_name)
+                
+                # Send Header for new topic created by broadcaster (lazy creation)
+                if thread_id:
+                     await broadcaster_service.send_topic_header(group_id, thread_id, topic_name)
                 
                 # Update DB (Persistent Cache)
                 # We fetch current meta again to avoid overwriting race (optimistic)
