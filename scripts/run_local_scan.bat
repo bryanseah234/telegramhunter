@@ -13,29 +13,29 @@ if %errorlevel% neq 0 (
 )
 
 REM 2. Setup Virtual Environment (if not exists)
-if not exist "venv" (
+if not exist "..\venv" (
     echo [INFO] Creating virtual environment...
-    python -m venv venv
+    python -m venv ..\venv
 )
 
 REM 3. Activate Venv
-call venv\Scripts\activate
+call ..\venv\Scripts\activate
 
 REM 4. Install Dependencies
 echo [INFO] Installing/Updating dependencies...
-pip install -r requirements.txt >nul
+pip install -r ..\requirements.txt >nul
 
 REM 5. Run Scraper Script
 echo.
 echo [INFO] Step 1: Running CSV Import (if exists)...
-if exist "import_tokens.csv" (
-    python tests/manual_scrape.py -i import_tokens.csv
+if exist "..\database\import_tokens.csv" (
+    python ..\tests\manual_scrape.py -i ..\database\import_tokens.csv
 )
 
 echo.
 echo [INFO] Step 2: Running Full Scanners (Shodan -> URLScan -> GitHub)...
 echo.
-python tests/manual_scrape.py
+python ..\tests\manual_scrape.py
 
 echo.
 echo ==================================================

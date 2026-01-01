@@ -14,8 +14,8 @@ if %errorlevel% neq 0 (
 )
 
 REM 2. Activate Venv (if exists)
-if exist "venv" (
-    call venv\Scripts\activate
+if exist "..\venv" (
+    call ..\venv\Scripts\activate
 ) else (
     echo [INFO] No venv found, assuming global python...
 )
@@ -24,7 +24,7 @@ REM 3. Run Worker Script
 echo.
 echo [INFO] Starting Worker...
 echo.
-python tests/manual_worker.py
+python ..\tests\manual_worker.py
 
 echo.
 echo ==================================================
