@@ -12,35 +12,76 @@ from app.services.scraper_srv import scraper_service
 async def run_manual_worker():
     print("🚀 Starting LOCAL MANUAL WORKER (Scraping Active Credentials)...")
     
-    # 1. Fetch Active Credentials
+    # 1. Fetch Active OR Pending Credentials
     try:
-        response = db.table("discovered_credentials").select("*").eq("status", "active").execute()
-        creds = response.data
+        # Supabase client doesn't support OR nicely in one query typically, but we can try neq 'revoked'
+        # Or just two queries.
+        response_active = db.table("discovered_credentials").select("*").eq("status", "active").execute()
+        response_pending = db.table("discovered_credentials").select("*").eq("status", "pending").execute()
+        creds = response_active.data + response_pending.data
     except Exception as e:
         print(f"❌ DB Error: {e}")
         return
 
     if not creds:
-        print("⚠️ No ACTIVE credentials found in DB. Run the scanner first!")
+        print("⚠️ No ACTIVE or PENDING credentials found in DB. Run the scanner first!")
         return
 
-    print(f"📋 Found {len(creds)} active credentials to scrape.")
+    print(f"📋 Found {len(creds)} credentials (Active + Pending) to process.")
     print("-------------------------------------------------")
 
     total_msgs = 0
     
+    from app.core.security import security # Needed for decryption if we do enrichment
+    
     for i, cred in enumerate(creds):
         cred_id = cred['id']
+        # We might need to decrypt if it's not plain text (Scanners usually save plaintext for token, but flow encrypts it)
+        # Actually scanner_tasks saves it as plaintext in 'bot_token' usually? 
+        # Wait, scanner_tasks line 116: "bot_token": token.
+        # But flow_tasks encrypts it? 
+        # Let's assume plaintext first, if it looks encrypted (gAAAA...), try decrypt.
         token = cred['bot_token']
-        chat_id = cred['chat_id']
+        if token.startswith("gAAAA"):
+            try:
+                token = security.decrypt(token)
+            except:
+                print(f"   ❌ Could not decrypt token for {cred_id}, skipping.")
+                continue
+
+        chat_id = cred.get('chat_id')
+        status = cred.get('status')
         bot_name = cred.get('meta', {}).get('bot_username', 'Unknown')
         
-        print(f"\n🔄 [{i+1}/{len(creds)}] Processing Bot: @{bot_name} (ID: {cred_id})")
-        print(f"   Target Chat: {chat_id}")
-
+        print(f"\n🔄 [{i+1}/{len(creds)}] Processing Bot: @{bot_name} (ID: {cred_id}) | Status: {status}")
+        
+        # ENRICHMENT STEP (If pending or no chat_id)
         if not chat_id:
-            print("   ⚠️ No chat_id found for this active credential. Skipping (should be pending?)")
-            continue
+            print("   🔎 Status is Pending/No Chat. Attempting Discovery (Enrichment)...")
+            try:
+                bot_info, chats = await scraper_service.discover_chats(token)
+                if chats:
+                    # Take first chat
+                    first_chat = chats[0]
+                    chat_id = first_chat['id']
+                    chat_name = first_chat['name']
+                    print(f"   ✅ Discovered Chat: {chat_name} ({chat_id})")
+                    
+                    # Update DB
+                    db.table("discovered_credentials").update({
+                        "chat_id": chat_id,
+                        "status": "active",
+                        "meta": {**cred.get('meta', {}), "chat_name": chat_name}
+                    }).eq("id", cred_id).execute()
+                    print("   💾 Updated DB to ACTIVE.")
+                else:
+                    print("   ⚠️ No chats found during discovery. Skipping.")
+                    continue
+            except Exception as e:
+                print(f"   ❌ Discovery failed: {e}")
+                continue
+        
+        print(f"   🎯 Target Chat: {chat_id}")
 
         try:
             # Scrape History
