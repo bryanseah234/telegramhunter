@@ -37,6 +37,12 @@ app.conf.update(
     timezone="UTC",
     enable_utc=True,
     broker_connection_retry_on_startup=True,
+    
+    # Redis Memory Optimization (Auto-Cleanup)
+    result_expires=3600, # Results expire after 1 hour
+    task_ignore_result=True, # Do not store results by default (saves space)
+    worker_max_memory_per_child=100000, # Restart worker if memory exceeds ~100MB
+    
     # Auto-discover tasks in these modules
     imports=[
         "app.workers.tasks.flow_tasks",
