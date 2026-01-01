@@ -28,22 +28,48 @@ export default function Sidebar({
 
     useEffect(() => {
         async function fetchCreds() {
-            // Fetch all credentials
-            const { data } = await supabase
-                .from("discovered_credentials")
-                // Use !inner to ensure we ONLY get creds that have at least one message.
-                // We select count for efficiency (requires head:false, count:'exact' usually, but selects work too)
-                // Actually, selecting 'id' is safer for join logic in standard JS client if we don't want the whole object.
-                // However, Supabase PostgREST allows count in select.
-                .select("*, exfiltrated_messages!inner(count)")
+            // Query exfiltrated_messages and group by credential_id
+            // This gets us unique credentials that have messages
+            const { data, error } = await supabase
+                .from("exfiltrated_messages")
+                .select("credential_id, discovered_credentials(id, created_at, bot_token, source, meta)")
                 .order("created_at", { ascending: false });
 
-            if (data) setCredentials(data);
+            if (error) {
+                console.error("Error fetching messages:", error);
+                return;
+            }
+
+            if (data) {
+                // Group by credential_id to get unique credentials
+                const uniqueCredMap = new Map<string, Credential>();
+
+                data.forEach((msg: any) => {
+                    const credId = msg.credential_id;
+                    const credInfo = msg.discovered_credentials;
+
+                    if (credInfo && !uniqueCredMap.has(credId)) {
+                        uniqueCredMap.set(credId, {
+                            id: credInfo.id,
+                            created_at: credInfo.created_at,
+                            bot_token: credInfo.bot_token,
+                            source: credInfo.source,
+                            meta: credInfo.meta
+                        });
+                    }
+                });
+
+                // Convert map to array and sort by created_at desc
+                const uniqueCreds = Array.from(uniqueCredMap.values())
+                    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+                setCredentials(uniqueCreds);
+            }
         }
 
         fetchCreds();
 
-        // Realtime subscription
+        // Realtime subscription - when new message arrives, check if it's a new credential
         const channel = supabase
             .channel('schema-db-changes')
             .on(
@@ -51,10 +77,27 @@ export default function Sidebar({
                 {
                     event: 'INSERT',
                     schema: 'public',
-                    table: 'discovered_credentials',
+                    table: 'exfiltrated_messages',
                 },
-                (payload) => {
-                    setCredentials((prev) => [payload.new as Credential, ...prev]);
+                async (payload) => {
+                    const newMsg = payload.new as any;
+                    const credId = newMsg.credential_id;
+
+                    // Check if this credential already exists in our list
+                    const exists = credentials.some(c => c.id === credId);
+
+                    if (!exists) {
+                        // Fetch the credential details
+                        const { data: credData } = await supabase
+                            .from("discovered_credentials")
+                            .select("*")
+                            .eq("id", credId)
+                            .single();
+
+                        if (credData) {
+                            setCredentials((prev) => [credData, ...prev]);
+                        }
+                    }
                 }
             )
             .subscribe()
@@ -62,7 +105,7 @@ export default function Sidebar({
         return () => {
             supabase.removeChannel(channel);
         }
-    }, []);
+    }, [credentials]);
 
     return (
         <div className="w-1/3 border-r h-full flex flex-col bg-slate-50 overflow-y-auto">
