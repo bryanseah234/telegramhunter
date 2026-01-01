@@ -62,8 +62,8 @@ app.conf.update(
     worker_max_memory_per_child=80000, 
     worker_prefetch_multiplier=1, 
     task_acks_late=True, 
-    task_soft_time_limit=300, 
-    task_time_limit=360, 
+    task_soft_time_limit=900, # 15 minutes soft limit
+    task_time_limit=1000,     # Hard limit > soft limit
     broker_pool_limit=1, 
     
     # Auto-discover tasks in these modules
@@ -83,26 +83,26 @@ app.conf.update(
             "schedule": crontab(minute="*/30"),
         },
         # ============================================
-        # STAGGERED SCANS (Every 4 hours)
+        # STAGGERED SCANS (Every 8 hours - 3x/day)
         # 20 minutes apart to prevent load spikes
         # Chain: 00:00 -> 00:20 -> 00:40 -> 01:00
         # ============================================
-        "scan-github-4hours": {
+        "scan-github-8hours": {
             "task": "scanner.scan_github",
-            "schedule": crontab(minute=0, hour="*/4"), # 00:00, 04:00...
+            "schedule": crontab(minute=0, hour="*/8"), # 00:00, 08:00, 16:00
         },
-        "scan-shodan-4hours": {
+        "scan-shodan-8hours": {
             "task": "scanner.scan_shodan",
-            "schedule": crontab(minute=20, hour="*/4"), # 00:20, 04:20...
+            "schedule": crontab(minute=20, hour="*/8"), # 00:20...
         },
-        "scan-urlscan-4hours": {
+        "scan-urlscan-8hours": {
             "task": "scanner.scan_urlscan",
-            "schedule": crontab(minute=40, hour="*/4"), # 00:40, 04:40...
+            "schedule": crontab(minute=40, hour="*/8"), # 00:40...
         },
-        "rescrape-active-4hours": {
+        "rescrape-active-8hours": {
             "task": "flow.rescrape_active",
-            # Runs at hour 1, 5, 9... (1 hour after the block starts)
-            "schedule": crontab(minute=0, hour="1-23/4"), # 01:00, 05:00...
+            # Runs at hour 1, 9, 17... (1 hour after the block starts)
+            "schedule": crontab(minute=0, hour="1-23/8"), 
         }
     }
 )
