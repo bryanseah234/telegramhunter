@@ -10,7 +10,8 @@ class Settings(BaseSettings):
 
     # Database & Redis
     SUPABASE_URL: str
-    SUPABASE_KEY: str
+    SUPABASE_KEY: str  # Anon key (for frontend)
+    SUPABASE_SERVICE_ROLE_KEY: str  # Service role key (bypasses RLS)
     REDIS_URL: str
 
     # Security
