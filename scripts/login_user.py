@@ -22,9 +22,16 @@ def interactive_login():
         print("❌ Error: TELEGRAM_API_ID or TELEGRAM_API_HASH missing in .env")
         return
 
-    session_file = "user_session" # Telethon adds .session automatically
+    # Force session file to project root
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Telethon adds .session automatically, so we provide path without extension for client init
+    # BUT we want to ensure it lands in base_dir.
+    session_name = "user_session"
+    session_file_path = os.path.join(base_dir, session_name)
+    
+    print(f"📍 Session will be saved to: {session_file_path}.session")
 
-    client = TelegramClient(session_file, api_id, api_hash)
+    client = TelegramClient(session_file_path, api_id, api_hash)
 
     async def main():
         await client.start()
