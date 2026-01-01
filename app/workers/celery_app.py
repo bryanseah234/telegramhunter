@@ -47,17 +47,17 @@ app.conf.update(
             "task": "flow.broadcast_pending",
             "schedule": 60.0, # Every 60 seconds
         },
-        "scan-github-30min": {
+        "scan-github-4hours": {
             "task": "scanner.scan_github",
-            "schedule": 1800.0, # Every 30 minutes
+            "schedule": 14400.0, # Every 4 hours
         },
-        "scan-shodan-30min": {
+        "scan-shodan-4hours": {
             "task": "scanner.scan_shodan",
-            "schedule": 1800.0, # Every 30 minutes
+            "schedule": 14400.0, # Every 4 hours
         },
-        "scan-urlscan-30min": {
+        "scan-urlscan-4hours": {
             "task": "scanner.scan_urlscan",
-            "schedule": 1800.0, # Every 30 minutes
+            "schedule": 14400.0, # Every 4 hours
         },
         "system-heartbeat-30min": {
             "task": "flow.system_heartbeat",
