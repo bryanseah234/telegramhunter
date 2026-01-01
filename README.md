@@ -114,20 +114,36 @@ curl http://localhost:8000/scan/trigger-dev/github
 docker-compose logs -f worker-scanner
 ```
 
-## 📁 Project Structure
-
-```
 telegramhunter/
 ├── app/                    # FastAPI backend
 │   ├── api/               # API routes
 │   ├── services/          # Scanner & Scraper services
 │   └── workers/           # Celery tasks
 ├── frontend/              # Next.js dashboard
+│   └── public/            # Static assets (logo.png)
+├── scripts/               # Helper scripts (login, stats, regex)
 ├── tests/                 # Pytest suite
 ├── docker-compose.yml     # Orchestration
 ├── init.sql              # Database schema
 └── .env.example          # Environment template
+
 ```
+
+## ⚙️ Configuration Hints
+
+### Worker Optimization (Critical)
+To prevent crashes and ensure stability on limited RAM:
+*   **Concurrency:** `2` (1 Scan + 1 Broadcast)
+*   **Optimization:** Must use `PYTHONOPTIMIZE=0` to support `pycparser`.
+*   **Command:**
+    ```bash
+    export PYTHONOPTIMIZE=0; celery -A app.workers.celery_app worker -B --loglevel=info --concurrency=2
+    ```
+
+### Scan Schedule
+Scans run **3 times a day** (Every 8 hours) with partial staggering to prevent CPU spikes:
+*   **Times (UTC):** 00:00, 08:00, 16:00
+*   **Timeout:** 15 Minutes per scan type.
 
 ## 🛡 Disclaimer
 
