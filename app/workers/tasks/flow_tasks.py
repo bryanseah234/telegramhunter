@@ -236,8 +236,12 @@ async def _broadcast_logic():
     Uses DB-level atomic claims to prevent duplicates across ALL environments
     (Railway, local Docker, local scripts) since they all share the same Supabase DB.
     """
+
     from datetime import datetime, timezone, timedelta
     from app.core.config import settings
+    # Instantiate locally to avoid Event Loop errors
+    from app.services.broadcaster_srv import BroadcasterService
+    broadcaster = BroadcasterService()
     
     # Claim timeout - if a claim is older than this, consider it stale (worker crashed)
     CLAIM_TIMEOUT_MINUTES = 5
@@ -368,7 +372,7 @@ async def _broadcast_logic():
                      except: pass
 
                 # Ensure Topic
-                thread_id = await broadcaster_service.ensure_topic(group_id, topic_name)
+                thread_id = await broadcaster.ensure_topic(group_id, topic_name)
                 
                 # Header handled automatically
                 
@@ -383,7 +387,7 @@ async def _broadcast_logic():
             # Send Message (with retry for deleted topics)
             send_success = False
             try:
-                await broadcaster_service.send_message(group_id, thread_id, msg)
+                await broadcaster.send_message(group_id, thread_id, msg)
                 send_success = True
             except Exception as e:
                 # Check for topic deletion/not found
@@ -391,7 +395,7 @@ async def _broadcast_logic():
                 if "Topic_deleted" in err_str or "message thread not found" in err_str or "TOPIC_DELETED" in err_str:
                     logger.warning(f"    ⚠️ Topic {thread_id} deleted! Recreating '{topic_name}'...")
                     # Recreate
-                    thread_id = await broadcaster_service.ensure_topic(group_id, topic_name)
+                    thread_id = await broadcaster.ensure_topic(group_id, topic_name)
                     # Update DB
                     meta["topic_id"] = thread_id
                     db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id).execute()
@@ -399,7 +403,7 @@ async def _broadcast_logic():
                     cached_topic_ids[cred_id] = thread_id
                     # Retry Send
                     try:
-                        await broadcaster_service.send_message(group_id, thread_id, msg)
+                        await broadcaster.send_message(group_id, thread_id, msg)
                         send_success = True
                     except Exception as retry_e:
                         logger.error(f"    ❌ Failed after topic recreation: {retry_e}")
