@@ -234,7 +234,82 @@ class ShodanService:
         except Exception as e:
             return []
 
-# FofaService REMOVED - API access issues for free tier
+class FofaService:
+    def __init__(self):
+        self.email = settings.FOFA_EMAIL
+        self.key = settings.FOFA_KEY
+        self.base_url = "https://fofa.info/api/v1/search/all"
+
+    def search(self, query: str = 'body="api.telegram.org"') -> List[Dict[str, Any]]:
+        if not (self.email and self.key):
+            print("    [FOFA] Email or Key missing in settings")
+            return []
+
+        try:
+            qbase64 = base64.b64encode(query.encode()).decode()
+            params = {
+                'email': self.email,
+                'key': self.key,
+                'qbase64': qbase64,
+                'fields': 'host,ip,port',
+                'page': 1,
+                'size': 100 # Fetch 100 results per batch
+            }
+            
+            print(f"    [FOFA] Searching for: {query}")
+            res = requests.get(self.base_url, params=params, timeout=15)
+            
+            if res.status_code != 200:
+                print(f"    ❌ [FOFA] API Error: {res.text}")
+                return []
+                
+            data = res.json()
+            if data.get("error"):
+                 print(f"    ❌ [FOFA] API Error: {data.get('errmsg')}")
+                 return []
+                 
+            results_list = data.get("results", [])
+            print(f"    [FOFA] Found {len(results_list)} potential hosts. Deep scanning...")
+            
+            valid_results = []
+            
+            for row in results_list:
+                host = row[0]
+                ip = row[1] if len(row) > 1 else ""
+                port = row[2] if len(row) > 2 else ""
+                
+                # Construct URL
+                if host.startswith("http"):
+                    target_url = host
+                else:
+                    # Guesses based on port
+                    if port == "443": target_url = f"https://{host}"
+                    elif port == "80": target_url = f"http://{host}"
+                    else: target_url = f"http://{host}:{port}"
+                
+                try:
+                    # Deep scan
+                    tokens = _perform_active_deep_scan(target_url)
+                    for t in tokens:
+                        if _is_valid_token(t):
+                            valid_results.append({
+                                "token": t,
+                                "meta": {
+                                    "source": "fofa",
+                                    "ip": ip,
+                                    "port": port,
+                                    "url": target_url
+                                }
+                            })
+                except Exception:
+                    pass
+                    
+            print(f"    [FOFA] Deep scan complete. {len(valid_results)} valid tokens found.")
+            return valid_results
+
+        except Exception as e:
+            print(f"FOFA Error: {e}")
+            return []
 
 class UrlScanService:
     """
@@ -280,56 +355,76 @@ class UrlScanService:
             data = res.json()
             
             results_list = data.get('results', [])
-            print(f"    [URLScan] Found {len(results_list)} hits. Deep scanning...")
+            print(f"    [URLScan] Found {len(results_list)} hits. scanning cache & live...")
             
             # Sort by scan time (most recent first) and limit
             from datetime import datetime, timedelta
             three_hours_ago = datetime.utcnow() - timedelta(hours=3)
             
-            results_list = sorted(results_list, key=lambda x: x.get('task', {}).get('time', ''), reverse=True)
-            
-            # Filter to recent or max 300
-            recent_results = []
+            # Filter and sort
+            valid_items = []
             for r in results_list:
                 try:
                     ts = r.get('task', {}).get('time', '')
                     if ts:
                         scan_time = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
                         if scan_time >= three_hours_ago:
-                            recent_results.append(r)
+                            valid_items.append(r)
                 except:
                     pass
             
-            if len(recent_results) > len(results_list[:300]):
-                results_list = recent_results
-            else:
-                results_list = results_list[:300]
+            # Sort valid items by time desc
+            valid_items = sorted(valid_items, key=lambda x: x.get('task', {}).get('time', ''), reverse=True)
+
+            # Cap at 300
+            if len(valid_items) > 300:
+                valid_items = valid_items[:300]
+            elif not valid_items and len(results_list) > 0:
+                 # Fallback: if no recent results, take top 50 of any time to ensure we get something
+                 valid_items = results_list[:50]
             
             results = []
             
-            for item in results_list:
+            for item in valid_items:
                 page_url = item.get('page', {}).get('url', '')
-                if not page_url:
-                    continue
+                scan_id = item.get('_id')
                 
-                # Deep scan the URL for tokens
-                try:
-                    tokens = _perform_active_deep_scan(page_url)
-                    for t in tokens:
-                        if _is_valid_token(t):
-                            results.append({
-                                "token": t,
-                                "meta": {
-                                    "source": "urlscan",
-                                    "url": page_url,
-                                    "domain": item.get('page', {}).get('domain'),
-                                    "scan_id": item.get('_id')
-                                }
-                            })
-                except Exception:
-                    continue
+                found_tokens = []
+                
+                # 1. Cached DOM Scan (History)
+                if scan_id:
+                    try:
+                         dom_url = f"https://urlscan.io/dom/{scan_id}"
+                         # print(f"      [Cache] Fetching DOM: {dom_url}") 
+                         dom_res = requests.get(dom_url, headers=headers, timeout=5)
+                         if dom_res.status_code == 200:
+                             found_tokens.extend(TOKEN_PATTERN.findall(dom_res.text))
+                    except Exception:
+                        pass
+
+                # 2. Live Deep Scan (Verification)
+                if page_url:
+                    try:
+                        live_tokens = _perform_active_deep_scan(page_url)
+                        found_tokens.extend(live_tokens)
+                    except Exception:
+                        pass
+                
+                # Process found tokens
+                for t in set(found_tokens):
+                    if _is_valid_token(t):
+                        results.append({
+                            "token": t,
+                            "meta": {
+                                "source": "urlscan",
+                                "url": page_url,
+                                "domain": item.get('page', {}).get('domain'),
+                                "scan_id": scan_id,
+                                "type": "cached_or_live"
+                            }
+                        })
             
-            print(f"    [URLScan] Deep scan complete. {len(results)} valid tokens found.")
+            print(f"    [URLScan] Scan complete. {len(results)} valid tokens found.")
             return results
             
         except Exception as e:
