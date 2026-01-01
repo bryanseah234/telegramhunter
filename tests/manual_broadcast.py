@@ -124,8 +124,8 @@ async def run_manual_broadcast():
                 
                 print(f"   📤 Sent msg {msg['id']} -> Topic: {topic_name}")
                 
-                # Rate limit
-                await asyncio.sleep(2.0) 
+                # Rate limit (increased to 3s to be safer)
+                await asyncio.sleep(3.0) 
             except Exception as e:
                 print(f"   ❌ Error sending msg {msg['id']}: {e}")
                 
