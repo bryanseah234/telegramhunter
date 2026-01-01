@@ -1,5 +1,19 @@
 from celery import Celery
 from app.core.config import settings
+import logging
+import sys
+
+# ==============================================
+# WORKER LOGGING CONFIGURATION
+# ==============================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+    force=True
+)
+logger = logging.getLogger(__name__)
 
 app = Celery("telegram_hunter", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
 

