@@ -24,7 +24,10 @@ class Settings(BaseSettings):
     TELEGRAM_API_ID: int
     TELEGRAM_API_HASH: str
 
-    # OSINT API Keys
+    # User Agent Session (Base64 encoded for Railway)
+    USER_SESSION_STRING: Optional[str] = None
+    
+    # OSINT KeysAPI Keys
     SHODAN_KEY: Optional[str] = None
     FOFA_EMAIL: Optional[str] = None
     FOFA_KEY: Optional[str] = None
