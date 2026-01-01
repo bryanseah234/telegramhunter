@@ -55,9 +55,12 @@ async def run_manual_worker():
                 try:
                     db.table("exfiltrated_messages").insert(msg).execute()
                     saved_count += 1
-                except Exception:
-                    # Ignore unique constraint errors (duplicates)
-                    pass
+                except Exception as e:
+                    # Ignore unique constraint errors (duplicates), but print others!
+                    if "duplicate key" in str(e) or "unique constraint" in str(e):
+                        pass
+                    else:
+                        print(f"      ❌ Insert Failed for Msg {msg.get('telegram_msg_id')}: {e}")
             
             print(f"   💾 Saved {saved_count} NEW messages to DB.")
             total_msgs += saved_count

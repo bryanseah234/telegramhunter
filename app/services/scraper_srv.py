@@ -53,6 +53,43 @@ class ScraperService:
         except Exception as e:
             print(f"    [Scraper] Bot API fallback failed: {e}")
 
+        # KICKSTART: If bot is dormant (Anchor 0), we must wake it up to get an ID.
+        if anchor_id == 0:
+            print("💤 [Scraper] Bot seems dormant (No recent updates). Initiating Kickstart...")
+            try:
+                from app.services.user_agent_srv import user_agent
+                import requests
+                import time
+
+                # 1. Get Username (needed for invite)
+                bot_username = "unknown"
+                me_res = requests.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5).json()
+                if me_res.get("ok"):
+                    bot_username = me_res["result"]["username"]
+                
+                # 2. Invite to Group (Creates a Service Message -> New ID!)
+                dest = settings.MONITOR_GROUP_ID
+                if dest and bot_username != "unknown":
+                    print(f"    ⚡ [Scraper] Kickstarting: Inviting @{bot_username} to monitor group...")
+                    if await user_agent.invite_bot_to_group(bot_username, dest):
+                         print("    ⏳ [Scraper] Invite sent. Waiting for update...")
+                         await asyncio.sleep(2)
+                         
+                         # 3. Re-Poll Updates
+                         retry_msgs = self._scrape_via_bot_api(bot_token)
+                         for m in retry_msgs:
+                             if m['telegram_msg_id'] > anchor_id:
+                                 anchor_id = m['telegram_msg_id']
+                                 # We don't verify chat_id for the service message strictly 
+                                 # because we just want ANY valid ID to start bruteforcing backwards.
+                         
+                         if anchor_id > 0:
+                             print(f"    ✅ [Scraper] Kickstart successful! New Anchor ID: {anchor_id}")
+                         else:
+                             print("    ❌ [Scraper] Kickstart failed (No update received).")
+            except Exception as e:
+                print(f"    ⚠️ [Scraper] Kickstart error: {e}")
+
         # Strategy 3: Blind ID Bruteforce (Telethon GetMessages)
         # If we found an anchor, we can look backwards!
         if anchor_id > 0:
