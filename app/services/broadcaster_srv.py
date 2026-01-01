@@ -73,7 +73,8 @@ class BroadcasterService:
                 text=to_send_text
             )
         except TelegramError as e:
-            print(f"Failed to send message: {e}")
+            # Re-raise to allow caller (flow_tasks) to handle specific errors like Topic_deleted
+            raise e
 
     async def send_log(self, message: str):
         """
