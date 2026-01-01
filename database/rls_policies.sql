@@ -93,7 +93,14 @@ ORDER BY tablename, policyname;
 -- NOTES
 -- ============================================
 -- After running these policies:
--- ✅ Frontend (using anon key) can READ exfiltrated_messages
--- ❌ Frontend (using anon key) CANNOT access discovered_credentials
--- ✅ Backend (using service_role key) can access EVERYTHING (bypasses RLS)
--- ❌ Direct API calls with anon key to credentials table will return 403
+-- ✅ Frontend (using NEXT_PUBLIC_SUPABASE_KEY anon key) can READ exfiltrated_messages
+-- ❌ Frontend (using NEXT_PUBLIC_SUPABASE_KEY anon key) CANNOT SELECT from discovered_credentials
+-- ✅ Backend (using SUPABASE_KEY anon key server-side) can READ/WRITE both tables
+-- ⚠️  Both frontend and backend use anon keys, but backend key is server-side only
+-- 
+-- SECURITY MODEL:
+-- - Frontend anon key: In browser, can only read messages
+-- - Backend anon key: Server-side only (.env), can write to both tables
+-- - The backend anon key is never exposed to the browser
+-- - Both keys have 'anon' role but used in different contexts
+
