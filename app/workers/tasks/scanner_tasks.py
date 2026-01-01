@@ -1,6 +1,6 @@
 from app.workers.celery_app import app
 import asyncio # Ensure asyncio is imported
-from app.services.broadcaster_srv import broadcaster_service
+# from app.services.broadcaster_srv import broadcaster_service # REMOVED Global instance
 from app.services.scanners import ShodanService, GithubService, UrlScanService
 from app.core.security import security
 from app.core.database import db
@@ -100,7 +100,11 @@ async def _save_credentials_async(results, source_name: str):
                 }
                 db.table("discovered_credentials").update(update_data).eq("id", existing_id).execute()
                 print(f"    [Validate] 🔄 UPDATED Credential ID: {existing_id} with chat_id!")
-                await broadcaster_service.send_log(
+                
+                # Local instantiation for logging
+                from app.services.broadcaster_srv import BroadcasterService
+                broadcaster = BroadcasterService()
+                await broadcaster.send_log(
                     f"🔄 [{source_name}] **Updated Token!**\n"
                     f"Bot: @{bot_username}\n"
                     f"ID: `{existing_id}`\n"
@@ -132,7 +136,11 @@ async def _save_credentials_async(results, source_name: str):
                 if res.data:
                     new_id = res.data[0]['id']
                     status_label = "✅ ACTIVE" if chat_id else "⏳ PENDING"
-                    await broadcaster_service.send_log(
+                    
+                    # Local instantiation for logging
+                    from app.services.broadcaster_srv import BroadcasterService
+                    broadcaster = BroadcasterService()
+                    await broadcaster.send_log(
                         f"🎯 [{source_name}] **New Bot Token!**\n"
                         f"Bot: @{bot_username}\n"
                         f"ID: `{new_id}`\n"
@@ -159,7 +167,11 @@ def _send_log_sync(message: str):
     if loop.is_closed():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    loop.run_until_complete(broadcaster_service.send_log(message))
+    
+    # Local instantiation for logging
+    from app.services.broadcaster_srv import BroadcasterService
+    broadcaster = BroadcasterService()
+    loop.run_until_complete(broadcaster.send_log(message))
 
 @app.task(name="scanner.scan_shodan")
 def scan_shodan(query: str = None):
