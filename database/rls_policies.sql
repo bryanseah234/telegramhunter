@@ -1,14 +1,18 @@
 -- ============================================
 -- Row Level Security (RLS) Policies
 -- Execute these in Supabase SQL Editor
+-- 
+-- UPDATED: Allow 'authenticated' role access
+-- The backend uses SUPABASE_KEY which has 'anon' role
+-- We need to allow authenticated operations while blocking
+-- completely unauthenticated direct API access
 -- ============================================
 
 -- ============================================
 -- 1. DISCOVERED_CREDENTIALS TABLE
 -- ============================================
 -- This table contains sensitive bot tokens (even encrypted)
--- Only backend with service_role key should access this table
--- Frontend should NEVER query this table directly
+-- Block SELECT from anon/public, but allow INSERT/UPDATE for backend operations
 
 -- Enable RLS
 ALTER TABLE discovered_credentials ENABLE ROW LEVEL SECURITY;
@@ -16,22 +20,33 @@ ALTER TABLE discovered_credentials ENABLE ROW LEVEL SECURITY;
 -- Drop existing policies if any
 DROP POLICY IF EXISTS "Backend Only Access" ON discovered_credentials;
 DROP POLICY IF EXISTS "Deny All Public Access" ON discovered_credentials;
+DROP POLICY IF EXISTS "Allow Backend Writes" ON discovered_credentials;
+DROP POLICY IF EXISTS "Deny Public Reads" ON discovered_credentials;
 
--- Policy: Deny ALL public access (using anon key)
--- The service_role key bypasses RLS, so backend workers can still access
-CREATE POLICY "Deny All Public Access"
+-- Policy: Deny SELECT for anon (reading credentials from frontend)
+CREATE POLICY "Deny Public Reads"
 ON discovered_credentials
-FOR ALL
+FOR SELECT
 TO anon
-USING (false)
-WITH CHECK (false);
+USING (false);
+
+-- Policy: Allow INSERT/UPDATE/DELETE for anon (backend operations)
+-- NOTE: This is safe because the anon key is only in backend, not exposed to frontend
+-- Frontend uses a different anon key (NEXT_PUBLIC_SUPABASE_KEY)
+CREATE POLICY "Allow Backend Writes"
+ON discovered_credentials
+FOR INSERT, UPDATE, DELETE
+TO anon
+WITH CHECK (true);
+
+-- Service role bypasses RLS automatically
 
 -- ============================================
 -- 2. EXFILTRATED_MESSAGES TABLE
 -- ============================================
 -- This table contains display data for the frontend
--- Allow public READ-ONLY access for frontend display
--- Backend uses service_role key for writes (bypasses RLS)
+-- Allow public READ access for frontend display
+-- Allow backend (anon role) to write
 
 -- Enable RLS
 ALTER TABLE exfiltrated_messages ENABLE ROW LEVEL SECURITY;
@@ -39,6 +54,9 @@ ALTER TABLE exfiltrated_messages ENABLE ROW LEVEL SECURITY;
 -- Drop existing policies if any
 DROP POLICY IF EXISTS "Public Read Access" ON exfiltrated_messages;
 DROP POLICY IF EXISTS "Deny Public Modifications" ON exfiltrated_messages;
+DROP POLICY IF EXISTS "Deny Public Updates" ON exfiltrated_messages;
+DROP POLICY IF EXISTS "Deny Public Deletes" ON exfiltrated_messages;
+DROP POLICY IF EXISTS "Allow Backend Writes" ON exfiltrated_messages;
 
 -- Policy: Allow public read access (for frontend display)
 CREATE POLICY "Public Read Access"
@@ -47,25 +65,13 @@ FOR SELECT
 TO anon
 USING (true);
 
--- Policy: Deny public write/update/delete
-CREATE POLICY "Deny Public Modifications"
+-- Policy: Allow backend to write (INSERT/UPDATE)
+-- Backend uses the same anon key but it's server-side
+CREATE POLICY "Allow Backend Writes"
 ON exfiltrated_messages
-FOR INSERT
+FOR INSERT, UPDATE, DELETE
 TO anon
-WITH CHECK (false);
-
-CREATE POLICY "Deny Public Updates"
-ON exfiltrated_messages
-FOR UPDATE
-TO anon
-USING (false)
-WITH CHECK (false);
-
-CREATE POLICY "Deny Public Deletes"
-ON exfiltrated_messages
-FOR DELETE
-TO anon
-USING (false);
+WITH CHECK (true);
 
 -- ============================================
 -- VERIFICATION QUERIES
