@@ -68,6 +68,10 @@ app.conf.update(
         "system-heartbeat-30min": {
             "task": "flow.system_heartbeat",
             "schedule": 1800.0, # Every 30 minutes
+        },
+        "rescrape-active-4hours": {
+            "task": "flow.rescrape_active",
+            "schedule": 14400.0, # Every 4 hours
         }
     }
 )
