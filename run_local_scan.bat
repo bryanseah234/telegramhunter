@@ -27,7 +27,13 @@ pip install -r requirements.txt >nul
 
 REM 5. Run Scraper Script
 echo.
-echo [INFO] Running Manual Scraper...
+echo [INFO] Step 1: Running CSV Import (if exists)...
+if exist "import_tokens.csv" (
+    python tests/manual_scrape.py -i import_tokens.csv
+)
+
+echo.
+echo [INFO] Step 2: Running Full Scanners (Shodan -> URLScan -> GitHub)...
 echo.
 python tests/manual_scrape.py
 
