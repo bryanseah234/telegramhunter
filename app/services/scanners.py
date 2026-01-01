@@ -244,7 +244,7 @@ class FofaService:
         self.key = settings.FOFA_KEY
         self.base_url = "https://fofa.info/api/v1/search/all"
 
-    def search(self, query: str = 'body="api.telegram.org"') -> List[Dict[str, Any]]:
+    def search(self, query: str = 'body="api.telegram.org/bot"') -> List[Dict[str, Any]]:
         if not (self.email and self.key):
             print("    [FOFA] Email or Key missing in settings")
             return []
