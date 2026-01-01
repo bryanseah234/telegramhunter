@@ -44,6 +44,8 @@ def on_worker_ready(**kwargs):
 def on_worker_shutdown(**kwargs):
     _send_signal_log("🔴 **Worker Service** Stopping...")
 
+from celery.schedules import crontab
+
 app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -55,14 +57,14 @@ app.conf.update(
     # ============================================
     # Railway Free Tier Optimization (512MB RAM)
     # ============================================
-    result_expires=1800, # Results expire after 30 min (was 1 hour)
-    task_ignore_result=True, # Do not store results by default (saves space)
-    worker_max_memory_per_child=80000, # Restart worker if memory exceeds ~80MB (was 100MB)
-    worker_prefetch_multiplier=1, # Fetch 1 task at a time (prevents memory spikes)
-    task_acks_late=True, # Acknowledge after task completes (prevents lost tasks on crash)
-    task_soft_time_limit=300, # 5 min soft limit (raises exception)
-    task_time_limit=360, # 6 min hard limit (kills task)
-    broker_pool_limit=1, # Minimal Redis connections
+    result_expires=1800, 
+    task_ignore_result=True, 
+    worker_max_memory_per_child=80000, 
+    worker_prefetch_multiplier=1, 
+    task_acks_late=True, 
+    task_soft_time_limit=300, 
+    task_time_limit=360, 
+    broker_pool_limit=1, 
     
     # Auto-discover tasks in these modules
     imports=[
@@ -70,29 +72,35 @@ app.conf.update(
         "app.workers.tasks.scanner_tasks"
     ],
     beat_schedule={
+        # Broadcast every minute (Robust: runs at start of every minute)
         "broadcast-every-minute": {
             "task": "flow.broadcast_pending",
-            "schedule": 60.0, # Every 60 seconds
+            "schedule": crontab(minute="*"), 
         },
+        # Heartbeat every 30 minutes (xx:00, xx:30)
+        "system-heartbeat-30min": {
+            "task": "flow.system_heartbeat",
+            "schedule": crontab(minute="*/30"),
+        },
+        # ============================================
+        # STAGGERED SCANS (Every 4 hours)
+        # Staggered by 5 mins to prevent CPU spikes
+        # ============================================
         "scan-github-4hours": {
             "task": "scanner.scan_github",
-            "schedule": 14400.0, # Every 4 hours
+            "schedule": crontab(minute=0, hour="*/4"), # 00:00, 04:00, ...
         },
         "scan-shodan-4hours": {
             "task": "scanner.scan_shodan",
-            "schedule": 14400.0, # Every 4 hours
+            "schedule": crontab(minute=5, hour="*/4"), # 00:05, 04:05, ...
         },
         "scan-urlscan-4hours": {
             "task": "scanner.scan_urlscan",
-            "schedule": 14400.0, # Every 4 hours
-        },
-        "system-heartbeat-30min": {
-            "task": "flow.system_heartbeat",
-            "schedule": 1800.0, # Every 30 minutes
+            "schedule": crontab(minute=10, hour="*/4"), # 00:10, 04:10, ...
         },
         "rescrape-active-4hours": {
             "task": "flow.rescrape_active",
-            "schedule": 14400.0, # Every 4 hours
+            "schedule": crontab(minute=15, hour="*/4"), # 00:15, 04:15, ...
         }
     }
 )
