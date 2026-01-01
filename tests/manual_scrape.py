@@ -11,11 +11,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.core.database import db
 from app.core.security import security
-from app.services.scanners import ShodanService, GithubService, UrlScanService
+from app.services.scanners import ShodanService, GithubService, UrlScanService, FofaService
 from app.services.broadcaster_srv import broadcaster_service
 
 # Initialize Services (Fofa/Censys/HybridAnalysis REMOVED - API access issues)
 shodan = ShodanService()
+fofa = FofaService()
 github = GithubService()
 urlscan = UrlScanService()
 
@@ -209,6 +210,19 @@ async def run_scanners():
             # time.sleep(1) # Slight delay
         except Exception as e:
             print(f"    ❌ Error: {e}")
+
+    # 1.5 FOFA
+    print("\n🦅 [FOFA] Starting Scan...")
+    for q in COMMON_QUERIES:
+        fofa_query = f'body="{q}"'
+        print(f"  > Querying: {fofa_query}")
+        try:
+            results = fofa.search(fofa_query)
+            count = await save_manifest(results, "fofa")
+            print(f"    ✅ Saved {count} new credentials (from {len(results)} hits).")
+            time.sleep(1)
+        except Exception as e:
+            print(f"    ❌ FOFA Error: {e}")
 
     # 2. URLScan
     print("\n🔍 [URLScan] Starting Scan...")
