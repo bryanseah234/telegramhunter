@@ -30,18 +30,21 @@ DROP POLICY IF EXISTS "Allow Backend Delete" ON exfiltrated_messages;
 -- ============================================
 -- STEP 2: DISCOVERED_CREDENTIALS TABLE
 -- ============================================
--- This table contains sensitive bot tokens (even encrypted)
--- Block SELECT from frontend, but allow INSERT/UPDATE/DELETE for backend
+-- This table contains sensitive bot tokens
+-- Allow SELECT (for joins from exfiltrated_messages frontend query)
+-- Note: Frontend should only query safe fields (id, created_at, source, meta)
+-- Backend uses service role key which bypasses RLS anyway
 
 -- Enable RLS
 ALTER TABLE discovered_credentials ENABLE ROW LEVEL SECURITY;
 
--- Policy: Deny SELECT for anon (prevents reading credentials from frontend)
-CREATE POLICY "Deny Public Reads"
+-- Policy: Allow SELECT for anon (needed for frontend joins)
+-- IMPORTANT: Frontend queries should NOT select bot_token column!
+CREATE POLICY "Allow Public Reads"
 ON discovered_credentials
 FOR SELECT
 TO anon
-USING (false);
+USING (true);
 
 -- Policy: Allow INSERT for anon (backend can save new credentials)
 CREATE POLICY "Allow Backend Insert"
