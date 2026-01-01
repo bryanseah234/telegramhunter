@@ -37,7 +37,8 @@ async def check_rls():
 
     if not supabase_anon:
         print("Skipping Anon check due to missing key")
-        return
+        # return
+
 
     print(f"\n--- Checking access with ANON key (mimicking frontend) ---")
     
@@ -64,18 +65,23 @@ async def check_rls():
     # Try the join query from Sidebar
     print("\nChecking the specific JOIN query from Sidebar...")
     
+    # Use whatever client is available to check SHAPE
+    client = supabase_anon if supabase_anon else supabase_service
+    
     try:
-        response = supabase_anon.from_("exfiltrated_messages")\
+        response = client.from_("exfiltrated_messages")\
             .select("credential_id, discovered_credentials(id, created_at, source, meta)")\
             .limit(5)\
             .execute()
             
         print(f"Join query response data length: {len(response.data)}")
         if len(response.data) > 0:
-            # print("First item keys: ", response.data[0].keys())
-            # print("First item discovered_credentials: ", response.data[0].get('discovered_credentials'))
+            print("First item keys: ", response.data[0].keys())
+            val = response.data[0].get('discovered_credentials')
+            print(f"First item discovered_credentials type: {type(val)}")
+            print(f"First item discovered_credentials value: {val}")
             
-            if response.data[0].get('discovered_credentials') is None:
+            if val is None:
                 print("❌ discovered_credentials is NULL -> RLS is likely blocking the join.")
             else:
                 print("✅ discovered_credentials is populated.")
