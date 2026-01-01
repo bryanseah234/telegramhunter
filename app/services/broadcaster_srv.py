@@ -11,8 +11,8 @@ class BroadcasterService:
         # Configure HTTP connection pool to handle concurrent broadcasts
         # Default pool size is 1, which causes timeouts under load
         request = HTTPXRequest(
-            connection_pool_size=16,  # Allow up to 16 concurrent connections
-            pool_timeout=30.0,        # Wait up to 30s for a connection from pool
+            connection_pool_size=100, # Allow up to 100 concurrent connections (Aggressive fix)
+            pool_timeout=60.0,        # Wait up to 60s for a connection from pool
             read_timeout=25.0,        # Read timeout for API responses
             write_timeout=25.0,       # Write timeout for sending data
         )
