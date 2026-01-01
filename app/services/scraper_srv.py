@@ -366,12 +366,32 @@ class ScraperService:
     def _scrape_via_bot_api(self, bot_token: str) -> List[Dict]:
         """
         Fallback: Use requests to hit https://api.telegram.org/bot<token>/getUpdates
+        If webhook is active, delete it first.
         """
         import requests
         print(f"🔄 [Scraper] Attempting Bot API getUpdates fallback...")
         
         base_url = f"https://api.telegram.org/bot{bot_token}"
+        
+        # First attempt
         res = requests.get(f"{base_url}/getUpdates", params={'limit': 100}, timeout=15)
+        
+        # Check for webhook conflict error
+        if res.status_code == 409 or (res.status_code == 200 and not res.json().get('ok') and 'webhook' in res.text.lower()):
+            print(f"    ⚠️ [Scraper] Webhook detected, attempting to delete...")
+            try:
+                # Delete the webhook
+                del_res = requests.post(f"{base_url}/deleteWebhook", timeout=10)
+                if del_res.status_code == 200 and del_res.json().get('ok'):
+                    print(f"    ✅ [Scraper] Webhook deleted successfully!")
+                    # Retry getUpdates after deleting webhook
+                    import time
+                    time.sleep(1)  # Brief pause for Telegram to process
+                    res = requests.get(f"{base_url}/getUpdates", params={'limit': 100}, timeout=15)
+                else:
+                    print(f"    ❌ [Scraper] Failed to delete webhook: {del_res.text}")
+            except Exception as e:
+                print(f"    ❌ [Scraper] Webhook deletion error: {e}")
         
         msgs = []
         if res.status_code == 200 and res.json().get('ok'):
