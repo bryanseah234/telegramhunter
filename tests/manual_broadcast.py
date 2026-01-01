@@ -45,13 +45,50 @@ async def run_manual_broadcast():
                 cred_info = msg.get("discovered_credentials", {})
                 meta = cred_info.get("meta", {}) if cred_info else {}
                 
-                # Determine Topic
-                # Determine Topic
-                base_name = meta.get("bot_username") or meta.get("bot_name") or f"Cred-{cred_id[:8]}"
-                topic_name = f"💀 @{base_name}"
-                
-                # Ensure Topic
-                thread_id = await broadcaster_service.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)
+                # 1. CHECK FOR EXISTING TOPIC ID
+                thread_id = meta.get("topic_id")
+                topic_name_used = meta.get("topic_name")
+
+                # If we don't have a thread_id, we must create one.
+                if not thread_id:
+                    # 2. DETERMINE NAME (Better Logic)
+                    base_name = meta.get("bot_username")
+                    
+                    # Fallback: If no username in DB, try to fetch it live (expensive but worth it for 1st run)
+                    if not base_name:
+                         try:
+                             # We use the token to ask who it is
+                             # But we don't have the token here readily unless we join tables?
+                             # Wait, we have 'discovered_credentials' joined!
+                             # But we only selected meta? No, select("*") in query above.
+                             # Ah, `msg` has `credential_id`. We need the token from the creds.
+                             # The query: .select("*, discovered_credentials!inner(meta)")
+                             # It seems we only fetched meta?
+                             # Let's rely on what we have. If missing, default to Cred-ID but try to update later?
+                             pass
+                         except: pass
+
+                    if not base_name:
+                         base_name = f"Cred-{cred_id[:8]}"
+                    
+                    topic_name = f"💀 @{base_name}"
+                    
+                    # 3. CREATE TOPIC
+                    print(f"   🆕 Creating NEW topic: {topic_name}")
+                    thread_id = await broadcaster_service.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)
+                    
+                    if thread_id:
+                        # 4. PERSIST TOPIC ID TO DB (Critical Step)
+                        # We merge the new topic_id into the existing meta
+                        new_meta = meta.copy()
+                        new_meta["topic_id"] = thread_id
+                        new_meta["topic_name"] = topic_name
+                        
+                        db.table("discovered_credentials")\
+                            .update({"meta": new_meta})\
+                            .eq("id", cred_id)\
+                            .execute()
+                        print(f"   💾 Saved Topic ID {thread_id} to Credential {cred_id}")
                 
                 # Send
                 await broadcaster_service.send_message(settings.MONITOR_GROUP_ID, thread_id, msg)

@@ -87,7 +87,14 @@ class UserAgentService:
             # Resolve entities
             try:
                 bot_entity = await self.client.get_entity(bot_username)
-                group_entity = await self.client.get_entity(int(group_id))
+                
+                # Handle both integer IDs and usernames
+                if str(group_id).lstrip('-').isdigit(): 
+                    target = int(group_id)
+                else:
+                    target = group_id # Assume username string
+                    
+                group_entity = await self.client.get_entity(target)
             except Exception as e:
                 print(f"    ❌ [UserAgent] Could not resolve entities: {e}")
                 return False
