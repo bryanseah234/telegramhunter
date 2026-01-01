@@ -9,7 +9,7 @@ class ScraperService:
         self.api_id = settings.TELEGRAM_API_ID
         self.api_hash = settings.TELEGRAM_API_HASH
 
-    async def scrape_history(self, bot_token: str, chat_id: int, limit: int = 100) -> List[Dict]:
+    async def scrape_history(self, bot_token: str, chat_id: int, limit: int = 3000) -> List[Dict]:
         """
         Logs in as the compromised bot using the token,
         scrapes the chat history for the given chat_id,

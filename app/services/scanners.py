@@ -89,6 +89,9 @@ def _perform_active_deep_scan(target_url: str) -> List[str]:
     found_tokens = []
     
     try:
+        # 0. Check URL string itself for tokens (e.g. leaking in GET params)
+        found_tokens.extend(TOKEN_PATTERN.findall(target_url))
+
         # 1. Fetch Main HTML
         print(f"      [DeepScan] Fetching: {target_url}")
         res = requests.get(target_url, headers=SPOOFED_HEADERS, timeout=10, verify=False)
