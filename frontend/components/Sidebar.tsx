@@ -54,7 +54,7 @@ export default function Sidebar({
                     table: 'discovered_credentials',
                 },
                 (payload) => {
-                    setCredentials((prev) => [payload.new, ...prev]);
+                    setCredentials((prev) => [payload.new as Credential, ...prev]);
                 }
             )
             .subscribe()
