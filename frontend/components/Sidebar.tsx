@@ -18,7 +18,7 @@ interface Credential {
 
 interface MessageWithCredential {
     credential_id: string;
-    discovered_credentials: Credential | null;
+    discovered_credentials: Credential[] | null;
 }
 
 export default function Sidebar({
@@ -62,7 +62,8 @@ export default function Sidebar({
 
                 data.forEach((msg: MessageWithCredential) => {
                     const credId = msg.credential_id;
-                    const credInfo = msg.discovered_credentials;
+                    // Supabase returns joined data as array, get first element
+                    const credInfo = msg.discovered_credentials?.[0];
 
                     if (credInfo && !uniqueCredMap.has(credId)) {
                         uniqueCredMap.set(credId, {
