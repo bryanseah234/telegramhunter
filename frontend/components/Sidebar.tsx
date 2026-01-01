@@ -64,7 +64,9 @@ export default function Sidebar({
                     >
                         <div className="flex justify-between w-full mb-1">
                             <span className="font-semibold text-slate-800 truncate">
-                                {cred.meta?.chat_title || "Unknown Chat"}
+                                {cred.meta?.bot_username
+                                    ? `@${cred.meta.bot_username} / ${cred.meta.bot_id || '?'}`
+                                    : (cred.meta?.chat_title || "Unknown Chat")}
                             </span>
                             <span className="text-xs text-slate-400">
                                 {new Date(cred.created_at).toLocaleDateString()}
