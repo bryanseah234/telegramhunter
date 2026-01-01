@@ -46,7 +46,9 @@ async def run_manual_broadcast():
                 meta = cred_info.get("meta", {}) if cred_info else {}
                 
                 # Determine Topic
-                topic_name = meta.get("bot_username") or meta.get("bot_name") or f"Cred-{cred_id[:8]}"
+                # Determine Topic
+                base_name = meta.get("bot_username") or meta.get("bot_name") or f"Cred-{cred_id[:8]}"
+                topic_name = f"💀 @{base_name}"
                 
                 # Ensure Topic
                 thread_id = await broadcaster_service.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)

