@@ -52,8 +52,9 @@ class BroadcasterService:
         content = msg_obj.get("content", "")
         sender = msg_obj.get("sender_name", "Unknown")
         media_type = msg_obj.get("media_type", "text")
+        msg_id = msg_obj.get("telegram_msg_id", "?")
         
-        caption = f"[From: {sender}]\n{content}"
+        caption = f"[ID: {msg_id}] [From: {sender}]\n{content}"
         # Truncate caption if too long (Telegram limit 1024)
         if len(caption) > 1024:
             caption = caption[:1021] + "..."
@@ -86,5 +87,19 @@ class BroadcasterService:
             )
         except Exception as e:
             print(f"Failed to send log: {e}")
+
+    async def send_topic_header(self, group_id: int | str, thread_id: int, text: str):
+        """
+        Sends a plain text message to the topic (used for headers).
+        """
+        try:
+            await self._retry_on_flood(
+                self.bot.send_message,
+                chat_id=group_id,
+                message_thread_id=thread_id,
+                text=text
+            )
+        except Exception as e:
+            print(f"Failed to send topic header: {e}")
 
 broadcaster_service = BroadcasterService()

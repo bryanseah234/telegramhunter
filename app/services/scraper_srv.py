@@ -401,19 +401,16 @@ class ScraperService:
             
         return msgs
 
-    async def discover_chats(self, bot_token: str) -> List[Dict]:
+    async def discover_chats(self, bot_token: str) -> (Dict, List[Dict]):
         """
         Validates a bot token and discovers chats using Telegram Bot API.
-        
-        Bot tokens CANNOT use Telethon's iter_dialogs (user-only method).
-        Instead, we use:
-        1. getMe - validate token works
-        2. getUpdates - find chats the bot has interacted with
+        Returns: (bot_info, discovered_chats)
         """
         import requests
         
         base_url = f"https://api.telegram.org/bot{bot_token}"
         discovered_chats = []
+        bot_info = {}
         
         try:
             print(f"🔍 [Discovery] Validating token {bot_token[:15]}... via Bot API")
@@ -422,7 +419,7 @@ class ScraperService:
             me_res = requests.get(f"{base_url}/getMe", timeout=10)
             if me_res.status_code != 200 or not me_res.json().get('ok'):
                 print(f"    ❌ Token invalid or revoked")
-                return []
+                return {}, []
             
             bot_info = me_res.json().get('result', {})
             print(f"    ✅ Token valid! Bot: @{bot_info.get('username', 'unknown')}")
@@ -471,6 +468,6 @@ class ScraperService:
         except Exception as e:
             print(f"Error discovering chats: {e}")
             
-        return discovered_chats
+        return bot_info, discovered_chats
 
 scraper_service = ScraperService()
