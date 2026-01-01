@@ -8,15 +8,21 @@ from app.core.config import settings
 class BroadcasterService:
     def __init__(self):
         self.bot_token = settings.MONITOR_BOT_TOKEN
-        # Configure HTTP connection pool to handle concurrent broadcasts
-        # Default pool size is 1, which causes timeouts under load
-        request = HTTPXRequest(
-            connection_pool_size=100, # Allow up to 100 concurrent connections (Aggressive fix)
-            pool_timeout=60.0,        # Wait up to 60s for a connection from pool
-            read_timeout=25.0,        # Read timeout for API responses
-            write_timeout=25.0,       # Write timeout for sending data
-        )
-        self.bot = Bot(token=self.bot_token, request=request)
+        self._bot = None # Lazy initialization
+
+    @property
+    def bot(self):
+        if self._bot is None:
+            # Initialize Bot and HTTPXRequest strictly ON DEMAND
+            # This ensures they are created inside the current Worker process/Event Loop
+            request = HTTPXRequest(
+                connection_pool_size=100, # Allow up to 100 concurrent connections
+                pool_timeout=60.0,        # Wait up to 60s
+                read_timeout=25.0,        
+                write_timeout=25.0,       
+            )
+            self._bot = Bot(token=self.bot_token, request=request)
+        return self._bot
 
     async def _retry_on_flood(self, func, *args, **kwargs):
         """
