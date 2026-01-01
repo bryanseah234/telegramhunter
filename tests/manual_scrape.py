@@ -176,12 +176,12 @@ async def run_scanners():
     # POOLED QUERIES (Greedy Approach)
     # These terms are tried across ALL services
     COMMON_QUERIES = [
-        "api.telegram.org",
+        "api.telegram.org/bot",
         "bot_token",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_TOKEN",
         "Telegram Bot",
-        "Telegram Login"
+        "https://api.telegram.org"
     ]
 
     # 1. Shodan
