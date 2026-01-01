@@ -88,9 +88,7 @@ async def run_manual_broadcast():
                     # Ensure Topic
                     thread_id = await broadcaster_service.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)
                     
-                    # Send Header
-                    if thread_id:
-                         await broadcaster_service.send_topic_header(settings.MONITOR_GROUP_ID, thread_id, topic_name)
+                    # Header is handled by ensure_topic now
                     
                     # Update DB
                     meta["topic_id"] = thread_id

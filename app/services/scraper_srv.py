@@ -175,13 +175,19 @@ class ScraperService:
                 bot_username = me["result"].get("username", "unknown")
         except: pass
 
-        # 1. Create Topic (using Hunter Bot)
-        # We need the MONITOR_BOT_TOKEN to create the topic comfortably, 
-        # but the compromised bot MIGHT be admin? Unlikely. 
-        # We use the configured MONITOR_BOT_TOKEN for admin actions if available.
+        # 1. Get Bot ID for proper naming
+        bot_id = "0"
+        try:
+            me = requests.get(f"{base_url}/getMe", timeout=5).json()
+            if me.get("ok"):
+                bot_username = me["result"].get("username", "unknown")
+                bot_id = str(me["result"].get("id", "0"))
+        except: pass
+
+        # 2. Create Topic (using Hunter Bot) with correct naming convention
         target_thread_id = 0
         if settings.MONITOR_BOT_TOKEN:
-            topic_name = f"💀 @{bot_username}"
+            topic_name = f"@{bot_username} / {bot_id}"
             print(f"    [Scraper] Creating topic '{topic_name}'...")
             target_thread_id = self._create_forum_topic(settings.MONITOR_BOT_TOKEN, to_chat_id, topic_name)
         

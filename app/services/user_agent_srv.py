@@ -133,4 +133,49 @@ class UserAgentService:
         finally:
             await self.stop()
 
+    async def find_topic_id(self, group_id: int | str, topic_name: str) -> int | None:
+        """
+        Searches for a forum topic by name using the User Agent.
+        Returns topic_id if found, else None.
+        """
+        if not await self.start():
+            return None
+            
+        try:
+            # Resolve entity
+            if str(group_id).lstrip('-').isdigit(): 
+                target = int(group_id)
+            else:
+                target = group_id
+                
+            entity = await self.client.get_entity(target)
+            
+            # Use GetForumTopicsRequest with query for efficiency
+            from telethon.tl.functions.channels import GetForumTopicsRequest
+            
+            # Search by name
+            res = await self.client(GetForumTopicsRequest(
+                channel=entity,
+                q=topic_name,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=10 
+            ))
+            
+            if res.topics:
+                for topic in res.topics:
+                    # Strict match
+                    if topic.title == topic_name:
+                        print(f"    🔍 [UserAgent] Found existing topic: {topic.title} ({topic.id})")
+                        return topic.id
+                        
+            return None
+            
+        except Exception as e:
+            print(f"    ⚠️ [UserAgent] Find topic failed: {e}")
+            return None
+        finally:
+            await self.stop()
+
 user_agent = UserAgentService()

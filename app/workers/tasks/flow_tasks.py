@@ -150,9 +150,7 @@ async def _enrich_logic(cred_id: str):
     topic_id = 0
     try:
         topic_id = await broadcaster_service.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)
-        # Send Header Message
-        if topic_id:
-             await broadcaster_service.send_topic_header(settings.MONITOR_GROUP_ID, topic_id, topic_name)
+        # Header handled by ensure_topic automatically
     except Exception as e:
         print(f"    ⚠️ [Enrich] Topic creation/header warning: {e}")
 
@@ -291,9 +289,7 @@ async def _broadcast_logic():
                 # Ensure Topic
                 thread_id = await broadcaster_service.ensure_topic(group_id, topic_name)
                 
-                # Send Header
-                if thread_id:
-                     await broadcaster_service.send_topic_header(group_id, thread_id, topic_name)
+                # Header handled automatically
                 
                 # Update DB
                 meta["topic_id"] = thread_id
@@ -316,6 +312,8 @@ async def _broadcast_logic():
                     # Update DB
                     meta["topic_id"] = thread_id
                     db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id).execute()
+                    # Update Cache so subsequent messages in this batch don't recreate again
+                    cached_topic_ids[cred_id] = thread_id
                     # Retry Send
                     await broadcaster_service.send_message(group_id, thread_id, msg)
                 else:
