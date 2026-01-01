@@ -75,7 +75,7 @@ export default function ChatWindow({ credentialId }: { credentialId: string }) {
                         <span className="text-xs font-bold text-sky-600 mb-0.5">
                             {msg.sender_name || "Unknown"}
                         </span>
-                        <p className="text-sm text-slate-800 whitespace-pre-wrap leading-snug">
+                        <p className="text-sm text-slate-800 whitespace-pre-wrap leading-snug break-all">
                             {msg.content}
                         </p>
                         <span className="text-[10px] text-slate-400 self-end mt-1">
