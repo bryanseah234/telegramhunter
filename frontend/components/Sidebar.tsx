@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { LucideTarget } from "lucide-react";
 
@@ -14,7 +14,6 @@ export default function Sidebar({
     interface Credential {
         id: string;
         created_at: string;
-        bot_token: string;
         source: string;
         meta?: {
             chat_title?: string;
@@ -25,20 +24,32 @@ export default function Sidebar({
     }
 
     const [credentials, setCredentials] = useState<Credential[]>([]);
+    // Use ref to access current credentials in realtime callback without causing re-subscription
+    const credentialsRef = useRef<Credential[]>([]);
+
+    // Keep ref in sync with state
+    useEffect(() => {
+        credentialsRef.current = credentials;
+    }, [credentials]);
 
     useEffect(() => {
         async function fetchCreds() {
+            console.log("[Sidebar] Fetching credentials...");
+
             // Query exfiltrated_messages and group by credential_id
             // This gets us unique credentials that have messages
+            // NOTE: We deliberately exclude bot_token for security
             const { data, error } = await supabase
                 .from("exfiltrated_messages")
-                .select("credential_id, discovered_credentials(id, created_at, bot_token, source, meta)")
+                .select("credential_id, discovered_credentials(id, created_at, source, meta)")
                 .order("created_at", { ascending: false });
 
             if (error) {
-                console.error("Error fetching messages:", error);
+                console.error("[Sidebar] Error fetching messages:", error.message);
                 return;
             }
+
+            console.log(`[Sidebar] Received ${data?.length || 0} message records`);
 
             if (data) {
                 // Group by credential_id to get unique credentials
@@ -52,7 +63,6 @@ export default function Sidebar({
                         uniqueCredMap.set(credId, {
                             id: credInfo.id,
                             created_at: credInfo.created_at,
-                            bot_token: credInfo.bot_token,
                             source: credInfo.source,
                             meta: credInfo.meta
                         });
@@ -63,6 +73,7 @@ export default function Sidebar({
                 const uniqueCreds = Array.from(uniqueCredMap.values())
                     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
+                console.log(`[Sidebar] Found ${uniqueCreds.length} unique bots (sources: ${[...new Set(uniqueCreds.map(c => c.source))].join(', ') || 'none'})`);
                 setCredentials(uniqueCreds);
             }
         }
@@ -83,8 +94,8 @@ export default function Sidebar({
                     const newMsg = payload.new as any;
                     const credId = newMsg.credential_id;
 
-                    // Check if this credential already exists in our list
-                    const exists = credentials.some(c => c.id === credId);
+                    // Use ref to check current credentials without causing re-subscription
+                    const exists = credentialsRef.current.some(c => c.id === credId);
 
                     if (!exists) {
                         // Fetch the credential details
@@ -105,7 +116,7 @@ export default function Sidebar({
         return () => {
             supabase.removeChannel(channel);
         }
-    }, [credentials]);
+    }, []); // ✅ Empty dependency array - runs once on mount
 
     return (
         <div className="w-1/3 border-r h-full flex flex-col bg-slate-50 overflow-y-auto">
@@ -134,7 +145,7 @@ export default function Sidebar({
                         </div>
                         <div className="text-sm text-slate-500 truncate flex items-center gap-1">
                             <span className="bg-slate-200 px-1 py-0.5 rounded text-[10px] uppercase font-mono">{cred.source}</span>
-                            <span className="font-mono text-xs opacity-70 truncate">{cred.bot_token}</span>
+                            <span className="font-mono text-xs opacity-70 truncate">ID: {cred.meta?.bot_id || cred.id.slice(0, 8)}</span>
                         </div>
                     </button>
                 ))}
