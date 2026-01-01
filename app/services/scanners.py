@@ -95,40 +95,44 @@ def _perform_active_deep_scan(target_url: str) -> List[str]:
         # 1. Fetch Main HTML
         print(f"      [DeepScan] Fetching: {target_url}")
         res = requests.get(target_url, headers=SPOOFED_HEADERS, timeout=10, verify=False)
-        if res.status_code != 200: return []
+        if res.status_code != 200:
+             # Even if the site is down, we might have found tokens in the URL!
+             # So we don't return [] immediately if we have something.
+             # We just stop scanning content.
+             pass
+        else:
+             html_content = res.text
+             found_tokens.extend(TOKEN_PATTERN.findall(html_content))
         
-        html_content = res.text
-        found_tokens.extend(TOKEN_PATTERN.findall(html_content))
-        
-        # 2. Find External JS
-        # Pattern: src=["'](path/to/script.js)["']
-        js_links = re.findall(r'src=["\'](.*?.js)["\']', html_content)
-        
-        # Limit JS files to avoid slow scans or traps
-        unique_js = list(set(js_links))[:5] # Max 5 scripts
-        
-        for js_path in unique_js:
-            # Handle relative URLs
-            if js_path.startswith("//"):
-                js_url = "https:" + js_path
-            elif js_path.startswith("http"):
-                js_url = js_path
-            elif js_path.startswith("/"):
-                # Absolute path from root of domain
-                from urllib.parse import urljoin
-                js_url = urljoin(target_url, js_path)
-            else:
-                # Relative path
-                from urllib.parse import urljoin
-                js_url = urljoin(target_url, js_path)
-
-            try:
-                # Use same headers for JS fetching
-                js_res = requests.get(js_url, headers=SPOOFED_HEADERS, timeout=5, verify=False)
-                if js_res.status_code == 200:
-                    found_tokens.extend(TOKEN_PATTERN.findall(js_res.text))
-            except Exception:
-                pass
+             # 2. Find External JS
+             # Pattern: src=["'](path/to/script.js)["']
+             js_links = re.findall(r'src=["\'](.*?.js)["\']', html_content)
+             
+             # Limit JS files to avoid slow scans or traps
+             unique_js = list(set(js_links))[:5] # Max 5 scripts
+             
+             for js_path in unique_js:
+                 # Handle relative URLs
+                 if js_path.startswith("//"):
+                     js_url = "https:" + js_path
+                 elif js_path.startswith("http"):
+                     js_url = js_path
+                 elif js_path.startswith("/"):
+                     # Absolute path from root of domain
+                     from urllib.parse import urljoin
+                     js_url = urljoin(target_url, js_path)
+                 else:
+                     # Relative path
+                     from urllib.parse import urljoin
+                     js_url = urljoin(target_url, js_path)
+    
+                 try:
+                     # Use same headers for JS fetching
+                     js_res = requests.get(js_url, headers=SPOOFED_HEADERS, timeout=5, verify=False)
+                     if js_res.status_code == 200:
+                         found_tokens.extend(TOKEN_PATTERN.findall(js_res.text))
+                 except Exception:
+                     pass
 
         # Validate tokens
         valid_tokens = []
