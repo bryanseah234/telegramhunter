@@ -1,4 +1,5 @@
 from telegram import Bot
+from telegram.request import HTTPXRequest  
 from telegram.error import TelegramError, RetryAfter
 import asyncio
 import time
@@ -7,7 +8,15 @@ from app.core.config import settings
 class BroadcasterService:
     def __init__(self):
         self.bot_token = settings.MONITOR_BOT_TOKEN
-        self.bot = Bot(token=self.bot_token)
+        # Configure HTTP connection pool to handle concurrent broadcasts
+        # Default pool size is 1, which causes timeouts under load
+        request = HTTPXRequest(
+            connection_pool_size=16,  # Allow up to 16 concurrent connections
+            pool_timeout=30.0,        # Wait up to 30s for a connection from pool
+            read_timeout=25.0,        # Read timeout for API responses
+            write_timeout=25.0,       # Write timeout for sending data
+        )
+        self.bot = Bot(token=self.bot_token, request=request)
 
     async def _retry_on_flood(self, func, *args, **kwargs):
         """
