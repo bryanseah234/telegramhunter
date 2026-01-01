@@ -227,22 +227,36 @@ async def _broadcast_logic():
     group_id = settings.MONITOR_GROUP_ID
 
     sent_count = 0
+    # Local cache to avoid DB roundtrips within this batch if multiple messages for same cred
+    cached_topic_ids = {}
+
     for msg in messages:
         try:
             cred_id = msg["credential_id"]
             # Extract meta from the joined discovered_credentials
-            # note: Supabase-py might structure nested data differently depending on version,
-            # assuming 'discovered_credentials' key inside msg based on query.
-            # If join fails, fall back to default.
             cred_info = msg.get("discovered_credentials", {})
             meta = cred_info.get("meta", {}) if cred_info else {}
             
-            # Determine Topic Name
-            # Priority: Meta Name -> Cred ID
-            topic_name = meta.get("bot_name") or f"Cred-{cred_id[:8]}"
+            # 1. Check Cache, then Meta, then Create
+            thread_id = cached_topic_ids.get(cred_id) or meta.get("topic_id")
+
+            if not thread_id:
+                # Determine Topic Name only if we need to create
+                # Priority: Chat Name -> Bot Name -> Cred ID
+                topic_name = meta.get("chat_name") or meta.get("bot_name") or f"Cred-{cred_id[:8]}"
+                
+                # Ensure Topic
+                thread_id = await broadcaster_service.ensure_topic(group_id, topic_name)
+                
+                # Update DB (Persistent Cache)
+                # We fetch current meta again to avoid overwriting race (optimistic)
+                # But for simplicity, we merge with what we have.
+                meta["topic_id"] = thread_id
+                db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id).execute()
+                print(f"    📝 [Broadcast] Saved topic_id {thread_id} for {cred_id}")
             
-            # Ensure Topic
-            thread_id = await broadcaster_service.ensure_topic(group_id, topic_name)
+            # Update local cache
+            cached_topic_ids[cred_id] = thread_id
             
             # Send Message
             await broadcaster_service.send_message(group_id, thread_id, msg)
@@ -252,11 +266,10 @@ async def _broadcast_logic():
             sent_count += 1
             
             # Rate limit (ASYNC sleep to not block the event loop)
-            await asyncio.sleep(3.0) 
+            await asyncio.sleep(2.0) 
 
         except Exception as e:
             print(f"Error broadcasting msg {msg['id']}: {e}")
-            # Continue to next message despite error
             continue
             
     return f"Broadcasted {sent_count} messages."
