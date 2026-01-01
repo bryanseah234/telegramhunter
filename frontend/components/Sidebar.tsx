@@ -72,7 +72,7 @@ export default function Sidebar({
                         </div>
                         <div className="text-sm text-slate-500 truncate flex items-center gap-1">
                             <span className="bg-slate-200 px-1 py-0.5 rounded text-[10px] uppercase font-mono">{cred.source}</span>
-                            <span className="font-mono text-xs opacity-70 truncate">{cred.token}</span>
+                            <span className="font-mono text-xs opacity-70 truncate">{cred.bot_token}</span>
                         </div>
                     </button>
                 ))}
