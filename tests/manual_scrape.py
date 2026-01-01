@@ -172,52 +172,90 @@ async def run_scanners():
     await broadcaster_service.send_log("🚀 **Manual Scan Started** (Local Script)")
     print("-------------------------------------------------")
 
+    # POOLED QUERIES (Greedy Approach)
+    # These terms are tried across ALL services
+    COMMON_QUERIES = [
+        "api.telegram.org",
+        "bot_token",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_TOKEN",
+        "Telegram Bot",
+        "Telegram Login"
+    ]
+
     # 1. Shodan
     print("\n🌎 [Shodan] Starting Scan...")
-    shodan_queries = [
-        "http.html:\"api.telegram.org\"",
-        "http.html:\"bot_token\"", 
+    shodan_targets = []
+    
+    # Adapt common queries for Shodan (body search)
+    for q in COMMON_QUERIES:
+        shodan_targets.append(f'http.html:"{q}"')
+    
+    # Add Shodan-specific queries
+    shodan_targets.extend([
         "http.title:\"Telegram Bot\"",
         "http.title:\"Telegram Login\""
-    ]
+    ])
     
-    for q in shodan_queries:
+    # Deduplicate
+    shodan_targets = list(set(shodan_targets))
+
+    for q in shodan_targets:
         print(f"  > Querying: {q}")
         try:
             results = shodan.search(q)
             count = await save_manifest(results, "shodan")
             print(f"    ✅ Saved {count} new credentials (from {len(results)} hits).")
-            time.sleep(1)
+            # time.sleep(1) # Slight delay
         except Exception as e:
             print(f"    ❌ Error: {e}")
 
     # 2. URLScan
     print("\n🔍 [URLScan] Starting Scan...")
-    try:
-        query = "api.telegram.org"
-        print(f"  > Query: {query}")
-        print("  > Note: Deep scanning each result URL for tokens")
-        results = urlscan.search(query)
-        count = await save_manifest(results, "urlscan")
-        print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
-    except Exception as e:
-        print(f"  ❌ URLScan Error: {e}")
+    
+    # URLScan specific logic: loop through common queries
+    # The service automatically wraps them in 'page.body:"X" OR page.url:*X*'
+    
+    for q in COMMON_QUERIES:
+        try:
+            print(f"  > Query: {q}")
+            # print("  > Note: Deep scanning each result URL for tokens")
+            results = urlscan.search(q)
+            count = await save_manifest(results, "urlscan")
+            print(f"  ✅ Saved {count} new credentials (from {len(results)} hits).")
+            time.sleep(2) # Rate limit protection
+        except Exception as e:
+            print(f"  ❌ URLScan Error: {e}")
 
     # 3. GitHub
     print("\n🐱 [GitHub] Starting Scan...")
-    dorks = [
+    
+    # GitHub Dorks
+    # Combine Common Queries (Simple string match) + Complex Dorks
+    github_dorks = []
+    
+    # Add common queries (quoted for exact phrase match if spaces)
+    for q in COMMON_QUERIES:
+        if " " in q:
+            github_dorks.append(f'"{q}"')
+        else:
+            github_dorks.append(q)
+            
+    # Add Complex Specific Dorks
+    github_dorks.extend([
         "filename:.env api.telegram.org",
         "path:config api.telegram.org",
-        "\"TELEGRAM_BOT_TOKEN\"",
         "language:python \"ApplicationBuilder\" \"token\"",
         "language:python \"Telethon\" \"api_id\"",
         "filename:config.json \"bot_token\"",
-        "filename:settings.py \"TELEGRAM_TOKEN\"",
-        "\"api.telegram.org\""
-    ]
+        "filename:settings.py \"TELEGRAM_TOKEN\""
+    ])
+    
+    # Deduplicate
+    github_dorks = list(set(github_dorks))
     
     total_gh = 0
-    for i, dork in enumerate(dorks):
+    for i, dork in enumerate(github_dorks):
         print(f"  > Dorking: {dork}")
         try:
             results = github.search(dork)
@@ -227,7 +265,7 @@ async def run_scanners():
         except Exception as e:
             print(f"    ❌ Error: {e}")
         
-        if i < len(dorks) - 1:
+        if i < len(github_dorks) - 1:
             time.sleep(2) # Respect rate limits slightly
 
     print("\n-------------------------------------------------")
