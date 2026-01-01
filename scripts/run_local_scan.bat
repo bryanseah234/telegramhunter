@@ -33,7 +33,7 @@ if exist "..\database\import_tokens.csv" (
 )
 
 echo.
-echo [INFO] Step 2: Running Full Scanners (Shodan -> URLScan -> GitHub)...
+echo [INFO] Step 2: Running Full Scanners (Shodan, URLScan, GitHub)...
 echo.
 python ..\tests\manual_scrape.py
 

@@ -2,7 +2,9 @@ import os
 from telethon import TelegramClient, functions, types
 from app.core.config import settings
 
-SESSION_FILE = "user_session.session"
+# Determine absolute path to project root
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SESSION_FILE = os.path.join(BASE_DIR, "user_session.session")
 
 class UserAgentService:
     """
@@ -12,7 +14,7 @@ class UserAgentService:
     def __init__(self):
         self.api_id = settings.TELEGRAM_API_ID
         self.api_hash = settings.TELEGRAM_API_HASH
-        self.session_path = os.path.abspath(SESSION_FILE)
+        self.session_path = SESSION_FILE
         self.client = None
 
     async def start(self):
@@ -20,11 +22,27 @@ class UserAgentService:
         
         # 1. Check for Env Var Fallback (Railway)
         if not os.path.exists(self.session_path) and not os.path.exists(f"{self.session_path}.session"):
-            if settings.USER_SESSION_STRING:
+            # Try single var logic
+            session_b64 = settings.USER_SESSION_STRING
+            
+            # Try split var logic if single is missing
+            if not session_b64:
+                parts = []
+                idx = 1
+                while True:
+                    val = os.getenv(f"USER_SESSION_STRING_{idx}")
+                    if not val: break
+                    parts.append(val)
+                    idx += 1
+                if parts:
+                    session_b64 = "".join(parts)
+                    print(f"    ✨ [UserAgent] Detected {len(parts)} split session variables.")
+
+            if session_b64:
                 print("    ✨ [UserAgent] Recovering session from Environment Variable...")
                 try:
                     import base64
-                    decoded = base64.b64decode(settings.USER_SESSION_STRING)
+                    decoded = base64.b64decode(session_b64)
                     # Telethon expects .session extension for the file path provided
                     # But the file on disk should be exactly what we write.
                     # Telethon client(path) -> adds .session if missing.
