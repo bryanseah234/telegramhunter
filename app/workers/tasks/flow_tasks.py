@@ -258,6 +258,9 @@ async def _broadcast_logic():
     
     messages = response.data
     if not messages:
+        # Only log periodically or if verbose debug needed? 
+        # For now, let's log it to confirm the task is running.
+        logger.info("💤 No pending broadcasts found.") 
         return "No pending broadcasts."
 
     group_id = settings.MONITOR_GROUP_ID
