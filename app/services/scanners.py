@@ -92,6 +92,10 @@ def _perform_active_deep_scan(target_url: str) -> List[str]:
         # 0. Check URL string itself for tokens (e.g. leaking in GET params)
         found_tokens.extend(TOKEN_PATTERN.findall(target_url))
 
+        # Optimization: Skip fetching api.telegram.org (Token already found in URL step above)
+        if "api.telegram.org" in target_url:
+            return list(set([t for t in found_tokens if _is_valid_token(t)]))
+
         # 1. Fetch Main HTML
         print(f"      [DeepScan] Fetching: {target_url}")
         res = requests.get(target_url, headers=SPOOFED_HEADERS, timeout=10, verify=False)
