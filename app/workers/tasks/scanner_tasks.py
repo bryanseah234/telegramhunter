@@ -179,8 +179,7 @@ def scan_shodan(query: str = None):
     default_queries = [
         "http.html:\"api.telegram.org\"",
         "http.html:\"bot_token\"", 
-        "http.title:\"Telegram Bot\"",
-        "http.title:\"Telegram Login\""
+        "http.title:\"Telegram Bot\" OR http.title:\"Telegram Login\""
     ]
     
     queries = [query] if query else default_queries
@@ -228,11 +227,13 @@ def scan_github(query: str = None):
         "filename:.env api.telegram.org",
         "path:config api.telegram.org",
         "\"TELEGRAM_BOT_TOKEN\"",
+        "\"BOT_TOKEN\"",
+        "\"TG_BOT_TOKEN\"", 
+        "\"TELEGRAM_KEY\"",
         "language:python \"ApplicationBuilder\" \"token\"",
-        "language:python \"Telethon\" \"api_id\"",
         "filename:config.json \"bot_token\"",
         "filename:settings.py \"TELEGRAM_TOKEN\"",
-        "\"api.telegram.org\""  # Catch-all for any file containing the API URL
+        "\"https://api.telegram.org/bot\""  # Targeted HTTP requests only (SKIP documentation/examples)
     ]
     
     queries = [query] if query else default_dorks
