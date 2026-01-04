@@ -145,6 +145,55 @@ async function startScan(userQuery, userDomain) {
 
 // ... stopScan, pauseScan, resumeScan, nextCountry ...
 
+function stopScan(reason) {
+    state.isRunning = false;
+    state.isPaused = false;
+    state.status = reason || "Stopped";
+    saveState(); // PERSIST
+    broadcastState();
+}
+
+function pauseScan(reason) {
+    state.isPaused = true;
+    state.status = reason || "Paused";
+    saveState(); // PERSIST
+    broadcastState();
+}
+
+function resumeScan() {
+    if (!state.isRunning && state.status !== "Stopped (Recovered)") return; // Only resume if running OR we just recovered
+
+    // If we are recovering from a crash/reload
+    if (!state.isRunning) {
+        state.isRunning = true;
+    }
+
+    state.isPaused = false;
+    state.status = "Resuming...";
+    saveState(); // PERSIST
+    broadcastState();
+
+    // We need to re-acquire the active tab if we crashed
+    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+        if (tab) {
+            activeTabId = tab.id;
+            // Try to resume logic
+            chrome.tabs.sendMessage(activeTabId, { action: "RESUME_WORK" }).catch(() => {
+                processNextCountry(false);
+            });
+        } else {
+            stopScan("Could not find active tab to resume");
+        }
+    });
+}
+
+function nextCountry() {
+    state.countryIndex++;
+    state.countriesDone++;
+    saveState(); // PERSIST
+    processNextCountry();
+}
+
 async function processNextCountry(increment = true) {
     if (!state.isRunning) return;
     if (state.isPaused) return;
@@ -254,6 +303,9 @@ async function handleResult(data) {
     // Given low volume, await is fine.
 
     const validatedData = await validateToken(data);
+
+    // LOG FOR USER VISIBILITY
+    console.log("🦅 FOUND CREDENTIAL:", validatedData);
 
     state.results.push(validatedData);
     state.resultsFound++;
