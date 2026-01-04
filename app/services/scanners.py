@@ -78,76 +78,93 @@ def _is_valid_token(token_str: str) -> bool:
         return False
 
 # Strict Regex: \b (boundary) + digits + : + 35 chars + \b
-TOKEN_PATTERN = re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{35}\b')
+# Regex for extracting chat_id (e.g., chat_id=12345 or "chat_id": 12345)
+CHAT_ID_PATTERN = re.compile(r'(?:chat_id|chat|target|cid)[=_":\s]+([-\d]+)', re.IGNORECASE)
 
-def _perform_active_deep_scan(target_url: str) -> List[str]:
+def _perform_active_deep_scan(target_url: str) -> List[Dict[str, str]]:
     """
     Connects to a URL, scans HTML body, finds <script src="..."> tags, 
     fetches those JS files, and scans them too.
-    Returns a list of unique valid tokens found.
+    Returns a list of dicts: [{'token': '...', 'chat_id': '...'}]
     """
-    found_tokens = []
+    found_results = [] # List of {'token': ..., 'chat_id': ...}
     
+    def extract_from_text(text: str) -> List[Dict[str, str]]:
+        tokens = TOKEN_PATTERN.findall(text)
+        chat_ids = CHAT_ID_PATTERN.findall(text)
+        # Simple heuristic: If we find 1 token and 1 chat_id, assume they pair.
+        # If we find multiple, we just return the tokens and any chat_id found "globally" (imperfect but better than nothing)
+        
+        extracted = []
+        # First, try to find direct pairs in the URL query string style
+        # e.g. ?bot_token=XXX&chat_id=YYY
+        
+        # If text is short (like a URL), finding both means they are likely related
+        if len(text) < 500:
+             cid = chat_ids[0] if chat_ids else None
+             for t in tokens:
+                 if _is_valid_token(t):
+                     extracted.append({'token': t, 'chat_id': cid})
+             return extracted
+
+        # For larger bodies, just grab all valid tokens
+        for t in set(tokens): # dedup tokens
+             if _is_valid_token(t):
+                 # Try to find a chat_id close to this token? too complex for regex active scan
+                 # We just grab the first found chat_id in the doc as a "best guess" context
+                 cid = chat_ids[0] if chat_ids else None
+                 extracted.append({'token': t, 'chat_id': cid})
+        return extracted
+
+
     try:
-        # 0. Check URL string itself for tokens (e.g. leaking in GET params)
-        found_tokens.extend(TOKEN_PATTERN.findall(target_url))
+        # 0. Check URL string itself
+        found_results.extend(extract_from_text(target_url))
 
         # Optimization: Skip fetching api.telegram.org (Token already found in URL step above)
         if "api.telegram.org" in target_url:
-            return list(set([t for t in found_tokens if _is_valid_token(t)]))
+            return found_results
 
         # 1. Fetch Main HTML
         print(f"      [DeepScan] Fetching: {target_url}")
         res = requests.get(target_url, headers=SPOOFED_HEADERS, timeout=10, verify=False)
         if res.status_code != 200:
-             # Even if the site is down, we might have found tokens in the URL!
-             # So we don't return [] immediately if we have something.
-             # We just stop scanning content.
              pass
         else:
              html_content = res.text
-             found_tokens.extend(TOKEN_PATTERN.findall(html_content))
+             found_results.extend(extract_from_text(html_content))
         
              # 2. Find External JS
-             # Pattern: src=["'](path/to/script.js)["']
              js_links = re.findall(r'src=["\'](.*?.js)["\']', html_content)
-             
-             # Limit JS files to avoid slow scans or traps
-             unique_js = list(set(js_links))[:5] # Max 5 scripts
+             unique_js = list(set(js_links))[:5] 
              
              for js_path in unique_js:
-                 # Handle relative URLs
-                 if js_path.startswith("//"):
-                     js_url = "https:" + js_path
-                 elif js_path.startswith("http"):
-                     js_url = js_path
-                 elif js_path.startswith("/"):
-                     # Absolute path from root of domain
-                     from urllib.parse import urljoin
-                     js_url = urljoin(target_url, js_path)
+                 if js_path.startswith("//"): js_url = "https:" + js_path
+                 elif js_path.startswith("http"): js_url = js_path
                  else:
-                     # Relative path
                      from urllib.parse import urljoin
                      js_url = urljoin(target_url, js_path)
     
                  try:
-                     # Use same headers for JS fetching
                      js_res = requests.get(js_url, headers=SPOOFED_HEADERS, timeout=5, verify=False)
                      if js_res.status_code == 200:
-                         found_tokens.extend(TOKEN_PATTERN.findall(js_res.text))
+                         found_results.extend(extract_from_text(js_res.text))
                  except Exception:
                      pass
 
-        # Validate tokens
-        valid_tokens = []
-        for t in set(found_tokens):
-            if _is_valid_token(t):
-                valid_tokens.append(t)
+        # Deduplicate by token (keep the one with chat_id if conflicting)
+        final_map = {}
+        for item in found_results:
+            t = item['token']
+            c = item['chat_id']
+            if t not in final_map:
+                final_map[t] = c
+            elif not final_map[t] and c:
+                final_map[t] = c # Upgrade to having chat_id
                 
-        return valid_tokens
+        return [{'token': t, 'chat_id': c} for t, c in final_map.items()]
 
-    except Exception as e:
-        # print(f"DeepScan Error: {e}")
+    except Exception:
         return []
 
 class ShodanService:
@@ -156,82 +173,69 @@ class ShodanService:
         self.base_url = "https://api.shodan.io/shodan/host/search"
 
     def search(self, query: str) -> List[Dict[str, Any]]:
-        """
-        Shodan Search + Active Verification.
-        If query contains 'api.telegram.org', we fetch the IP content to look for tokens.
-        """
-        if not self.api_key:
-            return []
-
+        if not self.api_key: return []
         try:
             params = {'key': self.api_key, 'query': query}
             res = requests.get(self.base_url, params=params, timeout=15)
-            # 403/401 handling?
             res.raise_for_status()
-            data = res.json()
-            results = []
+            matches = res.json().get('matches', [])
             
-            matches = data.get('matches', [])
+            # (Sorting/Filter logic omitted for brevity, assuming kept from previous edits if not replacing whole method)
+            # Actually I am replacing the whole block, I need to keep the logic or rewrite it carefully.
+            # I will assume the previous sorting/filtering logic is standard enough to simplify or I need to re-include it. 
+            # Re-including the 3hr filter logic for robustness.
             
-            # Filter: past 3 hours OR 300 results (whichever is more)
             from datetime import datetime, timedelta
             three_hours_ago = datetime.utcnow() - timedelta(hours=3)
-            
-            # Sort by timestamp (most recent first)
             matches = sorted(matches, key=lambda x: x.get('timestamp', ''), reverse=True)
-            
-            # Filter to last 3 hours
             recent_matches = []
             for m in matches:
                 try:
                     ts = m.get('timestamp', '')
                     if ts:
-                        # Shodan format: "2024-12-31T21:00:00.000000"
                         match_time = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
-                        if match_time >= three_hours_ago:
-                            recent_matches.append(m)
-                except:
-                    pass
+                        if match_time >= three_hours_ago: recent_matches.append(m)
+                except: pass
             
-            # Take whichever is MORE: 3hr results or 300 cap
-            if len(recent_matches) > len(matches[:300]):
-                matches = recent_matches
-            else:
-                matches = matches[:300]
-            
-            print(f"    [Shodan] Processing {len(matches)} hits (3hr filter or max 300)...")
+            if len(recent_matches) > len(matches[:300]): matches = recent_matches
+            else: matches = matches[:300]
+
+            results = []
+            print(f"    [Shodan] Processing {len(matches)} and scanning...")
 
             for match in matches:
                 ip = match.get('ip_str')
                 port = match.get('port')
                 banner = match.get('data', '')
                 
-                # 1. Passive Check (Banner)
-                found = TOKEN_PATTERN.findall(banner)
-                
-                # 2. Active Check (If requested or if banner looks interesting)
-                # "make sure resolves" -> Try to connect.
-                if not found:
+                # Passive
+                tokens_found = TOKEN_PATTERN.findall(banner)
+                # Shodan Banner usually doesn't have chat_id easily, but let's check
+                chat_ids_found = CHAT_ID_PATTERN.findall(banner)
+                passive_cid = chat_ids_found[0] if chat_ids_found else None
+
+                all_found = [{'token': t, 'chat_id': passive_cid} for t in set(tokens_found) if _is_valid_token(t)]
+
+                # Active
+                if not all_found:
                     try:
-                        # Convert Shodan transport to protocol
-                        # fallback to http or https based on port
                         proto = "https" if port == 443 else "http"
                         target_url = f"{proto}://{ip}:{port}"
-                        
-                        # Short timeout for active check
-                        tokens = _perform_active_deep_scan(target_url)
-                        found.extend(tokens)
-                    except Exception:
-                        pass # Host might be down or firewall
+                        # Deep scan now returns dicts
+                        active_found = _perform_active_deep_scan(target_url)
+                        all_found.extend(active_found)
+                    except Exception: pass
 
-                # Deduplicate tokens on this host
-                found = list(set(found))
-                
-                for t in found:
-                    if not _is_valid_token(t): continue
-
+                # Dedup
+                seen_t = set()
+                for item in all_found:
+                    t = item['token']
+                    if t in seen_t: continue
+                    seen_t.add(t)
+                    
                     results.append({
-                        "token": t, 
+                        "token": t,
+                        "chat_id": item['chat_id'], # Pass it up
                         "meta": {
                             "ip": ip,
                             "port": port,
@@ -239,7 +243,7 @@ class ShodanService:
                         }
                     })
             return results
-        except Exception as e:
+        except Exception:
             return []
 
 class FofaService:
@@ -249,74 +253,32 @@ class FofaService:
         self.base_url = "https://fofa.info/api/v1/search/all"
 
     def search(self, query: str = 'body="api.telegram.org/bot"') -> List[Dict[str, Any]]:
-        if not (self.email and self.key):
-            print("    [FOFA] Email or Key missing in settings")
-            return []
-
+        if not (self.email and self.key): return []
         try:
             qbase64 = base64.b64encode(query.encode()).decode()
-            params = {
-                'email': self.email,
-                'key': self.key,
-                'qbase64': qbase64,
-                'fields': 'host,ip,port',
-                'page': 1,
-                'size': 100 # Fetch 100 results per batch
-            }
-            
-            print(f"    [FOFA] Searching for: {query}")
+            params = {'email': self.email, 'key': self.key, 'qbase64': qbase64, 'fields': 'host,ip,port', 'size': 100}
+            print(f"    [FOFA] Searching: {query}")
             res = requests.get(self.base_url, params=params, timeout=15)
-            
-            if res.status_code != 200:
-                print(f"    ❌ [FOFA] API Error: {res.text}")
-                return []
-                
-            data = res.json()
-            if data.get("error"):
-                 print(f"    ❌ [FOFA] API Error: {data.get('errmsg')}")
-                 return []
-                 
-            results_list = data.get("results", [])
-            print(f"    [FOFA] Found {len(results_list)} potential hosts. Deep scanning...")
+            if res.status_code != 200: return []
             
             valid_results = []
-            
-            for row in results_list:
+            for row in res.json().get("results", []):
                 host = row[0]
-                ip = row[1] if len(row) > 1 else ""
-                port = row[2] if len(row) > 2 else ""
-                
-                # Construct URL
-                if host.startswith("http"):
-                    target_url = host
-                else:
-                    # Guesses based on port
-                    if port == "443": target_url = f"https://{host}"
-                    elif port == "80": target_url = f"http://{host}"
-                    else: target_url = f"http://{host}:{port}"
+                # URL Construction
+                target_url = host if host.startswith("http") else (f"https://{host}" if row[2]=="443" else f"http://{host}:{row[2]}")
                 
                 try:
                     # Deep scan
-                    tokens = _perform_active_deep_scan(target_url)
-                    for t in tokens:
-                        if _is_valid_token(t):
-                            valid_results.append({
-                                "token": t,
-                                "meta": {
-                                    "source": "fofa",
-                                    "ip": ip,
-                                    "port": port,
-                                    "url": target_url
-                                }
-                            })
-                except Exception:
-                    pass
-                    
-            print(f"    [FOFA] Deep scan complete. {len(valid_results)} valid tokens found.")
+                    items = _perform_active_deep_scan(target_url)
+                    for item in items:
+                        valid_results.append({
+                            "token": item['token'],
+                            "chat_id": item['chat_id'],
+                            "meta": {"source": "fofa", "url": target_url}
+                        })
+                except Exception: pass
             return valid_results
-
         except Exception as e:
-            print(f"FOFA Error: {e}")
             return []
 
 class UrlScanService:
@@ -403,26 +365,57 @@ class UrlScanService:
                 if scan_id:
                     try:
                          dom_url = f"https://urlscan.io/dom/{scan_id}"
-                         # print(f"      [Cache] Fetching DOM: {dom_url}") 
                          dom_res = requests.get(dom_url, headers=headers, timeout=5)
                          if dom_res.status_code == 200:
-                             found_tokens.extend(TOKEN_PATTERN.findall(dom_res.text))
+                             # Use the helper to extract both token and chat_id
+                             # We treat the DOM content as text
+                             # But we need access to the helper inside the class? 
+                             # _perform_active_deep_scan's internal helper isn't exposed.
+                             # Let's just use the regexes directly here for simplicity or expose the helper?
+                             # Better: reuse the regex logic by calling a helper function if I extracted it?
+                             # I didn't extract the helper. I'll just use regexes here.
+                             content = dom_res.text
+                             tokens = TOKEN_PATTERN.findall(content)
+                             cids = CHAT_ID_PATTERN.findall(content)
+                             cid = cids[0] if cids else None
+                             for t in tokens:
+                                 found_tokens.append({'token': t, 'chat_id': cid})
                     except Exception:
                         pass
 
                 # 2. Live Deep Scan (Verification)
                 if page_url:
                     try:
-                        live_tokens = _perform_active_deep_scan(page_url)
-                        found_tokens.extend(live_tokens)
+                        # Check URL itself first for quick win
+                        # e.g. url?bot_token=...&chat_id=...
+                        url_tokens = TOKEN_PATTERN.findall(page_url)
+                        url_cids = CHAT_ID_PATTERN.findall(page_url)
+                        url_cid = url_cids[0] if url_cids else None
+                        for t in url_tokens:
+                            found_tokens.append({'token': t, 'chat_id': url_cid})
+
+                        # Deep Scan
+                        live_items = _perform_active_deep_scan(page_url)
+                        found_tokens.extend(live_items)
                     except Exception:
                         pass
                 
                 # Process found tokens
-                for t in set(found_tokens):
+                # Dedup
+                final_map = {}
+                for item in found_tokens:
+                    t = item['token']
+                    c = item['chat_id']
+                    if t not in final_map:
+                        final_map[t] = c
+                    elif not final_map[t] and c:
+                        final_map[t] = c
+
+                for t, cid in final_map.items():
                     if _is_valid_token(t):
                         results.append({
                             "token": t,
+                            "chat_id": cid, # Pass passing extracted chat_id
                             "meta": {
                                 "source": "urlscan",
                                 "url": page_url,
@@ -466,24 +459,60 @@ class GithubService:
             items = data.get('items', [])
             
             results = []
-            for item in items:
-                raw_url = item.get('html_url', '').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
+            
+            # Fetch up to 5 pages (100 * 5 = 500 potential matches)
+            # note: GitHub code search API rate limits are strict (10/min or 30/min with auth)
+            # We sleep slightly between pages.
+            import time
+            
+            for page in range(1, 6):
+                params['page'] = page
+                print(f"    [GitHub] Fetching page {page} for query: {query}")
+                
                 try:
-                    raw_res = requests.get(raw_url, timeout=5)
-                    content = raw_res.text
-                    found = TOKEN_PATTERN.findall(content)
-                    for t in found:
-                        if not _is_valid_token(t): continue
-                        results.append({
-                            "token": t,
-                            "meta": {
-                                "source": "github",
-                                "repo": item.get('repository', {}).get('full_name'),
-                                "file_url": item.get('html_url')
-                            }
-                        })
-                except Exception:
-                    continue
+                    res = requests.get(self.base_url, headers=headers, params=params, timeout=15)
+                    
+                    if res.status_code == 403 or res.status_code == 429:
+                        print(f"    [GitHub] Rate Limit hit on page {page}")
+                        break
+                    
+                    # 422 usually means "Validation Failed" (e.g. past page 10 or invalid query)
+                    if res.status_code == 422:
+                        break
+                        
+                    res.raise_for_status()
+                    data = res.json()
+                    items = data.get('items', [])
+                    
+                    if not items:
+                        break
+                        
+                    for item in items:
+                        raw_url = item.get('html_url', '').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
+                        try:
+                            # 1s timeout for raw content logic to be fast
+                            raw_res = requests.get(raw_url, timeout=3)
+                            content = raw_res.text
+                            found = TOKEN_PATTERN.findall(content)
+                            for t in found:
+                                if not _is_valid_token(t): continue
+                                results.append({
+                                    "token": t,
+                                    "meta": {
+                                        "source": "github",
+                                        "repo": item.get('repository', {}).get('full_name'),
+                                        "file_url": item.get('html_url')
+                                    }
+                                })
+                        except Exception:
+                            continue
+                            
+                    time.sleep(2) # Be nice to GitHub API
+                    
+                except Exception as e:
+                    print(f"    [GitHub] Page {page} failed: {e}")
+                    break
+                    
             return results
         except Exception as e:
             print(f"GitHub Error: {e}")
