@@ -32,7 +32,12 @@ class ScraperService:
                 print(f"✨ [Scraper] Telethon normal dump success: {len(scraped_messages)} messages.")
                 return scraped_messages
         except Exception as e:
-            print(f"⚠️ [Scraper] Telethon history dump restricted/failed ({e}).")
+            # Check for common "ChatAdminRequired" or "ChatWriteForbidden"
+            err_str = str(e)
+            if "ChatAdminRequired" in err_str:
+                print("    ⚠️ [Scraper] Telethon Restriction: Bot needs Admin to read history here.")
+            else:
+                print(f"    ⚠️ [Scraper] Telethon history dump failed: {e}")
 
         # Get 'Anchor' ID from Bot API (Strategy 3) to enable Strategy 2
         anchor_id = 0
@@ -342,7 +347,23 @@ class ScraperService:
             await client.start(bot_token=bot_token)
             
             print(f"📖 [Scraper] Fetching history via Telethon (Limit: {limit})...")
-            async for message in client.iter_messages(chat_id, limit=limit):
+            
+            # ATTEMPT 1: Resolve Entity explicitly
+            # Fresh MemorySession needs to "eager load" the chat
+            entity = None
+            try:
+                entity = await client.get_entity(chat_id)
+            except ValueError:
+                print("    ⚠️ [Scraper] Entity not found directly. Refreshing dialogs...")
+                await client.get_dialogs(limit=100) # Populate cache
+                try:
+                    entity = await client.get_entity(chat_id)
+                except:
+                    print("    ❌ [Scraper] Could not resolve entity even after dialog refresh.")
+            
+            target = entity if entity else chat_id
+            
+            async for message in client.iter_messages(target, limit=limit):
                 if not isinstance(message, Message): continue
                 
                 content = message.text or ""
