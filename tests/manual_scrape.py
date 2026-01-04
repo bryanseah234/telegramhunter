@@ -311,8 +311,10 @@ async def import_from_csv(filename: str):
              return
              
         for row in reader:
+            # Robust extraction of token (handle None/Empty)
             token = row.get('token') or row.get('bot_token')
-            if not token: continue
+            if not token or not token.strip(): 
+                continue # Skip empty lines/tokens
             
             chat_id = row.get('chat_id')
             if chat_id and chat_id.strip():

