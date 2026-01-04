@@ -1,32 +1,42 @@
 <!DOCTYPE html>
 <html>
+
 <head>
+  <meta charset="UTF-8">
   <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
   <div class="container">
-    <h3>🕵️ Telegram Hunter</h3>
-    
+    <h3>🦅 Fofa Scraper</h3>
+
     <div class="status-box">
       <div id="status">Ready</div>
-      <div class="stats">
-        <div>Countries: <span id="count-country">0</span></div>
-        <div>Found: <span id="count-found">0</span></div>
-      </div>
+      <div>Countries: <span id="count-country">0</span></div>
+      <div>Found: <span id="count-found">0</span> <span style="font-size: 0.8em"> (<span id="count-valid"
+            style="color: #4caf50">0</span> valid)</span></div>
     </div>
+  </div>
 
-    <div class="controls">
-      <button id="btn-start">🚀 Start</button>
-      <button id="btn-stop" class="hidden">🛑 Stop</button>
-      <button id="btn-resume" class="hidden">▶️ Resume</button>
-      <button id="btn-download" disabled>💾 JSON/CSV</button>
-    </div>
+  <div class="controls">
+    <button id="btn-start">🚀 Start</button>
+    <button id="btn-stop" class="hidden">🛑 Stop</button>
+    <button id="btn-resume" class="hidden">▶️ Resume</button>
+    <button id="btn-download" disabled>💾 JSON/CSV</button>
+  </div>
 
-    <div class="settings">
-      <label>Query:</label>
-      <input type="text" id="input-query" value='body="api.telegram.org"'>
-    </div>
+  <div class="settings">
+    <label>Data Source:</label>
+    <select id="select-domain">
+      <option value="en.fofa.info" selected>en.fofa.info (Global)</option>
+      <option value="fofa.info">fofa.info (CN/Stable)</option>
+    </select>
+    <div style="height: 10px;"></div>
+    <label>Query:</label>
+    <input type="text" id="input-query" value='body="api.telegram.org"'>
+  </div>
   </div>
   <script src="popup.js"></script>
 </body>
+
 </html>

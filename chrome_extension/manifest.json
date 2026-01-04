@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Telegram Hunter - Fofa Scraper",
+  "name": "Fofa Scraper",
   "version": "1.0",
   "description": "Automated Fofa Scraper with Country Rotation",
   "permissions": [
@@ -11,7 +11,8 @@
   ],
   "host_permissions": [
     "https://fofa.info/*",
-    "https://en.fofa.info/*"
+    "https://en.fofa.info/*",
+    "https://api.telegram.org/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -26,8 +27,13 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://fofa.info/*", "https://en.fofa.info/*"],
-      "js": ["content.js"]
+      "matches": [
+        "https://fofa.info/*",
+        "https://en.fofa.info/*"
+      ],
+      "js": [
+        "content.js"
+      ]
     }
   ]
 }
