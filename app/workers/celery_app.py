@@ -72,10 +72,10 @@ app.conf.update(
         "app.workers.tasks.scanner_tasks"
     ],
     beat_schedule={
-        # Broadcast every 8 hours (30 mins after re-scrape)
-        "broadcast-8hours": {
+        # Broadcast every 3 hours
+        "broadcast-3hours": {
             "task": "flow.broadcast_pending",
-            "schedule": crontab(minute=30, hour="1-23/8"), 
+            "schedule": crontab(minute=30, hour="*/3"), 
         },
         # Heartbeat every 30 minutes (xx:00, xx:30)
         "system-heartbeat-30min": {
@@ -99,10 +99,9 @@ app.conf.update(
             "task": "scanner.scan_urlscan",
             "schedule": crontab(minute=40, hour="*/12"), # 00:40...
         },
-        "rescrape-active-12hours": {
+        "rescrape-active-2hours": {
             "task": "flow.rescrape_active",
-            # Runs at hour 1, 13 (1 hour after the block starts)
-            "schedule": crontab(minute=0, hour="1-23/12"), 
+            "schedule": crontab(minute=0, hour="*/2"), 
         }
     }
 )
