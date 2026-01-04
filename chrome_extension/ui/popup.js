@@ -50,16 +50,34 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Buttons
+        // Buttons Logic
         if (state.isRunning) {
             btnStart.classList.add('hidden');
             btnStop.classList.remove('hidden');
             inputQuery.disabled = true;
             selectDomain.disabled = true;
+            btnStart.innerText = "🚀 Start"; // Reset text
         } else {
-            btnStart.classList.remove('hidden');
+            // STOPPED or READY
             btnStop.classList.add('hidden');
             inputQuery.disabled = false;
             selectDomain.disabled = false;
+
+            if (state.resultsFound > 0) {
+                // FINISHED / STOPPED with Data
+                btnStart.classList.remove('hidden');
+                btnStart.innerText = "🔄 New Scan (Clears Data)";
+                btnStart.style.backgroundColor = "#ff9800"; // Warning color
+
+                // Highlight Download
+                btnDownload.style.border = "2px solid #4CAF50";
+            } else {
+                // READY (No Data)
+                btnStart.classList.remove('hidden');
+                btnStart.innerText = "🚀 Start";
+                btnStart.style.backgroundColor = ""; // Default
+                btnDownload.style.border = "";
+            }
         }
 
         if (state.isPaused) {
