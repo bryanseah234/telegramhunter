@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <h3>🕵️ Telegram Hunter</h3>
+    
+    <div class="status-box">
+      <div id="status">Ready</div>
+      <div class="stats">
+        <div>Countries: <span id="count-country">0</span></div>
+        <div>Found: <span id="count-found">0</span></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="btn-start">🚀 Start</button>
+      <button id="btn-stop" class="hidden">🛑 Stop</button>
+      <button id="btn-resume" class="hidden">▶️ Resume</button>
+      <button id="btn-download" disabled>💾 JSON/CSV</button>
+    </div>
+
+    <div class="settings">
+      <label>Query:</label>
+      <input type="text" id="input-query" value='body="api.telegram.org"'>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
