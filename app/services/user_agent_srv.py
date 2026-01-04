@@ -256,4 +256,27 @@ class UserAgentService:
         finally:
             await self.stop()
 
+    async def send_message(self, target: int | str, message: str) -> bool:
+        """
+        Sends a text message to a target (group/user) as the User Agent.
+        """
+        if not await self.start():
+            return False
+
+        try:
+            # Resolve entity
+            if str(target).lstrip('-').isdigit():
+                entity = int(target)
+            else:
+                entity = target
+
+            await self.client.send_message(entity, message)
+            print(f"    🗣️ [UserAgent] Sent: '{message}'")
+            return True
+        except Exception as e:
+            print(f"    ❌ [UserAgent] Send failed: {e}")
+            return False
+        finally:
+            await self.stop()
+
 user_agent = UserAgentService()

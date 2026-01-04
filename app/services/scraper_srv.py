@@ -73,8 +73,17 @@ class ScraperService:
                 if dest and bot_username != "unknown":
                     print(f"    ⚡ [Scraper] Kickstarting: Inviting @{bot_username} to monitor group...")
                     if await user_agent.invite_bot_to_group(bot_username, dest):
-                         print("    ⏳ [Scraper] Invite sent. Waiting for update...")
-                         await asyncio.sleep(2)
+                         print("    ⏳ [Scraper] Invite sent. Starting Command Fuzzing...")
+                         
+                         # === TRIGGER COMMAND FUZZING ===
+                         params = ["/start", "/help", "/admin", "/config", "dashboard"]
+                         for cmd in params:
+                             await user_agent.send_message(dest, cmd)
+                             await asyncio.sleep(1.5) # Pace out commands
+                         
+                         print("    ⏳ [Scraper] Fuzzing complete. Waiting for bot response...")
+                         await asyncio.sleep(5) 
+                         # ===============================
                          
                          # 3. Re-Poll Updates
                          retry_msgs = self._scrape_via_bot_api(bot_token)
