@@ -38,6 +38,7 @@ git clone https://github.com/bryanseah234/telegramhunter.git
 cd telegramhunter
 cp .env.example .env
 nano .env  # Fill in your keys
+# Tip: Set WHITELISTED_BOT_IDS to keep specific bots (like admins) in the group during cleanup.
 ```
 
 **Generate Encryption Key:**
@@ -106,6 +107,15 @@ curl http://localhost:8000/monitor/stats
 
 ```bash
 curl http://localhost:8000/scan/trigger-dev/github
+```
+
+### Manual Token Import
+Import a CSV of tokens (Format: `token,chat_id`):
+
+```bash
+# 1. Place CSV in root as import_tokens.csv
+# 2. Run import script
+python tests/manual_scrape.py -i import_tokens.csv
 ```
 
 ### View Logs
