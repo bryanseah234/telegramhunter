@@ -284,6 +284,7 @@ async function validateToken(data) {
 }
 
 async function handleResult(data) {
+    if (!state.isRunning && state.status !== "Paused") return; // Ignore results if stopped
     if (state.seenTokens.has(data.token)) return;
     state.seenTokens.add(data.token);
 
@@ -311,12 +312,9 @@ function broadcastState() {
 
 function downloadResults() {
     // Generate CSV Blob
-    let csvContent = "token,chat_id,valid,bot_name,status\n";
+    let csvContent = "token,chat_id\n";
     state.results.forEach(row => {
-        const validStr = row.valid ? "TRUE" : "FALSE";
-        const nameStr = row.bot_name || "";
-        const statusStr = row.status || (row.valid ? "Active" : "Unknown");
-        csvContent += `${row.token},${row.chatId || ""},${validStr},${nameStr},${statusStr}\n`;
+        csvContent += `${row.token},${row.chatId || ""}\n`;
     });
 
     // In background script, we can use Data URI download
