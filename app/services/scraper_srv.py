@@ -36,6 +36,8 @@ class ScraperService:
             err_str = str(e)
             if "ChatAdminRequired" in err_str:
                 print("    ⚠️ [Scraper] Telethon Restriction: Bot needs Admin to read history here.")
+            elif "API access for bot users is restricted" in err_str:
+                 print("    ⚠️ [Scraper] Telethon Restriction: Bot Privacy Mode is ON (Expected). Falling back to Strategies 2 & 3...")
             else:
                 print(f"    ⚠️ [Scraper] Telethon history dump failed: {e}")
 
