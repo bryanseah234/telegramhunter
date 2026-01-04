@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     # Telegram Monitoring (The Bot WE control)
     MONITOR_BOT_TOKEN: str
     MONITOR_GROUP_ID: int | str
+    WHITELISTED_BOT_IDS: str = "" # Comma-separated IDs (or usernames)
+
 
     # Telegram Client (For Scraping)
     TELEGRAM_API_ID: int

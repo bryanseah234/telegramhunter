@@ -178,4 +178,82 @@ class UserAgentService:
         finally:
             await self.stop()
 
+    async def cleanup_bots(self, group_id: int | str, whitelist_ids: list[int | str]) -> int:
+        """
+        Removes all bots from the group that are NOT in the whitelist.
+        Returns the number of bots removed.
+        """
+        if not await self.start():
+            return 0
+            
+        removed_count = 0
+        try:
+            # Resolve entity
+            if str(group_id).lstrip('-').isdigit(): 
+                target = int(group_id)
+            else:
+                target = group_id
+            
+            entity = await self.client.get_entity(target)
+            
+            print(f"    🧹 [UserAgent] Starting Bot Cleanup in {entity.title}...")
+            
+            # Iterate participants
+            # We filter for bots only
+            from telethon.tl.functions.channels import EditBannedRequest
+            from telethon.tl.types import ChatBannedRights
+            
+            # Prepare rights for kicking (view_messages=True banning kicks them)
+            # Actually, standard kick is often just banning with default rights? 
+            # Or setting ChatBannedRights(view_messages=True)
+            kick_rights = ChatBannedRights(
+                until_date=None,
+                view_messages=True
+            )
+            
+            # Normalize whitelist: Convert to string, strip whitespace, remove leading '@'
+            whitelist_str = [str(x).strip().lstrip('@') for x in whitelist_ids]
+            
+            async for user in self.client.iter_participants(entity):
+                if user.bot:
+                    # Check Whitelist
+                    if str(user.id) in whitelist_str or user.username in whitelist_str:
+                         # print(f"    🛡️ [UserAgent] Safe: {user.username} ({user.id})")
+                         continue
+                         
+                    # Check if it is ME (User Agent) - unlikely as I am not a bot, but safety first
+                    if user.is_self: continue
+                    
+                    print(f"    🚫 [UserAgent] Kicking unauthorized bot: @{user.username} ({user.id})")
+                    try:
+                        await self.client(EditBannedRequest(
+                            channel=entity,
+                            participant=user,
+                            banned_rights=kick_rights
+                        ))
+                        removed_count += 1
+                        # Unban immediately so they can be re-added later if needed? 
+                        # Or just leave them banned?
+                        # Usually for "Testing", kicking is enough. 
+                        # EditBannedRequest with view_messages=True removes them.
+                        # Do we need to Unban? If we re-invite them manually later, we might need to unban.
+                        # Let's unban them right after to just "Kick" (Remove) but not "Ban" forever.
+                        # To Unban: set rights to empty/default.
+                        await self.client(EditBannedRequest(
+                            channel=entity,
+                            participant=user,
+                            banned_rights=ChatBannedRights(until_date=None, view_messages=False)
+                        ))
+                    except Exception as e_kick:
+                        print(f"        ❌ Failed to kick: {e_kick}")
+
+            print(f"    ✨ [UserAgent] Cleanup Complete. Removed {removed_count} bots.")
+            return removed_count
+
+        except Exception as e:
+            print(f"    ❌ [UserAgent] Cleanup failed: {e}")
+            return 0
+        finally:
+            await self.stop()
+
 user_agent = UserAgentService()
