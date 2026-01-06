@@ -1,5 +1,7 @@
 from app.workers.celery_app import app
 import asyncio # Ensure asyncio is imported
+import random
+from app.core.config import settings
 # from app.services.broadcaster_srv import broadcaster_service # REMOVED Global instance
 from app.services.scanners import ShodanService, GithubService, UrlScanService
 from app.core.security import security
@@ -182,7 +184,7 @@ def _send_log_sync(message: str):
     loop.run_until_complete(broadcaster.send_log(message))
 
 @app.task(name="scanner.scan_shodan")
-def scan_shodan(query: str = None):
+def scan_shodan(query: str = None, country_code: str = None):
     import time
     default_queries = [
         "http.html:\"api.telegram.org\"",
@@ -191,15 +193,25 @@ def scan_shodan(query: str = None):
     ]
     
     queries = [query] if query else default_queries
-    total_saved = 0
-    errors = []
+    
+    # Timeout Protection: Limit to 5 randomized queries per run
+    random.shuffle(queries)
+    if len(queries) > 5:
+        queries = queries[:5]
+        print(f"    [Shodan] Limiting to 5 random queries to prevent timeout.")
 
-    print(f"Starting Shodan scan with {len(queries)} queries...")
-    _send_log_sync(f"🌎 [Shodan] Starting scan with {len(queries)} queries...")
+    # Country Logic
+    selected_country = country_code
+    if country_code == "RANDOM":
+        selected_country = random.choice(settings.TARGET_COUNTRIES)
+        print(f"    [Shodan] Randomly selected country: {selected_country}")
+
+    print(f"Starting Shodan scan with {len(queries)} queries (Country: {selected_country})...")
+    _send_log_sync(f"🌎 [Shodan] Starting scan with {len(queries)} queries (Country: {selected_country})...")
 
     for q in queries:
         try:
-            results = shodan.search(q)
+            results = shodan.search(q, country_code=selected_country)
             saved = _save_credentials(results, "shodan")
             total_saved += saved
             time.sleep(1) # Rate limit respect
@@ -215,11 +227,17 @@ def scan_shodan(query: str = None):
     return result_msg
 
 @app.task(name="scanner.scan_urlscan")
-def scan_urlscan(query: str = "api.telegram.org"):
-    print(f"Starting URLScan scan: {query}")
-    _send_log_sync(f"🔍 [URLScan] Starting scan with query: `{query}`")
+def scan_urlscan(query: str = "api.telegram.org", country_code: str = None):
+    # Country Logic
+    selected_country = country_code
+    if country_code == "RANDOM":
+        selected_country = random.choice(settings.TARGET_COUNTRIES)
+        print(f"    [URLScan] Randomly selected country: {selected_country}")
+        
+    print(f"Starting URLScan scan: {query} (Country: {selected_country})")
+    _send_log_sync(f"🔍 [URLScan] Starting scan with query: `{query}` (Country: {selected_country})")
     try:
-        results = urlscan.search(query)
+        results = urlscan.search(query, country_code=selected_country)
         saved = _save_credentials(results, "urlscan")
         msg = f"URLScan scan finished. Saved {saved} new credentials."
         _send_log_sync(f"🏁 [URLScan] Finished. Saved {saved} new credentials.")
@@ -231,6 +249,7 @@ def scan_urlscan(query: str = "api.telegram.org"):
 @app.task(name="scanner.scan_github")
 def scan_github(query: str = None):
     import time
+    import random
     default_dorks = [
         # Configuration Files
         "filename:.env \"TELEGRAM_BOT_TOKEN\"",
@@ -257,12 +276,18 @@ def scan_github(query: str = None):
         "\"BOT_TOKEN\""
     ]
     
-    queries = [query] if query else default_dorks
+    if query:
+        queries = [query]
+    else:
+        # Shuffle and select subset to avoid timeouts
+        random.shuffle(default_dorks)
+        queries = default_dorks[:5]
+        
     total_saved = 0
     errors = []
 
     print(f"Starting GitHub scan with {len(queries)} queries...")
-    _send_log_sync(f"🐱 [GitHub] Starting scan with {len(queries)} dorks...")
+    _send_log_sync(f"🐱 [GitHub] Starting scan with {len(queries)} dorks (Selected from pool)...")
 
     for q in queries:
         print(f"Executing GitHub Dork: {q}")

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 app = Celery("telegram_hunter", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
 
 from celery.signals import worker_ready, worker_shutdown
-from app.services.broadcaster_srv import broadcaster_service
+from app.services.broadcaster_srv import BroadcasterService
 import asyncio
 
 def _send_signal_log(msg):
@@ -26,8 +26,9 @@ def _send_signal_log(msg):
     asyncio.set_event_loop(loop)
     try:
         # 5 second timeout to prevent blocking
+        broadcaster = BroadcasterService()
         loop.run_until_complete(
-            asyncio.wait_for(broadcaster_service.send_log(msg), timeout=5.0)
+            asyncio.wait_for(broadcaster.send_log(msg), timeout=5.0)
         )
     except asyncio.TimeoutError:
         print(f"⚠️ Signal notification timed out: {msg[:30]}...")

