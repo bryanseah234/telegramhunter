@@ -29,7 +29,7 @@ app = FastAPI(
     openapi_url=None if settings.ENV == "production" else "/openapi.json"
 )
 
-from app.services.broadcaster_srv import broadcaster_service
+from app.services.broadcaster_srv import BroadcasterService
 import asyncio
 
 @app.on_event("startup")
@@ -37,8 +37,9 @@ async def startup_event():
     logger.info("🚀 API starting up...")
     # Non-blocking: don't let Telegram timeout slow down API startup
     try:
+        broadcaster = BroadcasterService()
         await asyncio.wait_for(
-            broadcaster_service.send_log(f"🟢 **API Service** Started ({settings.ENV})"),
+            broadcaster.send_log(f"🟢 **API Service** Started ({settings.ENV})"),
             timeout=5.0
         )
         logger.info("✅ Startup notification sent to Telegram")
@@ -51,8 +52,9 @@ async def startup_event():
 async def shutdown_event():
     logger.info("🛑 API shutting down...")
     try:
+        broadcaster = BroadcasterService()
         await asyncio.wait_for(
-            broadcaster_service.send_log(f"🔴 **API Service** Stopping..."),
+            broadcaster.send_log(f"🔴 **API Service** Stopping..."),
             timeout=3.0
         )
     except Exception:
@@ -60,6 +62,10 @@ async def shutdown_event():
 
 app.include_router(monitor.router)
 app.include_router(scan.router)
+
+# Health check endpoints
+from app.api.routers import health
+app.include_router(health.router)
 
 @app.get("/")
 def read_root():

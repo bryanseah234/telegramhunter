@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from app.schemas.models import ScanRequest
 from app.workers.celery_app import app as celery_app
 from app.core.config import settings
-from app.services.broadcaster_srv import broadcaster_service
+from app.services.broadcaster_srv import BroadcasterService
 
 router = APIRouter(prefix="/scan", tags=["Scanner"])
 
@@ -26,7 +26,8 @@ async def trigger_scan(request: ScanRequest):
         task = celery_app.send_task(task_name, args=[request.query])
         
         # Log to Telegram
-        await broadcaster_service.send_log(f"🚀 **API Trigger**: Queued `{task_name}` for query: `{request.query}`")
+        broadcaster = BroadcasterService()
+        await broadcaster.send_log(f"🚀 **API Trigger**: Queued `{task_name}` for query: `{request.query}`")
         
         return {"status": "triggered", "task_id": str(task.id), "source": request.source, "query": request.query}
     except Exception as e:
