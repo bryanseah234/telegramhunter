@@ -172,7 +172,7 @@ async def _enrich_logic(cred_id: str):
         # 2. Attempt Match
         matched_id = None
         if known_chat_ids:
-            matched_id = scraper_service.attempt_orphan_match(bot_token, known_chat_ids)
+            matched_id = await scraper_service.attempt_orphan_match(bot_token, known_chat_ids)
         
         if matched_id:
             logger.info(f"    ✨ [Enrich] Orphan Match! Bot belongs to chat {matched_id}.")
