@@ -7,10 +7,14 @@ import time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.core.database import db
-from app.services.broadcaster_srv import broadcaster_service
+from app.core.database import db
+from app.services.broadcaster_srv import BroadcasterService
 from app.core.config import settings
 
 async def run_manual_broadcast():
+    # Instantiate service locally
+    broadcaster_service = BroadcasterService()
+    
     print("🚀 Starting LOCAL MANUAL BROADCAST...")
     print(f"   Target Group ID: {settings.MONITOR_GROUP_ID}")
     print("-------------------------------------------------")
