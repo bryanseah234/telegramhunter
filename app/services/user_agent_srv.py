@@ -1,4 +1,5 @@
 import os
+import asyncio
 from telethon import TelegramClient, functions, types
 from app.core.config import settings
 
@@ -16,6 +17,7 @@ class UserAgentService:
         self.api_hash = settings.TELEGRAM_API_HASH
         self.session_path = SESSION_FILE
         self.client = None
+        self.lock = asyncio.Lock()
 
     async def start(self):
         """Starts the user client. Requires existing session file or env var."""
@@ -76,8 +78,9 @@ class UserAgentService:
         """
         Invites a bot to the specified group (chat/channel).
         """
-        if not await self.start():
-            return False
+        async with self.lock:
+            if not await self.start():
+                return False
             
         try:
             # Ensure identifiers are correct
@@ -138,8 +141,9 @@ class UserAgentService:
         Searches for a forum topic by name using the User Agent.
         Returns topic_id if found, else None.
         """
-        if not await self.start():
-            return None
+        async with self.lock:
+            if not await self.start():
+                return None
             
         try:
             # Resolve entity
@@ -183,8 +187,9 @@ class UserAgentService:
         Removes all bots from the group that are NOT in the whitelist.
         Returns the number of bots removed.
         """
-        if not await self.start():
-            return 0
+        async with self.lock:
+            if not await self.start():
+                return 0
             
         removed_count = 0
         try:
@@ -260,8 +265,9 @@ class UserAgentService:
         """
         Sends a text message to a target (group/user) as the User Agent.
         """
-        if not await self.start():
-            return False
+        async with self.lock:
+            if not await self.start():
+                return False
 
         try:
             # Resolve entity
