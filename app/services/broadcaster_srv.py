@@ -137,4 +137,4 @@ class BroadcasterService:
         except Exception as e:
             print(f"Failed to send topic header: {e}")
 
-broadcaster_service = BroadcasterService()
+

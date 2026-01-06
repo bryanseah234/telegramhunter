@@ -27,6 +27,11 @@ SPOOFED_HEADERS = {
     "Sec-Ch-Ua-Platform": '"Windows"'
 }
 
+# Regex for Telegram Bot Token: digits:35chars
+# 123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TOKEN_PATTERN = re.compile(r'\b(\d{8,10}:[A-Za-z0-9_-]{35})\b')
+
+
 def _is_valid_token(token_str: str) -> bool:
     """
     Strict validation to filter out Fernet strings, hashes, and junk.
@@ -172,10 +177,15 @@ class ShodanService:
         self.api_key = settings.SHODAN_KEY
         self.base_url = "https://api.shodan.io/shodan/host/search"
 
-    def search(self, query: str) -> List[Dict[str, Any]]:
+    def search(self, query: str, country_code: str = None) -> List[Dict[str, Any]]:
         if not self.api_key: return []
         try:
-            params = {'key': self.api_key, 'query': query}
+            full_query = query
+            if country_code:
+                full_query = f'{query} country:"{country_code}"'
+                print(f"    [Shodan] Adding country filter: {country_code}")
+            
+            params = {'key': self.api_key, 'query': full_query}
             res = requests.get(self.base_url, params=params, timeout=15)
             res.raise_for_status()
             matches = res.json().get('matches', [])
@@ -252,12 +262,17 @@ class FofaService:
         self.key = settings.FOFA_KEY
         self.base_url = "https://fofa.info/api/v1/search/all"
 
-    def search(self, query: str = 'body="api.telegram.org/bot"') -> List[Dict[str, Any]]:
+    def search(self, query: str = 'body="api.telegram.org/bot"', country_code: str = None) -> List[Dict[str, Any]]:
         if not (self.email and self.key): return []
         try:
-            qbase64 = base64.b64encode(query.encode()).decode()
+            full_query = query
+            if country_code:
+                full_query = f'{query} && country="{country_code}"'
+                print(f"    [FOFA] Adding country filter: {country_code}")
+
+            qbase64 = base64.b64encode(full_query.encode()).decode()
             params = {'email': self.email, 'key': self.key, 'qbase64': qbase64, 'fields': 'host,ip,port', 'size': 100}
-            print(f"    [FOFA] Searching: {query}")
+            print(f"    [FOFA] Searching: {full_query}")
             res = requests.get(self.base_url, params=params, timeout=15)
             if res.status_code != 200: return []
             
@@ -290,7 +305,7 @@ class UrlScanService:
         self.api_key = settings.URLSCAN_KEY
         self.search_url = "https://urlscan.io/api/v1/search/"
         
-    def search(self, query: str) -> List[Dict[str, Any]]:
+    def search(self, query: str, country_code: str = None) -> List[Dict[str, Any]]:
         if not self.api_key:
             print("    [URLScan] No API key found")
             return []
@@ -304,6 +319,10 @@ class UrlScanService:
             # URLScan query format: search in page content
             # Query format: page.domain:X OR page.url:*X* OR filename:X
             api_query = f'page.body:"{query}" OR page.url:*{query}*'
+            
+            if country_code:
+                api_query = f'({api_query}) AND page.country:"{country_code}"'
+                print(f"    [URLScan] Adding country filter: {country_code}")
             
             params = {
                 'q': api_query,
