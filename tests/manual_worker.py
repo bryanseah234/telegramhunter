@@ -93,10 +93,10 @@ async def process_credential(semaphore, cred, i, total, known_chat_ids):
                     print(f"   💾 [{cred_id}] Updated DB to ACTIVE.")
                 else:
                     # USE SHARED ORPHAN MATCHING
-                    print(f"   ⚠️ [{cred_id}] No chats found via API. Attempting Orphan Matching...")
+                    print(f"   ⚠️ [{cred_id}] No chats found via API. Attempting Orphan Matching (Async)...")
                     matched_id = None
                     if known_chat_ids:
-                        matched_id = scraper_service.attempt_orphan_match(token, known_chat_ids)
+                        matched_id = await scraper_service.attempt_orphan_match(token, known_chat_ids)
                     
                     if matched_id:
                          chat_id = matched_id
