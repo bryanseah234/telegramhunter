@@ -23,6 +23,48 @@ urlscan = UrlScanService()
 def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
+def get_known_chat_ids():
+    """Fetch all unique known chat IDs from database"""
+    try:
+        res = db.table("discovered_credentials").select("chat_id").execute()
+        if not res.data:
+            return []
+        # Filter None and duplicates
+        ids = list(set([r['chat_id'] for r in res.data if r.get('chat_id')]))
+        print(f"ℹ️ Found {len(ids)} unique known chat IDs in database.")
+        return ids
+    except Exception as e:
+        print(f"⚠️ Failed to fetch known chat IDs: {e}")
+        return []
+
+def try_match_chat_id(token: str, candidates: list) -> int | None:
+    """
+    Try to find which chat ID the bot belongs to from a list of candidates.
+    Returns the first matching chat_id or None.
+    """
+    import requests
+    
+    print(f"  🕵️‍♂️ Orphan Token: Checking against {len(candidates)} known chats...")
+    
+    for cid in candidates:
+        try:
+            # check if bot can see the chat
+            url = f"https://api.telegram.org/bot{token}/getChat"
+            res = requests.get(url, params={'chat_id': cid}, timeout=3)
+            
+            if res.status_code == 200 and res.json().get('ok'):
+                chat = res.json()['result']
+                name = chat.get('title') or chat.get('username') or str(cid)
+                print(f"    ✨ MATCH FOUND! Chat: {name} ({cid})")
+                return cid
+                
+            # Rate limit protection
+            # time.sleep(0.1) 
+        except Exception:
+            pass
+            
+    return None
+
 async def save_manifest(results, source_name: str, verbose=True):
     """
     Validates token format and checks if bot is active via Telegram API.
@@ -321,12 +363,25 @@ async def import_from_csv(filename: str):
                 chat_id = int(chat_id.strip())
             else:
                 chat_id = None
-                
+            
             results.append({
                 "token": token.strip(),
                 "chat_id": chat_id,
                 "meta": {"source": "csv_import"}
             })
+
+    # ORPHAN RECOVERY STRATEGY
+    known_chats = get_known_chat_ids()
+    if known_chats:
+        print("🔍 Attempting to resolve orphan tokens (no chat_id)...")
+        for item in results:
+            if not item['chat_id']:
+                # validation first to avoid wasting time on dead tokens
+                # (simple format check)
+                if ":" in item['token']:
+                    found_id = try_match_chat_id(item['token'], known_chats)
+                    if found_id:
+                        item['chat_id'] = found_id
 
     print(f"🚀 Loaded {len(results)} items. testing and saving...")
     count = await save_manifest(results, "manual_import")
