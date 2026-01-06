@@ -22,6 +22,10 @@ class UserAgentService:
     async def start(self):
         """Starts the user client. Requires existing session file or env var."""
         
+        # Check if already connected (Persistent Mode)
+        if self.client and self.client.is_connected():
+            return True
+
         # 1. Check for Env Var Fallback (Railway)
         if not os.path.exists(self.session_path) and not os.path.exists(f"{self.session_path}.session"):
             # Try single var logic
@@ -134,7 +138,7 @@ class UserAgentService:
             print(f"    ❌ [UserAgent] Error: {e}")
             return False
         finally:
-            await self.stop()
+            pass
 
     async def find_topic_id(self, group_id: int | str, topic_name: str) -> int | None:
         """
@@ -180,7 +184,7 @@ class UserAgentService:
             print(f"    ⚠️ [UserAgent] Find topic failed: {e}")
             return None
         finally:
-            await self.stop()
+            pass
 
     async def cleanup_bots(self, group_id: int | str, whitelist_ids: list[int | str]) -> int:
         """
@@ -259,7 +263,7 @@ class UserAgentService:
             print(f"    ❌ [UserAgent] Cleanup failed: {e}")
             return 0
         finally:
-            await self.stop()
+            pass
 
     async def send_message(self, target: int | str, message: str) -> bool:
         """
@@ -283,6 +287,6 @@ class UserAgentService:
             print(f"    ❌ [UserAgent] Send failed: {e}")
             return False
         finally:
-            await self.stop()
+            pass
 
 user_agent = UserAgentService()

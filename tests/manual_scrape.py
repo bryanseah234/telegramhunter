@@ -12,7 +12,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.core.database import db
 from app.core.security import security
 from app.services.scanners import ShodanService, GithubService, UrlScanService, FofaService
-from app.services.broadcaster_srv import broadcaster_service
+from app.services.broadcaster_srv import BroadcasterService
+
+# Instantiate service locally for script use
+broadcaster_service = BroadcasterService()
 
 # Initialize Services (Fofa/Censys/HybridAnalysis REMOVED - API access issues)
 shodan = ShodanService()
