@@ -91,17 +91,67 @@ docker-compose up --build
 - **Metrics**: <http://localhost:8000/health/metrics>
 - **Manual Scans**: <http://localhost:8000/scan/trigger-dev/github>
 
-## ☁️ Production Deployment
+## 🐳 Docker Deployment (Recommended)
 
-### Pre-Deployment Validation
+The easiest way to run Telegram Hunter is using Docker Compose. This works on **Windows (WSL2)**, **Mac**, and **Linux**.
+
+### Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+- **Windows Users**: Ensure [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) is enabled and integrated with Docker Desktop.
+
+### 1. Setup Environment
 
 ```bash
-# Validate deployment readiness
-python scripts/validate_deployment.py
-
-# Check configuration
-python scripts/validate_startup.py
+git clone https://github.com/bryanseah234/telegramhunter.git
+cd telegramhunter
+cp .env.example .env
+# Edit .env and add your keys (Supabase, Telegram, etc.)
 ```
+
+### 2. Run with Docker Compose
+
+This command starts the **API**, **Worker**, **Scheduler**, and **Redis** in the background.
+
+```bash
+docker-compose up -d --build
+```
+
+### 3. Verify Running Services
+
+```bash
+docker-compose ps
+```
+
+You should see 4 services running:
+
+- `api`: The FastAPI backend (Port 8000)
+- `worker`: The Celery worker processing tasks
+- `beat`: The Scheduler
+- `redis`: The message broker
+
+### 4. Access the Application
+
+- **API Dashboard**: <http://localhost:8000/docs>
+- **Health Check**: <http://localhost:8000/health/detailed>
+
+### 5. View Logs
+
+To see what the worker is doing (scanning, finding tokens):
+
+```bash
+docker-compose logs -f worker
+```
+
+To stop everything:
+
+```bash
+docker-compose down
+```
+
+---
+
+## ☁️ Production Deployment (Railway/VPS)
 
 ### Backend → Railway/Oracle Cloud
 
@@ -112,7 +162,7 @@ python scripts/validate_startup.py
 **Railway Deployment:**
 
 - Set environment variables in Railway dashboard
-- Service will auto-deploy on push to main
+- Service will auto-deploy on push to main (uses `Dockerfile` and `Procfile`)
 
 ### Frontend → Vercel
 
@@ -143,12 +193,6 @@ curl http://localhost:8000/health/detailed
 
 # Performance metrics
 curl http://localhost:8000/health/metrics
-
-# Circuit breaker status
-curl http://localhost:8000/health/circuit-breakers
-
-# Reset a circuit breaker
-curl -X POST http://localhost:8000/health/circuit-breakers/shodan/reset
 ```
 
 ### Check Stats

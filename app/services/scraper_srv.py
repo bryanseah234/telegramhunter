@@ -539,45 +539,12 @@ class ScraperService:
 
     async def attempt_orphan_match(self, token: str, known_chat_ids: List[int]) -> Optional[int]:
         """
+        [DEPRECATED/DISABLED]
         Try to match a token to a known chat ID by checking visibility (getChat).
-        Returns chat_id if found, else None.
-        CONCURRENT VERSION: Checks 20 chats in parallel to prevent timeouts.
+        Returns None immediately to save rate limits.
         """
-        import requests
-        logger.info(f"🕵️‍♂️ [Scraper] Orphan Token: Checking against {len(known_chat_ids)} known chats (Concurrent)...")
-        
-        semaphore = asyncio.Semaphore(20) # 20 concurrent checks
-        found_id = None
-        
-        async def check_chat(cid):
-            nonlocal found_id
-            if found_id: return # Stop if found
-            
-            async with semaphore:
-                try:
-                    # Run blocking request in thread pool
-                    loop = asyncio.get_running_loop()
-                    url = f"https://api.telegram.org/bot{token}/getChat"
-                    
-                    def do_req():
-                        return requests.get(url, params={'chat_id': cid}, timeout=3)
-                    
-                    res = await loop.run_in_executor(None, do_req)
-                    
-                    if res.status_code == 200 and res.json().get('ok'):
-                        chat = res.json()['result']
-                        name = chat.get('title') or chat.get('username') or str(cid)
-                        logger.info(f"    ✨ [Scraper] MATCH FOUND! Chat: {name} ({cid})")
-                        found_id = cid
-                        return cid
-                except Exception:
-                    pass
-            return None
+        # Feature disabled by user request to prevent rate limiting.
+        return None
 
-        # Create tasks
-        tasks = [check_chat(cid) for cid in known_chat_ids]
-        await asyncio.gather(*tasks)
-        
-        return found_id
 
 scraper_service = ScraperService()

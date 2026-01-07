@@ -1,8 +1,6 @@
 import asyncio
 import sys
 import os
-import time
-import requests
 
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -10,47 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.core.database import db
 from app.services.scraper_srv import scraper_service
 
-def get_known_chat_ids():
-    """Fetch all unique known chat IDs from database"""
-    try:
-        res = db.table("discovered_credentials").select("chat_id").execute()
-        if not res.data:
-            return []
-        # Filter None and duplicates
-        ids = list(set([r['chat_id'] for r in res.data if r.get('chat_id')]))
-        print(f"ℹ️ Found {len(ids)} unique known chat IDs in database.")
-        return ids
-    except Exception as e:
-        print(f"⚠️ Failed to fetch known chat IDs: {e}")
-        return []
-
-def try_match_chat_id(token: str, candidates: list) -> int | None:
-    """
-    Try to find which chat ID the bot belongs to from a list of candidates.
-    Returns the first matching chat_id or None.
-    """
-    print(f"  🕵️‍♂️ Orphan Token: Checking against {len(candidates)} known chats...")
-    
-    for cid in candidates:
-        try:
-            # check if bot can see the chat
-            url = f"https://api.telegram.org/bot{token}/getChat"
-            res = requests.get(url, params={'chat_id': cid}, timeout=3)
-            
-            if res.status_code == 200 and res.json().get('ok'):
-                chat = res.json()['result']
-                name = chat.get('title') or chat.get('username') or str(cid)
-                print(f"    ✨ MATCH FOUND! Chat: {name} ({cid})")
-                return cid
-                
-            # Rate limit protection
-            # time.sleep(0.1) 
-        except Exception:
-            pass
-            
-    return None
-
-async def process_credential(semaphore, cred, i, total, known_chat_ids):
+async def process_credential(semaphore, cred, i, total):
     """
     Process a single credential with rate limiting via Semaphore.
     """
@@ -92,25 +50,10 @@ async def process_credential(semaphore, cred, i, total, known_chat_ids):
                     }).eq("id", cred_id).execute()
                     print(f"   💾 [{cred_id}] Updated DB to ACTIVE.")
                 else:
-                    # USE SHARED ORPHAN MATCHING
-                    print(f"   ⚠️ [{cred_id}] No chats found via API. Attempting Orphan Matching (Async)...")
-                    matched_id = None
-                    if known_chat_ids:
-                        matched_id = await scraper_service.attempt_orphan_match(token, known_chat_ids)
-                    
-                    if matched_id:
-                         chat_id = matched_id
-                         chat_name = "Orphan Match"
-                         
-                         db.table("discovered_credentials").update({
-                            "chat_id": chat_id,
-                            "status": "active",
-                            "meta": {**cred.get('meta', {}), "chat_name": chat_name, "orphan_match": True}
-                         }).eq("id", cred_id).execute()
-                         print(f"   💾 [{cred_id}] [Orphan] Updated DB to ACTIVE.")
-                    else:
-                        print(f"   ⚠️ [{cred_id}] Orphan matching failed. Skipping.")
-                        return 0
+                    print(f"   ⚠️ [{cred_id}] No chats found via API. Marking as Active (No Orphan Match).")
+                    db.table("discovered_credentials").update({"status": "active"}).eq("id", cred_id).execute()
+                    # Continue without scraping
+                    return 0
             except Exception as e:
                 print(f"   ❌ [{cred_id}] Discovery failed: {e}")
                 return 0
@@ -149,10 +92,7 @@ async def run_manual_worker():
     # Configure logging
     import logging
     logging.basicConfig(level=logging.INFO, format='%(message)s')
-    logging.getLogger('telethon').setLevel(logging.WARNING)
-
-    # 0. Load Known Chats
-    known_chat_ids = get_known_chat_ids()
+    logging.getLogger('telethon').setLevel(logging.ERROR)
 
     # 1. Fetch Credentials
     try:
@@ -176,7 +116,7 @@ async def run_manual_worker():
     
     for i, cred in enumerate(creds):
         # Create coroutine for each credential
-        tasks.append(process_credential(semaphore, cred, i+1, len(creds), known_chat_ids))
+        tasks.append(process_credential(semaphore, cred, i+1, len(creds)))
     
     # Run all tasks
     results = await asyncio.gather(*tasks)
