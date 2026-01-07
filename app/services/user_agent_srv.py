@@ -1,7 +1,8 @@
 import os
 import asyncio
-from telethon import TelegramClient, functions, types
+from telethon import TelegramClient, functions, types, errors
 from app.core.config import settings
+import time
 
 # Determine absolute path to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,10 +19,17 @@ class UserAgentService:
         self.session_path = SESSION_FILE
         self.client = None
         self.lock = asyncio.Lock()
+        self.cooldown_until = 0 # Unix timestamp until which usage is blocked
 
     async def start(self):
         """Starts the user client. Requires existing session file or env var."""
         
+        # Check cooldown
+        if time.time() < self.cooldown_until:
+             wait_left = int(self.cooldown_until - time.time())
+             print(f"    ⏳ [UserAgent] In Cooldown for {wait_left}s. Skipping action.")
+             return False
+
         # Check if already connected (Persistent Mode)
         if self.client and self.client.is_connected():
             return True
@@ -134,6 +142,10 @@ class UserAgentService:
                     print(f"    ❌ [UserAgent] Invite failed: {e_channel} | {e_chat}")
                     return False
                     
+        except errors.FloodWaitError as e:
+            print(f"    🛑 [UserAgent] FLOOD WAIT: Must wait {e.seconds} seconds.")
+            self.cooldown_until = time.time() + e.seconds + 5
+            return False
         except Exception as e:
             print(f"    ❌ [UserAgent] Error: {e}")
             return False

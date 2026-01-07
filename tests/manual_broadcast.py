@@ -7,7 +7,6 @@ import time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.core.database import db
-from app.core.database import db
 from app.services.broadcaster_srv import BroadcasterService
 from app.core.config import settings
 

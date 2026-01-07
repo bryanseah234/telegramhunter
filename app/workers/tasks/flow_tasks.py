@@ -158,31 +158,12 @@ async def _enrich_logic(cred_id: str):
 
     if not chats:
         # Valid token, but no open dialogs.
-        logger.info(f"    [Enrich] No chats via API. Attempting Orphan Matching...")
-        
-        # 1. Fetch Known Chat IDs (for Orphan Matching)
-        known_chat_ids = []
-        try:
-             res = db.table("discovered_credentials").select("chat_id").execute()
-             if res.data:
-                 known_chat_ids = list(set([r['chat_id'] for r in res.data if r.get('chat_id')]))
-        except Exception as e:
-            logger.warning(f"    ⚠️ [Enrich] Failed to fetch known IDs for matching: {e}")
-
-        # 2. Attempt Match
-        matched_id = None
-        if known_chat_ids:
-            matched_id = await scraper_service.attempt_orphan_match(bot_token, known_chat_ids)
-        
-        if matched_id:
-            logger.info(f"    ✨ [Enrich] Orphan Match! Bot belongs to chat {matched_id}.")
-            # Proceed as if we found a chat
-            chats = [{"id": matched_id, "name": "Orphan Match", "type": "unknown"}]
-            await broadcaster.send_log(f"✨ **Orphan Match**: Cred `{cred_id}` matched to chat `{matched_id}`.")
-        else:
-            # Mark as 'active' - token works but truly no chats accessible
-            db.table("discovered_credentials").update({"status": "active"}).eq("id", cred_id).execute()
-            return "Token valid, but no chats found (and no orphan match). Status updated to 'active'."
+        logger.info(f"    [Enrich] No chats via API. Skipping Orphan Match (Disabled).")
+        # Mark as 'active' - token works but truly no chats accessible
+        db.table("discovered_credentials").update({"status": "active"}).eq("id", cred_id).execute()
+        return "Token valid, but no chats found. Status updated to 'active'."
+    
+    # Logic if chats found...
 
     # Update Logic
     # 1. Update the ORIGINAL record with the first chat found.
