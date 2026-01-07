@@ -198,19 +198,24 @@ def _send_log_sync(message: str):
 @app.task(name="scanner.scan_shodan")
 def scan_shodan(query: str = None, country_code: str = None):
     import time
-    default_queries = [
-        "http.html:\"api.telegram.org\"",
-        "http.html:\"bot_token\"", 
-        "http.title:\"Telegram Bot\" OR http.title:\"Telegram Login\""
+    
+    # Full query list matching manual_scrape.py
+    COMMON_QUERIES = [
+        "api.telegram.org/bot",
+        "bot_token",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_TOKEN",
+        "Telegram Bot",
+        "https://api.telegram.org"
     ]
     
-    queries = [query] if query else default_queries
+    default_queries = [f'http.html:"{q}"' for q in COMMON_QUERIES]
+    default_queries.extend([
+        "http.title:\"Telegram Bot\"",
+        "http.title:\"Telegram Login\""
+    ])
     
-    # Timeout Protection: Limit to 5 randomized queries per run
-    random.shuffle(queries)
-    if len(queries) > 5:
-        queries = queries[:5]
-        logger.info(f"    [Shodan] Limiting to 5 random queries to prevent timeout.")
+    queries = [query] if query else default_queries
 
     # Country Logic
     selected_country = country_code
@@ -247,29 +252,53 @@ def scan_shodan(query: str = None, country_code: str = None):
     return result_msg
 
 @app.task(name="scanner.scan_urlscan")
-def scan_urlscan(query: str = "api.telegram.org", country_code: str = None):
+def scan_urlscan(query: str = None, country_code: str = None):
+    import time
+    
+    # Full query list matching manual_scrape.py
+    COMMON_QUERIES = [
+        "api.telegram.org/bot",
+        "bot_token",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_TOKEN",
+        "Telegram Bot",
+        "https://api.telegram.org"
+    ]
+    
+    queries = [query] if query else COMMON_QUERIES
+    
     # Country Logic
     selected_country = country_code
     if country_code == "RANDOM":
         selected_country = random.choice(settings.TARGET_COUNTRIES)
         logger.info(f"    [URLScan] Randomly selected country: {selected_country}")
         
-    logger.info(f"🔍 [URLScan] Starting Scan | Query: {query} | Country: {selected_country or 'Global'}")
-    _send_log_sync(f"🔍 [URLScan] Starting scan with query: `{query}` (Country: {selected_country})")
-    try:
-        results = urlscan.search(query, country_code=selected_country)
-        logger.info(f"    ✅ [URLScan] Returned {len(results)} results.")
+    logger.info(f"🔍 [URLScan] Starting Scan | Queries: {len(queries)} | Country: {selected_country or 'Global'}")
+    _send_log_sync(f"🔍 [URLScan] Starting scan with {len(queries)} queries (Country: {selected_country})")
+    
+    total_saved = 0
+    errors = []
+    
+    for q in queries:
+        try:
+            logger.info(f"    🔎 [URLScan] Query: {q}")
+            results = urlscan.search(q, country_code=selected_country)
+            logger.info(f"    ✅ [URLScan] Returned {len(results)} results.")
+            
+            saved = _save_credentials(results, "urlscan")
+            total_saved += saved
+            time.sleep(2)  # Rate limit protection
+        except Exception as e:
+            logger.error(f"    ❌ [URLScan] Query failed: {e}")
+            errors.append(str(e))
+    
+    result_msg = f"URLScan scan finished. Saved {total_saved} new credentials."
+    if errors:
+        result_msg += f" (Errors: {len(errors)})"
         
-        saved = _save_credentials(results, "urlscan")
-        msg = f"URLScan scan finished. Saved {saved} new credentials."
-        
-        logger.info(f"🏁 [URLScan] Finished | Saved: {saved}")
-        _send_log_sync(f"🏁 [URLScan] Finished. Saved {saved} new credentials.")
-        return msg
-    except Exception as e:
-        logger.error(f"❌ [URLScan] Failed: {e}")
-        _send_log_sync(f"❌ [URLScan] Scan failed: {e}")
-        return f"URLScan scan failed: {e}"
+    logger.info(f"🏁 [URLScan] Finished | Saved: {total_saved} | Errors: {len(errors)}")
+    _send_log_sync(f"🏁 [URLScan] Finished. Saved {total_saved} new credentials.")
+    return result_msg
 
 @app.task(name="scanner.scan_github")
 def scan_github(query: str = None):
@@ -304,16 +333,14 @@ def scan_github(query: str = None):
     if query:
         queries = [query]
     else:
-        # Shuffle and select subset to avoid timeouts
-        random.shuffle(default_dorks)
-        queries = default_dorks[:5]
+        # Run ALL dorks (matching manual_scrape.py)
+        queries = default_dorks
         
     total_saved = 0
     errors = []
 
-    print(f"Starting GitHub scan with {len(queries)} queries...")
     logger.info(f"🐱 [GitHub] Starting scan with {len(queries)} dorks...")
-    _send_log_sync(f"🐱 [GitHub] Starting scan with {len(queries)} dorks (Selected from pool)...")
+    _send_log_sync(f"🐱 [GitHub] Starting scan with {len(queries)} dorks (Full sweep)...")
 
     for q in queries:
         logger.info(f"    🔎 [GitHub] Dorking: {q}")
