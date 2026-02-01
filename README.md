@@ -13,7 +13,7 @@
 - **Encryption**: All tokens encrypted at rest (Fernet)
 - **Frontend Dashboard**: Telegram-style UI to browse discovered data
 
-### New: Production-Ready Enhancements ✨
+### Production-Ready Enhancements ✨
 
 - **Structured Logging**: Context-aware logging with JSON format for production
 - **Retry Logic**: Exponential backoff for API calls and database operations
@@ -34,73 +34,26 @@
 | Frontend | Next.js + Tailwind CSS |
 | Monitoring | Health checks, Metrics, Circuit breakers |
 | Quality | Ruff, MyPy, Pytest, Pre-commit |
-| Deployment | Docker Compose, Railway, Vercel |
+| Deployment | Docker Compose |
 
 ## 📋 Prerequisites
 
 1. **Docker & Docker Compose** installed
-2. **Supabase Project** (run `init.sql` in SQL Editor)
+2. **Supabase Project** (run `database/init.sql` in SQL Editor)
 3. **Telegram API Keys** from [my.telegram.org](https://my.telegram.org)
 4. **Monitoring Bot Token** from [@BotFather](https://t.me/BotFather)
 5. **API Keys** (optional): Shodan, URLScan, GitHub, FOFA
 
-## ⚙️ Quick Start
+## 🐳 Docker Deployment
 
-### 1. Clone & Configure
-
-```bash
-git clone https://github.com/bryanseah234/telegramhunter.git
-cd telegramhunter
-cp .env.example .env
-nano .env  # Fill in your keys
-```
-
-**Generate Encryption Key:**
-
-```bash
-python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-### 2. Development Setup
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-
-# Run validation
-python scripts/validate_startup.py
-
-# Optional: Setup pre-commit hooks
-pip install pre-commit
-pre-commit install
-```
-
-### 3. Initialize Database
-
-Run `init.sql` in your Supabase SQL Editor.
-
-### 4. Run Locally
-
-```bash
-docker-compose up --build
-```
-
-- **API**: <http://localhost:8000/docs>
-- **Health Check**: <http://localhost:8000/health/detailed>
-- **Metrics**: <http://localhost:8000/health/metrics>
-- **Manual Scans**: <http://localhost:8000/scan/trigger-dev/github>
-
-## 🐳 Docker Deployment (Recommended)
-
-The easiest way to run Telegram Hunter is using Docker Compose. This works on **Windows (WSL2)**, **Mac**, and **Linux**.
+The recommended way to run Telegram Hunter is using Docker Compose. This works on **Windows (WSL2)**, **Mac**, and **Linux**.
 
 ### Prerequisites
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
-- **Windows Users**: Ensure [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) is enabled and integrated with Docker Desktop.
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
+- **Windows Users**: Ensure [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) is enabled and integrated with Docker Desktop
 
-### 1. Setup Environment
+### 1. Clone & Configure
 
 ```bash
 git clone https://github.com/bryanseah234/telegramhunter.git
@@ -109,7 +62,17 @@ cp .env.example .env
 # Edit .env and add your keys (Supabase, Telegram, etc.)
 ```
 
-### 2. Run with Docker Compose
+**Generate Encryption Key:**
+
+```bash
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+### 2. Initialize Database
+
+Run `database/init.sql` in your Supabase SQL Editor.
+
+### 3. Run with Docker Compose
 
 This command starts the **API**, **Worker**, **Scheduler**, and **Redis** in the background.
 
@@ -117,7 +80,7 @@ This command starts the **API**, **Worker**, **Scheduler**, and **Redis** in the
 docker-compose up -d --build
 ```
 
-### 3. Verify Running Services
+### 4. Verify Running Services
 
 ```bash
 docker-compose ps
@@ -125,103 +88,82 @@ docker-compose ps
 
 You should see 4 services running:
 
-- `api`: The FastAPI backend (Port 8000)
-- `worker`: The Celery worker processing tasks
-- `beat`: The Scheduler
-- `redis`: The message broker
+| Service | Description | Port |
+|---------|-------------|------|
+| `api` | FastAPI backend | 8000 |
+| `worker` | Celery worker (4 concurrent) | - |
+| `beat` | Celery scheduler | - |
+| `redis` | Message broker | 6379 |
 
-### 4. Access the Application
+### 5. Access the Application
 
 - **API Dashboard**: <http://localhost:8000/docs>
 - **Health Check**: <http://localhost:8000/health/detailed>
+- **Metrics**: <http://localhost:8000/health/metrics>
 
-### 5. View Logs
-
-To see what the worker is doing (scanning, finding tokens):
+### 6. View Logs
 
 ```bash
+# Worker logs (shows scanning activity)
 docker-compose logs -f worker
-```
 
-To stop everything:
+# All services
+docker-compose logs -f
 
-```bash
+# Stop everything
 docker-compose down
 ```
 
----
+## ⚙️ Scan Schedule (Aggressive Mode)
 
-## ☁️ Production Deployment (Railway/VPS)
+The system runs scans automatically on this schedule (UTC):
 
-### Backend → Railway/Oracle Cloud
+| Task | Frequency | Schedule |
+|------|-----------|----------|
+| **GitHub Scan** | Every 4 hours | 00:00, 04:00, 08:00... |
+| **Shodan Scan** | Every 4 hours | 00:20, 04:20, 08:20... |
+| **URLScan Scan** | Every 4 hours | 00:40, 04:40, 08:40... |
+| **FOFA Scan** | Every 4 hours | 01:00, 05:00, 09:00... |
+| **Re-scrape Active** | Every 1 hour | Every hour at :00 |
+| **Broadcast** | Every 1 hour | Every hour at :30 |
+| **Heartbeat** | Every 30 min | Every :00 and :30 |
 
-1. SSH into your VM, install Docker
-2. Clone repo & copy your `.env` file
-3. Run: `docker-compose up -d --build`
+### Manual Scan Triggers
 
-**Railway Deployment:**
+```bash
+# Trigger GitHub scan
+curl http://localhost:8000/scan/trigger-dev/github
 
-- Set environment variables in Railway dashboard
-- Service will auto-deploy on push to main (uses `Dockerfile` and `Procfile`)
+# Trigger Shodan scan with country filter
+curl "http://localhost:8000/scan/trigger-dev/shodan?country_code=US"
 
-### Frontend → Vercel
+# Trigger with random country from target list
+curl "http://localhost:8000/scan/trigger-dev/shodan?country_code=RANDOM"
 
-1. Import repo to Vercel
-2. Set **Root Directory** to `frontend`
-3. Add environment variables:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_KEY`
+# Trigger FOFA scan
+curl http://localhost:8000/scan/trigger-dev/fofa
+```
 
 ## 🔒 Security
 
-- **Production Mode**: POST scan endpoints are disabled
-- **Audit Logging**: Tracks token decryption, credential access
 - **Encrypted Storage**: All tokens encrypted with Fernet
-- **Config Validation**: Startup checks for invalid configuration
 - **RLS Policies**: Row-level security on Supabase tables
+- **Audit Logging**: Tracks token decryption, credential access
+- **Config Validation**: Startup checks for invalid configuration
 
-## 🖥 Usage
+## 🖥 Manual Operations
 
-### Health & Monitoring
+### Import Tokens from CSV
 
 ```bash
-# Basic health check
-curl http://localhost:8000/health/
-
-# Detailed system status
-curl http://localhost:8000/health/detailed
-
-# Performance metrics
-curl http://localhost:8000/health/metrics
+# Format: token,chat_id (one per line)
+python tests/manual_scrape.py -i import_tokens.csv
 ```
 
 ### Check Stats
 
 ```bash
 curl http://localhost:8000/monitor/stats
-```
-
-### Manual Scan with Country Filter
-
-```bash
-# Scan specific country
-curl http://localhost:8000/scan/trigger-dev/shodan?country_code=US
-
-# Random country from TARGET_COUNTRIES
-curl http://localhost:8000/scan/trigger-dev/shodan?country_code=RANDOM
-```
-
-### Manual Token Import
-
-```bash
-# Import CSV of tokens (Format: token,chat_id)
-python tests/manual_scrape.py -i import_tokens.csv
-```
-
-### View Logs
-
-```bash
-docker-compose logs -f worker-scanner
 ```
 
 ## 📁 Project Structure
@@ -235,10 +177,12 @@ telegramhunter/
 │   ├── utils/             # Helper utilities
 │   └── workers/           # Celery tasks
 ├── frontend/              # Next.js dashboard
+├── database/              # SQL schemas
 ├── scripts/               # Validation, setup, helpers
 ├── tests/
 │   ├── unit/              # Unit tests
 │   └── integration/       # Integration tests
+├── chrome_extension/      # Browser extension for token collection
 ├── docker-compose.yml
 ├── pyproject.toml         # Ruff, MyPy, Pytest config
 ├── .pre-commit-config.yaml
@@ -255,24 +199,33 @@ Configure in `app/core/config.py`:
 TARGET_COUNTRIES = ["RU", "IR", "IN", "ID", "BR", "UA", "VN", "US", "NG", "EG", "KZ", "CN", "DE"]
 ```
 
-### Worker Optimization
+### Worker Settings
 
-```bash
-# Set concurrency and disable optimization for pycparser
-export PYTHONOPTIMIZE=0
-celery -A app.workers.celery_app worker -B --loglevel=info --concurrency=2
-```
+Current aggressive configuration in `app/workers/celery_app.py`:
 
-### Scan Schedule
-
-Configured in `app/workers/celery_app.py`:
-
-- **Heartbeat**: Every 30 minutes
-- **Scans**: Every 12 hours (staggered by 20 minutes)
-- **Broadcast**: Every 3 hours
-- **Re-scrape**: Every 2 hours
+| Setting | Value |
+|---------|-------|
+| Worker Concurrency | 4 |
+| Memory per Worker | 800MB |
+| Task Timeout | 20 minutes |
+| Broker Connections | 10 |
 
 ## 🧪 Development
+
+### Setup Development Environment
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+
+# Run validation
+python scripts/validate_startup.py
+
+# Setup pre-commit hooks
+pip install pre-commit
+pre-commit install
+```
 
 ### Code Quality
 

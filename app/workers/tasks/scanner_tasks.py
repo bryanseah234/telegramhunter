@@ -3,7 +3,7 @@ import asyncio # Ensure asyncio is imported
 import random
 from app.core.config import settings
 # from app.services.broadcaster_srv import broadcaster_service # REMOVED Global instance
-from app.services.scanners import ShodanService, GithubService, UrlScanService
+from app.services.scanners import ShodanService, GithubService, UrlScanService, FofaService
 from app.core.security import security
 from app.core.database import db
 import hashlib
@@ -13,10 +13,11 @@ import logging
 logger = logging.getLogger("scanner.tasks")
 logger.setLevel(logging.INFO)
 
-# Instantiate services (Fofa/Censys/HybridAnalysis REMOVED - API issues)
+# Instantiate services
 shodan = ShodanService()
 github = GithubService()
 urlscan = UrlScanService()
+fofa = FofaService()  # Re-enabled for aggressive local deployment
 
 def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -370,3 +371,60 @@ def scan_github(query: str = None):
 
 # scan_censys REMOVED - Censys API access issues
 # scan_hybrid REMOVED - Hybrid Analysis API access issues
+
+
+@app.task(name="scanner.scan_fofa", bind=True, max_retries=2)
+def scan_fofa(self, query: str = None, country_code: str = None):
+    """
+    Celery task to scan FOFA for exposed Telegram bots.
+    FOFA is a Chinese search engine similar to Shodan.
+    """
+    import time
+    
+    # Full query list for FOFA
+    COMMON_QUERIES = [
+        'body="api.telegram.org/bot"',
+        'body="bot_token"',
+        'body="TELEGRAM_BOT_TOKEN"',
+        'title="Telegram Bot"',
+        'body="sendMessage" && body="chat_id"',
+    ]
+    
+    queries = [query] if query else COMMON_QUERIES
+    
+    # Country Logic
+    selected_country = country_code
+    if country_code == "RANDOM":
+        selected_country = random.choice(settings.TARGET_COUNTRIES)
+        logger.info(f"    [FOFA] Randomly selected country: {selected_country}")
+    
+    logger.info(f"🔍 [FOFA] Starting Scan | Queries: {len(queries)} | Country: {selected_country or 'Global'}")
+    _send_log_sync(f"🔍 [FOFA] Starting scan with {len(queries)} queries (Country: {selected_country})...")
+    
+    total_saved = 0
+    errors = []
+    
+    for q in queries:
+        try:
+            logger.info(f"    🔎 [FOFA] Executing query: {q}")
+            results = fofa.search(query=q, country_code=selected_country)
+            logger.info(f"    ✅ [FOFA] Query returned {len(results)} raw results.")
+            
+            saved = _save_credentials(results, "fofa")
+            total_saved += saved
+            time.sleep(2)  # Rate limit respect
+        except Exception as e:
+            logger.error(f"    ❌ [FOFA] Query failed: {str(e)}")
+            errors.append(str(e))
+            if self.request.retries < self.max_retries:
+                raise self.retry(exc=e, countdown=60)
+    
+    result_msg = f"FOFA scan finished. Saved {total_saved} new credentials."
+    if errors:
+        result_msg += f" (Errors: {len(errors)})"
+        _send_log_sync(f"❌ [FOFA] Completed with errors: {errors[0]}...")
+    else:
+        _send_log_sync(f"🏁 [FOFA] Finished. Saved {total_saved} new credentials.")
+    
+    logger.info(f"🏁 [FOFA] Finished | Total Saved: {total_saved} | Errors: {len(errors)}")
+    return result_msg
