@@ -114,6 +114,58 @@ docker-compose logs -f
 docker-compose down
 ```
 
+## 🔄 Updating & Redeploying
+
+When a new version is released, follow these steps to update your local deployment:
+
+### Quick Update (Recommended)
+
+```bash
+cd telegramhunter
+
+# 1. Pull latest changes
+git pull origin main
+
+# 2. Rebuild and restart containers
+docker-compose up -d --build
+
+# 3. Verify all services are running
+docker-compose ps
+```
+
+### Full Rebuild (If Issues Occur)
+
+```bash
+cd telegramhunter
+
+# 1. Stop all containers
+docker-compose down
+
+# 2. Pull latest changes
+git pull origin main
+
+# 3. Remove old images (optional, frees disk space)
+docker-compose down --rmi local
+
+# 4. Rebuild from scratch
+docker-compose up -d --build
+
+# 5. Verify services
+docker-compose ps
+curl http://localhost:8000/health/detailed
+```
+
+### Check for .env Changes
+
+After pulling updates, check if `.env.example` has new variables:
+
+```bash
+# Compare your .env with the example
+diff .env .env.example
+```
+
+If new variables were added, copy them to your `.env` file.
+
 ## ⚙️ Scan Schedule (Aggressive Mode)
 
 The system runs scans automatically on this schedule (UTC):
