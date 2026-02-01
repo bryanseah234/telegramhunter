@@ -28,11 +28,18 @@ RUN useradd -m -u 1000 celery
 # Application Code
 COPY . .
 
+# Make entrypoint executable
+RUN chmod +x /app/docker-entrypoint.sh
+
 # Change ownership to the new user
 RUN chown -R celery:celery /app
 
 # Switch to non-root user
 USER celery
 
-# Default command (can be overridden by Procfile)
+# Set entrypoint (runs CSV import before main command)
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
+# Default command (overridden by docker-compose)
 CMD ["bash"]
+
