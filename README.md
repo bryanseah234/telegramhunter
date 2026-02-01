@@ -166,6 +166,37 @@ diff .env .env.example
 
 If new variables were added, copy them to your `.env` file.
 
+### Automatic Token Import
+
+On every container startup, the system automatically imports tokens from `import_tokens.csv` (if the file exists). This is useful for:
+
+1. **Manual FOFA scraping** via Chrome extension → export to CSV
+2. **Bulk token imports** from other sources
+
+**To use:**
+
+1. Add tokens to `import_tokens.csv` in the project root:
+
+   ```csv
+   token,chat_id
+   123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,-1001234567890
+   987654321:BBxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,
+   ```
+
+   > Note: `chat_id` is optional. If omitted, the system will try to discover it automatically.
+
+2. Restart containers:
+
+   ```bash
+   docker-compose up -d --build
+   ```
+
+3. Check logs to verify import:
+
+   ```bash
+   docker-compose logs worker | head -50
+   ```
+
 ## ⚙️ Scan Schedule (Aggressive Mode)
 
 The system runs scans automatically on this schedule (UTC):
