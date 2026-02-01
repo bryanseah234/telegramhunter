@@ -13,16 +13,18 @@ services:
     ports:
       - "8000:8000"
     env_file: .env
-    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 2
     depends_on:
       - redis
+    environment:
+      - ENV=development  # Enable dev mode for manual scan triggers
 
   worker:
     build: .
     restart: always
     env_file: .env
-    # Running Celery Worker
-    command: celery -A app.workers.celery_app worker --loglevel=info
+    # Aggressive: 4 concurrent workers for parallel task processing
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4
     depends_on:
       - redis
 
@@ -30,10 +32,11 @@ services:
     build: .
     restart: always
     env_file: .env
-    # Running Celery Beat
+    # Running Celery Beat Scheduler
     command: celery -A app.workers.celery_app beat --loglevel=info
     depends_on:
       - redis
+      - worker
 
 volumes:
   redis_data:

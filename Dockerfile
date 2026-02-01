@@ -1,14 +1,13 @@
 FROM python:3.11-slim-bookworm
 
 # ============================================
-# Railway Free Tier Optimization
+# Local Docker Deployment (Aggressive Mode)
 # ============================================
 
-# Environment - Memory optimization
+# Environment - PYTHONOPTIMIZE=0 required for Telethon/pycparser
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONOPTIMIZE=2 \
-    MALLOC_ARENA_MAX=2
+    PYTHONOPTIMIZE=0
 
 WORKDIR /app
 
