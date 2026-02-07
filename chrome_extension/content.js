@@ -1,6 +1,7 @@
 // --- CONSTANTS ---
-const CLICK_SELECTOR = 'i.iconfont.icon-daima';  // Updated: icon is now nested inside span
-const POPUP_IFRAME_SELECTOR = '.el-dialog__body iframe';
+const CLICK_SELECTOR = 'i.iconfont.icon-daima';  // Code view icon button
+const POPUP_CONTENT_SELECTOR = '.source-content';  // The div containing HTML source
+const POPUP_DIALOG_SELECTOR = '.el-dialog__body';  // Fallback: the dialog body
 
 // --- STATE ---
 let isWorking = false;
@@ -49,15 +50,19 @@ async function startScraping() {
         // Click
         el.click();
 
-        // Wait for Iframe
-        const content = await waitForIframe(POPUP_IFRAME_SELECTOR, 8000);
+        // Wait for popup content (dialog, not iframe)
+        const content = await waitForPopupContent(8000);
 
         if (content) {
+            log(`Found content (${content.length} chars)`);
             const data = extractData(content);
+            log(`Extracted: token=${data.token ? 'YES' : 'NO'}, chatId=${data.chatId || 'NO'}`);
             if (data.token) {
                 chrome.runtime.sendMessage({ action: "RESULT_FOUND", data: data });
                 el.style.background = "#0f0"; // Green for success
             }
+        } else {
+            log("No content found in popup");
         }
 
         // Close / Cleanup
@@ -95,25 +100,44 @@ function getVisibleItems() {
     });
 }
 
-async function waitForIframe(selector, timeout) {
+async function waitForPopupContent(timeout) {
     let elapsed = 0;
     while (elapsed < timeout) {
-        const iframes = document.querySelectorAll(selector);
-        // Find newest visible iframe
-        const target = Array.from(iframes).reverse().find(el => el.offsetParent !== null);
+        // Try .source-content first (where HTML source is displayed)
+        let sourceDiv = document.querySelector(POPUP_CONTENT_SELECTOR);
+        if (sourceDiv && sourceDiv.innerText.length > 50) {
+            // Decode HTML entities (FOFA shows &lt; &gt; etc)
+            return decodeHTMLEntities(sourceDiv.innerText);
+        }
 
-        if (target) {
+        // Fallback: try the dialog body directly
+        let dialogBody = document.querySelector(POPUP_DIALOG_SELECTOR);
+        if (dialogBody && dialogBody.innerText.length > 50) {
+            return decodeHTMLEntities(dialogBody.innerText);
+        }
+
+        // Also try iframes (some pages use them)
+        const iframes = document.querySelectorAll('.el-dialog__body iframe');
+        for (const iframe of iframes) {
             try {
-                const doc = target.contentDocument || target.contentWindow.document;
-                if (doc && doc.body && doc.body.innerText.length > 20) {
+                const doc = iframe.contentDocument || iframe.contentWindow.document;
+                if (doc && doc.body && doc.body.innerText.length > 50) {
                     return doc.body.innerText;
                 }
-            } catch (e) { }
+            } catch (e) { /* cross-origin, ignore */ }
         }
+
         await delay(500);
         elapsed += 500;
     }
     return null;
+}
+
+// Decode HTML entities like &lt; &gt; &amp;
+function decodeHTMLEntities(text) {
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = text;
+    return textarea.value;
 }
 
 function extractData(rawText) {
