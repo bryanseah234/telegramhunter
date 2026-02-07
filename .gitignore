@@ -9,4 +9,5 @@ celerybeat-schedule
 celerybeat.pid
 .pytest_cache/
 *.log
+logs/
 .DS_Store

@@ -114,11 +114,97 @@ docker-compose logs -f
 docker-compose down
 ```
 
-## 🔄 Updating & Redeploying
+## 🔄 Auto-Update System
 
-When a new version is released, follow these steps to update your local deployment:
+Telegram Hunter includes an **automatic update system** that checks for new releases and updates your deployment automatically. Once configured, it's fully self-healing!
 
-### Quick Update (Recommended)
+### 🚀 One-Time Setup (5 minutes)
+
+After cloning the repo, run these commands **once** to enable automatic updates:
+
+**Linux/Mac:**
+
+```bash
+# 1. Make the update script executable
+chmod +x scripts/auto-update.sh
+
+# 2. Test it works
+./scripts/auto-update.sh --check-only
+
+# 3. Add to crontab (runs every 6 hours)
+(crontab -l 2>/dev/null; echo "0 */6 * * * cd $(pwd) && ./scripts/auto-update.sh >> logs/auto-update.log 2>&1") | crontab -
+
+# Verify cron was added
+crontab -l
+```
+
+**Windows (Task Scheduler via WSL):**
+
+```bash
+# In WSL, add to crontab same as Linux
+chmod +x scripts/auto-update.sh
+(crontab -l 2>/dev/null; echo "0 */6 * * * cd $(pwd) && ./scripts/auto-update.sh >> logs/auto-update.log 2>&1") | crontab -
+```
+
+> **That's it!** After this one-time setup, your deployment will automatically:
+> - Check for updates every 6 hours
+> - Pull new code when available
+> - Rebuild and restart Docker containers
+> - Alert you if new `.env` variables are needed
+> - Log all activity to `logs/auto-update.log`
+
+### ✅ What Happens Automatically
+
+| Event | Action |
+|-------|--------|
+| New release pushed | Auto-detected within 6 hours |
+| Code changes | Pulled and containers rebuilt |
+| New dependencies | Installed during Docker rebuild |
+| New `.env` variables | Logged as warning (manual action needed) |
+| Containers healthy | Verified after restart |
+
+### 🛠 Manual Update Commands
+
+You can also trigger updates manually:
+
+```bash
+# Check if update is available (no changes made)
+./scripts/auto-update.sh --check-only
+
+# Run update now
+./scripts/auto-update.sh
+
+# Force rebuild even if already up-to-date
+./scripts/auto-update.sh --force
+```
+
+### 📋 View Update History
+
+```bash
+# View recent update logs
+tail -100 logs/auto-update.log
+
+# Check current version
+git log -1 --oneline
+```
+
+### ⚙️ Customize Update Frequency
+
+Edit your crontab to change the schedule:
+
+```bash
+crontab -e
+```
+
+Common schedules:
+- `0 */6 * * *` - Every 6 hours (default)
+- `0 */12 * * *` - Every 12 hours
+- `0 4 * * *` - Once daily at 4 AM
+- `0 4 * * 0` - Once weekly on Sunday at 4 AM
+
+### 🔧 Traditional Manual Update
+
+If you prefer not to use auto-updates:
 
 ```bash
 cd telegramhunter
@@ -127,37 +213,15 @@ cd telegramhunter
 git pull origin main
 
 # 2. Rebuild and restart containers
-docker-compose up -d --build
+docker compose up -d --build
 
 # 3. Verify all services are running
-docker-compose ps
-```
-
-### Full Rebuild (If Issues Occur)
-
-```bash
-cd telegramhunter
-
-# 1. Stop all containers
-docker-compose down
-
-# 2. Pull latest changes
-git pull origin main
-
-# 3. Remove old images (optional, frees disk space)
-docker-compose down --rmi local
-
-# 4. Rebuild from scratch
-docker-compose up -d --build
-
-# 5. Verify services
-docker-compose ps
-curl http://localhost:8000/health/detailed
+docker compose ps
 ```
 
 ### Check for .env Changes
 
-After pulling updates, check if `.env.example` has new variables:
+After updating, check if `.env.example` has new variables:
 
 ```bash
 # Compare your .env with the example
