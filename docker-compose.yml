@@ -23,6 +23,8 @@ services:
       - redis
     environment:
       - ENV=development  # Enable dev mode for manual scan triggers
+    volumes:
+      - ./imports:/app/imports  # Auto-import CSV files from here
     logging:
       driver: "json-file"
       options:
