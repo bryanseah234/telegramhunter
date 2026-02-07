@@ -31,10 +31,9 @@ let activeTabId = null;
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.action) {
         case "GET_STATE":
-            sendResponse(serializeState(state)); // Send clean object (Sets as arrays if needed, but msg passing usually handles basics or fails on Sets)
-            // Actually chrome msg serialization might strip Sets. Let's send resultsFound which is int.
-            // For results array it is fine.
-            break;
+            // This is the only case that needs a response
+            sendResponse(serializeState(state));
+            return false; // Synchronous response already sent
         case "START_SCAN":
             startScan(msg.query, msg.domain);
             break;
@@ -62,7 +61,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             console.log("[Content]", msg.message);
             break;
     }
-    return true; // Keep channel open for async responses if needed
+    return false; // No async response needed for other cases
 });
 
 // --- PERSISTENCE HELPERS ---
