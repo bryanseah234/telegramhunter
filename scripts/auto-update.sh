@@ -184,8 +184,56 @@ log_info "=========================================="
 log_success "🎉 Telegram Hunter updated to $REMOTE_SHORT"
 log_info "=========================================="
 
-# Cleanup old images (optional, saves disk space)
-log_info "Cleaning up old Docker images..."
-docker image prune -f > /dev/null 2>&1 || true
+# =============================================================================
+# System Resource Cleanup
+# =============================================================================
+
+log_info "🧹 Cleaning up system resources..."
+
+# Docker cleanup - images, containers, build cache
+log_info "Pruning unused Docker images..."
+docker image prune -af > /dev/null 2>&1 || true
+
+log_info "Pruning stopped containers..."
+docker container prune -f > /dev/null 2>&1 || true
+
+log_info "Pruning unused build cache..."
+docker builder prune -f > /dev/null 2>&1 || true
+
+# Note: We don't prune volumes automatically to avoid data loss
+# Uncomment the line below if you want aggressive volume cleanup:
+# docker volume prune -f > /dev/null 2>&1 || true
+
+# Log rotation - keep last 5 log files, max 10MB each
+log_info "Rotating logs..."
+LOG_DIR="${PROJECT_DIR}/logs"
+MAX_LOG_SIZE=10485760  # 10MB in bytes
+MAX_LOG_FILES=5
+
+if [ -f "$LOG_FILE" ]; then
+    LOG_SIZE=$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+    if [ "$LOG_SIZE" -gt "$MAX_LOG_SIZE" ]; then
+        log_info "Log file exceeds 10MB, rotating..."
+        # Rotate existing logs
+        for i in $(seq $((MAX_LOG_FILES-1)) -1 1); do
+            if [ -f "${LOG_FILE}.$i" ]; then
+                mv "${LOG_FILE}.$i" "${LOG_FILE}.$((i+1))"
+            fi
+        done
+        # Compress and rotate current log
+        mv "$LOG_FILE" "${LOG_FILE}.1"
+        gzip -f "${LOG_FILE}.1" 2>/dev/null || true
+        # Remove oldest logs beyond MAX_LOG_FILES
+        find "$LOG_DIR" -name "auto-update.log.*" -type f | sort -r | tail -n +$((MAX_LOG_FILES+1)) | xargs rm -f 2>/dev/null || true
+        log_info "Log rotation complete."
+    fi
+fi
+
+# Report disk space saved
+DOCKER_SPACE=$(docker system df --format "{{.Reclaimable}}" 2>/dev/null | head -1 || echo "unknown")
+log_info "Docker reclaimable space: $DOCKER_SPACE"
+
+log_success "✅ Cleanup complete!"
 
 exit 0
+
