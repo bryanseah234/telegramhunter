@@ -8,6 +8,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Load State
     chrome.runtime.sendMessage({ action: "GET_STATE" }, (response) => {
+        if (chrome.runtime.lastError) {
+            console.log("Background not ready:", chrome.runtime.lastError.message);
+            return;
+        }
         updateUI(response);
     });
 

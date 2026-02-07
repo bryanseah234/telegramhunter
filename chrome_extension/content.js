@@ -1,5 +1,5 @@
 // --- CONSTANTS ---
-const CLICK_SELECTOR = '.el-tooltip.iconfont.icon-daima';
+const CLICK_SELECTOR = 'i.iconfont.icon-daima';  // Updated: icon is now nested inside span
 const POPUP_IFRAME_SELECTOR = '.el-dialog__body iframe';
 
 // --- STATE ---
@@ -117,15 +117,43 @@ async function waitForIframe(selector, timeout) {
 }
 
 function extractData(rawText) {
-    const strictTokenRegex = /\b\d{8,10}:[A-Za-z0-9_-]{35}\b/;
-    const chatIDRegex = /(?:chatId|chat_id|cid|id)\s*[:=]\s*['"]?(\d+)['"]?/i;
-    const tokenMatch = rawText.match(strictTokenRegex);
-    const idMatch = rawText.match(chatIDRegex);
+    // Token regex: matches Telegram bot tokens in various formats
+    // Handles: BOT_TOKEN: '...', token = "...", "token": "...", or raw token
+    // Format: 8-10 digit bot_id : 35 char secret starting with "AA"
+    // Example: 8514017233:AAEAPjYrm0bIUvYgvzP68IlmAU14CBOt94E
+    const tokenRegex = /["']?(\d{8,10}:AA[A-Za-z0-9_-]{33})["']?/g;
 
-    let chatId = idMatch ? idMatch[1] : '';
-    if (chatId && chatId.length <= 2) chatId = '';
+    // ChatId regex: handles various JavaScript patterns
+    // Matches: CHAT_ID: '6394582655', chat_id = "-100...", chatId: 123
+    const chatIdRegex = /(?:CHAT_ID|chat_id|chatId|chat|target|cid)\s*[=:]\s*["']?(-?\d{5,20})["']?/gi;
 
-    return { token: tokenMatch ? tokenMatch[0] : '', chatId: chatId };
+    // Find all tokens (there might be multiple)
+    const tokens = [];
+    let tokenMatch;
+    while ((tokenMatch = tokenRegex.exec(rawText)) !== null) {
+        tokens.push(tokenMatch[1]);
+    }
+
+    // Find chatId - try multiple patterns
+    let chatId = '';
+    const idMatches = rawText.match(chatIdRegex);
+    if (idMatches && idMatches.length > 0) {
+        // Extract just the number from the first matched pattern
+        const numMatch = idMatches[0].match(/-?\d{5,20}/);
+        if (numMatch) chatId = numMatch[0];
+    }
+
+    // Debug logging
+    console.log("[TH Extract] Found tokens:", tokens);
+    console.log("[TH Extract] Found chatId:", chatId);
+    console.log("[TH Extract] Raw text sample:", rawText.substring(0, 500));
+
+    // Return first token found (most common case)
+    return {
+        token: tokens.length > 0 ? tokens[0] : '',
+        chatId: chatId,
+        allTokens: tokens  // Include all tokens in case multiple found
+    };
 }
 
 function closePopup() {
