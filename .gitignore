@@ -10,4 +10,6 @@ celerybeat.pid
 .pytest_cache/
 *.log
 logs/
+imports/*.csv
+imports/processed/
 .DS_Store
