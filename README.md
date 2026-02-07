@@ -131,8 +131,8 @@ chmod +x scripts/auto-update.sh
 # 2. Test it works
 ./scripts/auto-update.sh --check-only
 
-# 3. Add to crontab (runs every 6 hours)
-(crontab -l 2>/dev/null; echo "0 */6 * * * cd $(pwd) && ./scripts/auto-update.sh >> logs/auto-update.log 2>&1") | crontab -
+# 3. Add to crontab (checks every 30 minutes, only updates if changes detected)
+(crontab -l 2>/dev/null; echo "*/30 * * * * cd $(pwd) && ./scripts/auto-update.sh >> logs/auto-update.log 2>&1") | crontab -
 
 # Verify cron was added
 crontab -l
@@ -147,6 +147,7 @@ chmod +x scripts/auto-update.sh
 ```
 
 > **That's it!** After this one-time setup, your deployment will automatically:
+>
 > - Check for updates every 6 hours
 > - Pull new code when available
 > - Rebuild and restart Docker containers
@@ -197,6 +198,7 @@ crontab -e
 ```
 
 Common schedules:
+
 - `0 */6 * * *` - Every 6 hours (default)
 - `0 */12 * * *` - Every 12 hours
 - `0 4 * * *` - Once daily at 4 AM
