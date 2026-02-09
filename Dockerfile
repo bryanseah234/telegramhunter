@@ -7,7 +7,8 @@ FROM python:3.11-slim-bookworm
 # Environment - PYTHONOPTIMIZE=0 required for Telethon/pycparser
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONOPTIMIZE=0
+    PYTHONOPTIMIZE=0 \
+    PYTHONPATH=/app
 
 WORKDIR /app
 
@@ -28,11 +29,12 @@ RUN useradd -m -u 1000 celery
 # Application Code
 COPY . .
 
+# Create required directories with proper ownership
+RUN mkdir -p /app/imports/processed && \
+    chown -R celery:celery /app
+
 # Make entrypoint executable
 RUN chmod +x /app/docker-entrypoint.sh
-
-# Change ownership to the new user
-RUN chown -R celery:celery /app
 
 # Switch to non-root user
 USER celery
@@ -42,4 +44,3 @@ ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 # Default command (overridden by docker-compose)
 CMD ["bash"]
-
