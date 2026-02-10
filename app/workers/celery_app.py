@@ -70,7 +70,8 @@ app.conf.update(
     # Auto-discover tasks in these modules
     imports=[
         "app.workers.tasks.flow_tasks",
-        "app.workers.tasks.scanner_tasks"
+        "app.workers.tasks.scanner_tasks",
+        "app.workers.tasks.audit_tasks"
     ],
     beat_schedule={
         # ============================================
@@ -110,6 +111,13 @@ app.conf.update(
         "scan-fofa-4hours": {
             "task": "scanner.scan_fofa",
             "schedule": crontab(minute=0, hour="1,5,9,13,17,21"),  # Offset by 1 hour
+        },
+        # ============================================
+        # SYSTEM AUDIT & FAILSAFES (Every 2 hours)
+        # ============================================
+        "audit-active-topics-2hours": {
+            "task": "audit.audit_active_topics",
+            "schedule": crontab(minute=15, hour="*/2"), # 00:15, 02:15...
         },
     }
 )
