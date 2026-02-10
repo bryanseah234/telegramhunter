@@ -1,6 +1,6 @@
 from telegram import Bot
 from telegram.request import HTTPXRequest  
-from telegram.error import TelegramError, RetryAfter
+from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 import asyncio
 import time
 from app.core.config import settings
@@ -36,6 +36,12 @@ class BroadcasterService:
                 wait_time = e.retry_after + 1  # Add buffer
                 print(f"⚠️ Flood control exceeded. Retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
+            except TimedOut:
+                print(f"⚠️ Request Timed Out. Retrying in 5s...")
+                await asyncio.sleep(5)
+            except NetworkError as e:
+                print(f"⚠️ Network Error ({e.message}). Retrying in 5s...")
+                await asyncio.sleep(5)
             except TelegramError as e:
                 # If it's a generic buffer error (sometimes happens with 429 without RetryAfter type)
                 if "Flood control exceeded" in str(e) or "Too Many Requests" in str(e):

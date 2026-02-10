@@ -155,9 +155,16 @@ async def _perform_active_deep_scan(target_url: str, client: httpx.AsyncClient =
                 if js_tasks:
                     js_responses = await asyncio.gather(*js_tasks, return_exceptions=True)
                     for js_res in js_responses:
-                        if isinstance(js_res, httpx.Response) and js_res.status_code == 200:
-                            found_results.extend(extract_from_text(js_res.text))
+                            if isinstance(js_res, httpx.Response) and js_res.status_code == 200:
+                                found_results.extend(extract_from_text(js_res.text))
 
+        except httpx.TimeoutException:
+            # print(f"      [DeepScan] Timeout: {target_url}")
+            pass
+        except httpx.ConnectError:
+            pass
+        except httpx.HTTPStatusError:
+            pass
         except Exception:
             pass
 
@@ -282,6 +289,13 @@ class ShodanService:
                         }
                     })
             return results
+            return results
+        except httpx.TimeoutException:
+            print("    [Shodan] Error: Request Timed Out")
+            return []
+        except httpx.RequestError as e:
+            print(f"    [Shodan] Network Error: {e}")
+            return []
         except Exception as e:
             print(f"    [Shodan] Error: {e}")
             return []
@@ -345,6 +359,13 @@ class FofaService:
                     })
 
             return valid_results
+            return valid_results
+        except httpx.TimeoutException:
+            print("    [FOFA] Error: Request Timed Out")
+            return []
+        except httpx.RequestError as e:
+            print(f"    [FOFA] Network Error: {e}")
+            return []
         except Exception as e:
             print(f"    [FOFA] Error: {e}")
             return []
@@ -489,8 +510,14 @@ class UrlScanService:
             print(f"    [URLScan] Scan complete. {len(final_results)} valid tokens found.")
             return final_results
             
+        except httpx.TimeoutException:
+            print("    [URLScan] Error: Search Request Timed Out")
+            return []
+        except httpx.RequestError as e:
+            print(f"    [URLScan] Network Error: {e}")
+            return []
         except Exception as e:
-            print(f"URLScan Error: {e}")
+            print(f"    [URLScan] Error: {e}")
             return []
 
 class GithubService:
@@ -561,8 +588,15 @@ class GithubService:
                             results.extend(batch)
                             
             return results
+            return results
+        except httpx.TimeoutException:
+            print("    [GitHub] Error: Request Timed Out")
+            return []
+        except httpx.RequestError as e:
+            print(f"    [GitHub] Network Error: {e}")
+            return []
         except Exception as e:
-            print(f"GitHub Error: {e}")
+            print(f"    [GitHub] Error: {e}")
             return []
 
 # CensysService REMOVED - Free tier doesn't have search API access
