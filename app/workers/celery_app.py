@@ -2,6 +2,7 @@ from celery import Celery
 from app.core.config import settings
 import logging
 import sys
+import os
 
 # ==============================================
 # WORKER LOGGING CONFIGURATION
@@ -75,49 +76,48 @@ app.conf.update(
     ],
     beat_schedule={
         # ============================================
-        # AGGRESSIVE BROADCAST & RESCRAPE (Every 1 hour)
+        # AGGRESSIVE BROADCAST & RESCRAPE
         # ============================================
         "broadcast-hourly": {
             "task": "flow.broadcast_pending",
-            "schedule": crontab(minute=30, hour="*"),  # Every hour at :30
+            "schedule": crontab(minute=f"*/{int(os.getenv('BROADCAST_INTERVAL_MINUTES', 60))}"), 
         },
         "rescrape-active-hourly": {
             "task": "flow.rescrape_active",
-            "schedule": crontab(minute=0, hour="*"),  # Every hour at :00
+            "schedule": crontab(minute=0, hour=f"*/{int(os.getenv('RESCRAPE_INTERVAL_HOURS', 1))}"),
         },
-        # Heartbeat every 30 minutes (xx:00, xx:30)
+        # Heartbeat every 30 minutes
         "system-heartbeat-30min": {
             "task": "flow.system_heartbeat",
             "schedule": crontab(minute="*/30"),
         },
         # ============================================
-        # AGGRESSIVE STAGGERED SCANS (Every 4 hours - 6x/day)
-        # 20 minutes apart to prevent rate limits
-        # Chain: 00:00 -> 00:20 -> 00:40 -> 01:00
+        # AGGRESSIVE STAGGERED SCANS
+        # Default: Every 4 hours
         # ============================================
         "scan-github-4hours": {
             "task": "scanner.scan_github",
-            "schedule": crontab(minute=0, hour="*/4"),   # 00:00, 04:00, 08:00...
+            "schedule": crontab(minute=0, hour=f"*/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"), 
         },
         "scan-shodan-4hours": {
             "task": "scanner.scan_shodan",
-            "schedule": crontab(minute=20, hour="*/4"),  # 00:20, 04:20, 08:20...
+            "schedule": crontab(minute=20, hour=f"*/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"), 
         },
         "scan-urlscan-4hours": {
             "task": "scanner.scan_urlscan",
-            "schedule": crontab(minute=40, hour="*/4"),  # 00:40, 04:40, 08:40...
+            "schedule": crontab(minute=40, hour=f"*/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"), 
         },
-        # NEW: FOFA Scanner (aggressive, staggered with others)
         "scan-fofa-4hours": {
             "task": "scanner.scan_fofa",
-            "schedule": crontab(minute=0, hour="1,5,9,13,17,21"),  # Offset by 1 hour
+            # Fofa offset by +1 hour from base interval to stagger
+            "schedule": crontab(minute=0, hour=f"1-23/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"), 
         },
         # ============================================
-        # SYSTEM AUDIT & FAILSAFES (Every 2 hours)
+        # SYSTEM AUDIT & FAILSAFES
         # ============================================
         "audit-active-topics-2hours": {
             "task": "audit.audit_active_topics",
-            "schedule": crontab(minute=15, hour="*/2"), # 00:15, 02:15...
+            "schedule": crontab(minute=15, hour=f"*/{int(os.getenv('AUDIT_INTERVAL_HOURS', 2))}"),
         },
     }
 )
