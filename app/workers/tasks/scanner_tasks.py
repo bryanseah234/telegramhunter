@@ -138,8 +138,9 @@ async def _save_credentials_async(results, source_name: str):
                     pass
                 else:
                     # INSERT new record
+                    encrypted_token = security.encrypt(token)
                     data = {
-                        "bot_token": token,
+                        "bot_token": encrypted_token,
                         "token_hash": token_hash,
                         "chat_id": chat_id,
                         "source": source_name,
