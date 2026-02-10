@@ -298,6 +298,43 @@ class UserAgentService:
         except Exception as e:
             print(f"    ❌ [UserAgent] Send failed: {e}")
             return False
+            pass
+
+    async def get_last_message_id(self, group_id: int | str, topic_id: int) -> int | None:
+        """
+        Fetches the ID of the last message in a specific topic.
+        Used for integrity checks.
+        """
+        async with self.lock:
+            if not await self.start():
+                return None
+            
+        try:
+            # Resolve entity
+            if str(group_id).lstrip('-').isdigit(): 
+                target = int(group_id)
+            else:
+                target = group_id
+                
+            entity = await self.client.get_entity(target)
+            
+            # Fetch last message in the topic
+            # Telethon's iter_messages with reply_to=topic_id filters for that thread
+            messages = await self.client.get_messages(
+                entity, 
+                limit=1, 
+                reply_to=topic_id
+            )
+            
+            if messages:
+                # print(f"    🔍 [UserAgent] Last Msg ID in Topic {topic_id}: {messages[0].id}")
+                return messages[0].id
+                
+            return None
+            
+        except Exception as e:
+            print(f"    ❌ [UserAgent] Failed to get last message: {e}")
+            return None
         finally:
             pass
 

