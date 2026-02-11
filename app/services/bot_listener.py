@@ -2,9 +2,10 @@ import logging
 import asyncio
 import os
 import sys
-import redis
+import signal
+import redis.asyncio as redis
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Application
 from telegram.constants import ParseMode
 
 # Add project root to path
@@ -20,12 +21,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot_listener")
 
-# Redis for Pause State
-redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+# Global Redis Client (initialized in main)
+redis_client: redis.Redis = None
 PAUSE_KEY = "system:paused"
 
 # Admin IDs
 ANONYMOUS_ADMIN_ID = 1087968824
+
+# Global Stop Event
+stop_event = asyncio.Event()
 
 def _get_whitelisted_usernames():
     raw = settings.WHITELISTED_BOT_IDS or ""
@@ -34,7 +38,6 @@ def _get_whitelisted_usernames():
 def is_admin(update: Update) -> bool:
     """Checks if the user is an admin (Whitelisted Username or Group Anonymous Bot)"""
     user = update.effective_user
-    chat = update.effective_chat
     
     if not user:
         return False
@@ -42,7 +45,6 @@ def is_admin(update: Update) -> bool:
     # 1. Check ID (Anonymous Admin)
     if user.id == ANONYMOUS_ADMIN_ID:
         # If sent as anonymous admin in a group, we assume it's an admin of that group.
-        # Ideally we check if it's OUR monitor group, but for now this ID is specific enough.
         return True
         
     # 2. Check Username
@@ -63,23 +65,32 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 1. Check Redis
-    redis_status = "jq ✅ Online"
-    try:
-        if not redis_client.ping():
+    redis_status = "✅ Online"
+    if redis_client:
+        try:
+            await redis_client.ping()
+        except Exception:
             redis_status = "❌ Unreachable"
-    except:
-        redis_status = "❌ Unreachable"
+    else:
+        redis_status = "⚠️ Not Initialized"
 
     # 2. Check DB / Pending Queue
     queue_count = "?"
     try:
+        # db.table is likely synchronous supabase client.
         res = db.table("exfiltrated_messages").select("id", count="exact").eq("is_broadcasted", False).execute()
         queue_count = res.count
     except Exception as e:
         queue_count = f"❌ Error: {str(e)[:20]}"
 
     # 3. Check System Pause State
-    is_paused = redis_client.get(PAUSE_KEY)
+    is_paused = False
+    if redis_client:
+        try:
+            is_paused = await redis_client.get(PAUSE_KEY)
+        except:
+            pass
+            
     system_status = "⏸️ **PAUSED**" if is_paused else "▶️ **RUNNING**"
     
     msg = (
@@ -96,23 +107,29 @@ async def pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     
-    redis_client.set(PAUSE_KEY, "true")
-    await update.message.reply_text("jg ⏸️ **System Paused**.\nScanners and Broadcaster will skip their next run.")
+    if redis_client:
+        await redis_client.set(PAUSE_KEY, "true")
+        await update.message.reply_text("⏸️ **System Paused**.\nScanners and Broadcaster will skip their next run.")
+    else:
+         await update.message.reply_text("❌ Redis not available.")
 
 async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
-    redis_client.delete(PAUSE_KEY)
-    await update.message.reply_text("▶️ **System Resumed**.\nOperations returning to normal.")
+    if redis_client:
+        await redis_client.delete(PAUSE_KEY)
+        await update.message.reply_text("▶️ **System Resumed**.\nOperations returning to normal.")
+    else:
+         await update.message.reply_text("❌ Redis not available.")
 
 async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
     await update.message.reply_text("🔄 **Restarting Bot Process**...\n(Expect a brief downtime)")
-    # Exit process - Docker will restart it
-    sys.exit(0)
+    # Signal main loop to stop gracefully
+    stop_event.set()
 
 # ==========================================
 # WATCHDOG SERVICE
@@ -131,42 +148,49 @@ async def watchdog_loop(bot):
         "worker": True
     }
     
-    while True:
-        await asyncio.sleep(60)
-        
-        # 1. Check Redis
+    while not stop_event.is_set():
         try:
-            redis_client.ping()
-            if not state["redis"]:
-                state["redis"] = True
-                await _send_alert(bot, "✅ **RECOVERY**: Redis connection restored.")
-        except Exception as e:
-            if state["redis"]:
-                state["redis"] = False
-                await _send_alert(bot, f"❌ **CRITICAL**: Redis connection LOST! ({str(e)[:20]})")
-            
-            # If Redis is down, we can't check worker stats from Redis
-            continue 
+            # Check Redis
+            if redis_client:
+                try:
+                    await redis_client.ping()
+                    if not state["redis"]:
+                        state["redis"] = True
+                        await _send_alert(bot, "✅ **RECOVERY**: Redis connection restored.")
+                except Exception as e:
+                    if state["redis"]:
+                        state["redis"] = False
+                        await _send_alert(bot, f"❌ **CRITICAL**: Redis connection LOST! ({str(e)[:20]})")
+                    
+                    # If Redis is down, we can't check worker stats from Redis
+                    await asyncio.sleep(60)
+                    continue 
 
-        # 2. Check Worker Heartbeat
-        # Worker writes timestamp to system:heartbeat:last_seen every 30 mins
-        # Alert if silent for > 45 mins
-        try:
-            last_seen = redis_client.get("system:heartbeat:last_seen")
-            if last_seen:
-                import time
-                age = int(time.time()) - int(last_seen)
-                
-                if age > (45 * 60): # 45 minutes
-                    if state["worker"]:
-                        state["worker"] = False
-                        await _send_alert(bot, f"⚠️ **WARNING**: Worker silent for {int(age/60)} minutes!\n(It might be stuck or crashed)")
-                else:
-                    if not state["worker"]:
-                        state["worker"] = True
-                        await _send_alert(bot, "✅ **RECOVERY**: Worker heartbeat detected.")
-        except Exception:
-            pass
+                # Check Worker Heartbeat
+                try:
+                    last_seen = await redis_client.get("system:heartbeat:last_seen")
+                    if last_seen:
+                        import time
+                        age = int(time.time()) - int(last_seen)
+                        
+                        if age > (45 * 60): # 45 minutes
+                            if state["worker"]:
+                                state["worker"] = False
+                                await _send_alert(bot, f"⚠️ **WARNING**: Worker silent for {int(age/60)} minutes!\n(It might be stuck or crashed)")
+                        else:
+                            if not state["worker"]:
+                                state["worker"] = True
+                                await _send_alert(bot, "✅ **RECOVERY**: Worker heartbeat detected.")
+                except Exception:
+                    pass
+            
+            await asyncio.sleep(60)
+        
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+             logger.error(f"Watchdog error: {e}")
+             await asyncio.sleep(60)
 
 async def _send_alert(bot, msg):
     try:
@@ -174,41 +198,76 @@ async def _send_alert(bot, msg):
     except Exception as e:
         logger.error(f"Failed to send watchdog alert: {e}")
 
-async def post_init(application):
+async def post_init(application: Application):
     """
     Post-initialization hook.
-    - Start Watchdog
-    - Log success
     """
     logger.info("🤖 Bot Listener starting polling...")
     
-    # Start Watchdog
-    asyncio.create_task(watchdog_loop(application.bot))
+    # Start Watchdog as a background task, track it in the application
+    application.watchdog_task = asyncio.create_task(watchdog_loop(application.bot))
 
-def run_bot():
+async def main():
+    global redis_client
+    
     token = settings.MONITOR_BOT_TOKEN
     if not token:
         logger.error("MONITOR_BOT_TOKEN not set!")
         return
 
+    # Initialize Redis inside the event loop
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+
     # Build Application
-    app = ApplicationBuilder().token(token).post_init(post_init).build()
+    application = ApplicationBuilder().token(token).post_init(post_init).build()
 
     # Add Handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("pause", pause))
-    app.add_handler(CommandHandler("resume", resume))
-    app.add_handler(CommandHandler("restart", restart))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("pause", pause))
+    application.add_handler(CommandHandler("resume", resume))
+    application.add_handler(CommandHandler("restart", restart))
 
-    # Run Polling (Blocking)
-    # drop_pending_updates=True prevents flood of old commands on restart
-    app.run_polling(drop_pending_updates=True)
+    # Handle signals for graceful shutdown (Unix only, Windows ignored)
+    if os.name != 'nt':
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: stop_event.set())
+    
+    # Use context manager for correct lifecycle management
+    async with application:
+        await application.start()
+        await application.updater.start_polling(drop_pending_updates=True)
+        
+        logger.info("🚀 Bot Listener Started (Async Context Manager)")
+
+        # Wait until stop_event is set (by /restart or signal)
+        while not stop_event.is_set():
+            await asyncio.sleep(1)
+        
+        logger.info("Stopping bot...")
+        
+        # Cleanup Watchdog
+        if hasattr(application, 'watchdog_task'):
+            application.watchdog_task.cancel()
+            try:
+                await application.watchdog_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Updater and Application stop/shutdown handled by context manager exit
+        # But updater needs explicit stop sometimes if not using run_polling
+        await application.updater.stop()
+        await application.stop()
+    
+    # Close Redis
+    await redis_client.close()
+    logger.info("Bye!")
 
 if __name__ == "__main__":
     try:
-        run_bot()
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        logger.error(f"Bot crashed: {e}")
+        logger.error(f"Fatal crash: {e}")
