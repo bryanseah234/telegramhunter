@@ -60,6 +60,21 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  bot:
+    build: .
+    restart: always
+    env_file: .env
+    # Running the Bot Listener
+    command: python -m app.services.bot_listener
+    depends_on:
+      - redis
+      - api
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   redis_data:
 
