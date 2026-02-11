@@ -5,7 +5,7 @@ import sys
 import redis
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
-from telegram.constants import ParseMode, ChatType
+from telegram.constants import ParseMode
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -174,38 +174,40 @@ async def _send_alert(bot, msg):
     except Exception as e:
         logger.error(f"Failed to send watchdog alert: {e}")
 
-async def run_bot():
+async def post_init(application):
+    """
+    Post-initialization hook.
+    - Start Watchdog
+    - Log success
+    """
+    logger.info("🤖 Bot Listener starting polling...")
+    
+    # Start Watchdog
+    asyncio.create_task(watchdog_loop(application.bot))
+
+def run_bot():
     token = settings.MONITOR_BOT_TOKEN
     if not token:
         logger.error("MONITOR_BOT_TOKEN not set!")
         return
 
-    app = ApplicationBuilder().token(token).build()
+    # Build Application
+    app = ApplicationBuilder().token(token).post_init(post_init).build()
 
+    # Add Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("pause", pause))
     app.add_handler(CommandHandler("resume", resume))
     app.add_handler(CommandHandler("restart", restart))
 
-    logger.info("🤖 Bot Listener starting polling...")
-    
-    # Drop pending updates to avoid processing old commands flood
-    await app.bot.delete_webhook(drop_pending_updates=True)
-
-    # Start Watchdog
-    asyncio.create_task(watchdog_loop(app.bot))
-    
-    # Run
-    await app.run_polling()
+    # Run Polling (Blocking)
+    # drop_pending_updates=True prevents flood of old commands on restart
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     try:
-        # Windows loop policy fix
-        if sys.platform == "win32":
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-            
-        asyncio.run(run_bot())
+        run_bot()
     except KeyboardInterrupt:
         pass
     except Exception as e:
