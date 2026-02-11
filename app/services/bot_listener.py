@@ -236,7 +236,6 @@ async def main():
     
     # Use context manager for correct lifecycle management
     async with application:
-        await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
         
         logger.info("🚀 Bot Listener Started (Async Context Manager)")
@@ -255,10 +254,7 @@ async def main():
             except asyncio.CancelledError:
                 pass
         
-        # Updater and Application stop/shutdown handled by context manager exit
-        # But updater needs explicit stop sometimes if not using run_polling
-        await application.updater.stop()
-        await application.stop()
+        # Context manager exit handles application.stop() and application.shutdown()
     
     # Close Redis
     await redis_client.close()

