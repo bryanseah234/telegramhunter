@@ -298,7 +298,6 @@ class UserAgentService:
         except Exception as e:
             print(f"    ❌ [UserAgent] Send failed: {e}")
             return False
-            pass
 
     async def get_last_message_id(self, group_id: int | str, topic_id: int) -> int | None:
         """

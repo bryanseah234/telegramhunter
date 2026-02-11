@@ -289,7 +289,6 @@ class ShodanService:
                         }
                     })
             return results
-            return results
         except httpx.TimeoutException:
             print("    [Shodan] Error: Request Timed Out")
             return []
@@ -358,7 +357,6 @@ class FofaService:
                         "meta": {"source": "fofa", "url": target_url}
                     })
 
-            return valid_results
             return valid_results
         except httpx.TimeoutException:
             print("    [FOFA] Error: Request Timed Out")
@@ -587,7 +585,6 @@ class GithubService:
                         if batch and isinstance(batch, list):
                             results.extend(batch)
                             
-            return results
             return results
         except httpx.TimeoutException:
             print("    [GitHub] Error: Request Timed Out")
