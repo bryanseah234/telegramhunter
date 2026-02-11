@@ -227,6 +227,14 @@ async def _scan_shodan_async(query: str = None, country_code: str = None):
         selected_country = random.choice(settings.TARGET_COUNTRIES)
 
     logger.info(f"🌎 [Shodan] Starting Scan | Queries: {len(queries)} | Country: {selected_country or 'Global'}")
+    
+    # Check Pause State
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [Shodan] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
     await _send_log_async(f"🌎 [Shodan] Starting scan with {len(queries)} queries (Country: {selected_country})...")
     
     total_saved = 0
@@ -280,6 +288,14 @@ async def _scan_urlscan_async(query: str = None, country_code: str = None):
         selected_country = random.choice(settings.TARGET_COUNTRIES)
         
     logger.info(f"🔍 [URLScan] Starting Scan | Queries: {len(queries)} | Country: {selected_country or 'Global'}")
+    
+    # Check Pause State
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [URLScan] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
     await _send_log_async(f"🔍 [URLScan] Starting scan with {len(queries)} queries (Country: {selected_country})")
     
     total_saved = 0
@@ -339,6 +355,13 @@ async def _scan_github_async(query: str = None):
     total_saved = 0
     errors = []
 
+    # Check Pause State
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [GitHub] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
     logger.info(f"🐱 [GitHub] Starting scan with {len(queries)} dorks...")
     await _send_log_async(f"🐱 [GitHub] Starting scan with {len(queries)} dorks (Full sweep)...")
 
@@ -387,6 +410,14 @@ async def _scan_fofa_async(task_self, query: str = None, country_code: str = Non
         logger.info(f"    [FOFA] Randomly selected country: {selected_country}")
     
     logger.info(f"🔍 [FOFA] Starting Scan | Queries: {len(queries)} | Country: {selected_country or 'Global'}")
+    
+    # Check Pause State
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [FOFA] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
     await _send_log_async(f"🔍 [FOFA] Starting scan with {len(queries)} queries (Country: {selected_country})...")
     
     total_saved = 0

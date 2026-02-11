@@ -124,6 +124,7 @@ class BroadcasterService:
             await self._retry_on_flood(
                 self.bot.send_message,
                 chat_id=settings.MONITOR_GROUP_ID,
+                message_thread_id=None, # Explicitly target General Topic
                 text=f"🤖 [System Log]\n{message}"
             )
         except Exception as e:

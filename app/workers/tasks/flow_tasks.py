@@ -262,6 +262,11 @@ def broadcast_pending():
     if not acquired:
         return "Skipped: Broadcast task already running (Lock active)."
 
+    # Check Pause State
+    if redis_client.get("system:paused"):
+        lock.release()
+        return "System Paused"
+
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
@@ -505,10 +510,41 @@ def system_heartbeat():
         asyncio.set_event_loop(loop)
     
     msg = "💓 **System Heartbeat**: Worker is active and scanning."
+    
+    # Update Redis Timestamp for Watchdog
+    try:
+        redis_client.set("system:heartbeat:last_seen", int(time.time()))
+    except Exception as e:
+        print(f"Failed to update heartbeat in Redis: {e}")
+
     from app.services.broadcaster_srv import BroadcasterService
     broadcaster = BroadcasterService()
     loop.run_until_complete(broadcaster.send_log(msg))
     return "Heartbeat sent."
+
+@app.task(name="flow.system_help")
+def system_help():
+    """
+    Periodic guide on how to use system commands.
+    """
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    msg = (
+        "ℹ️ **System Commands Guide**\n"
+        "You can control the system using these commands:\n\n"
+        "• `/status` - View queue size, DB connectivity, and paused state.\n"
+        "• `/pause` - Suspend all scanners and broadcasters (Maintenance Mode).\n"
+        "• `/resume` - Resume normal operations.\n"
+        "• `/restart` - Restart the Bot Listener process.\n\n"
+        "_Commands are restricted to Admins and Whitelisted Users._"
+    )
+    from app.services.broadcaster_srv import BroadcasterService
+    broadcaster = BroadcasterService()
+    loop.run_until_complete(broadcaster.send_log(msg))
+    return "Help guide sent."
 
 @app.task(name="flow.rescrape_active")
 def rescrape_active():

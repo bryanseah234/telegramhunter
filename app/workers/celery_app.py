@@ -91,6 +91,11 @@ app.conf.update(
             "task": "flow.system_heartbeat",
             "schedule": crontab(minute="*/30"),
         },
+        # Periodic Help Guide (Every 6 hours)
+        "system-help-6hours": {
+            "task": "flow.system_help",
+            "schedule": crontab(minute=30, hour="*/6"), 
+        },
         # ============================================
         # AGGRESSIVE STAGGERED SCANS
         # Default: Every 4 hours
