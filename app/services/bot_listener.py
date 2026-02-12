@@ -58,7 +58,23 @@ def is_admin(update: Update) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return # Silent ignore
-    await update.message.reply_text("🤖 **Telegram Hunter Bot** is online.\nUse /status, /pause, /resume, /restart.")
+    await update.message.reply_text("🤖 **Telegram Hunter Bot** is online.\nUse /help to see all available commands.")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    
+    help_text = (
+        "📖 **Telegram Hunter Bot Help**\n\n"
+        "Here are the available commands:\n"
+        "• /status - Check system health and pending broadcasts\n"
+        "• /pause - Pause scanners and broadcaster\n"
+        "• /resume - Resume operations\n"
+        "• /restart - Restart the bot service\n"
+        "• /commands - List all commands (Alias for /help)\n\n"
+        "Only authorized administrators can use these commands."
+    )
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -227,6 +243,8 @@ async def main():
     application.add_handler(CommandHandler("pause", pause))
     application.add_handler(CommandHandler("resume", resume))
     application.add_handler(CommandHandler("restart", restart))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("commands", help_command))
 
     # Handle signals for graceful shutdown (Unix only, Windows ignored)
     if os.name != 'nt':
