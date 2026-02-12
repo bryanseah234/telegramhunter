@@ -40,8 +40,8 @@ async def _audit_active_topics_async():
     # 1. Fetch all ACTIVE credentials
     try:
         response = db.table("discovered_credentials")\
-            .select("id, meta, chat_id")\
-            .eq("status", "active")\
+            .select("id, meta, chat_id, status")\
+            .in_("status", ["active", "pending"])\
             .execute()
         
         creds = response.data or []
