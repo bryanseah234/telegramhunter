@@ -139,3 +139,64 @@ async def _audit_active_topics_async():
     logger.info(result_msg)
     await broadcaster.send_log(result_msg)
     return result_msg
+
+@app.task(name="system.self_heal")
+def system_self_heal():
+    """
+    Periodic task to reconcile Supabase DB with Telegram.
+    1. Heals missing topics for ALL active credentials.
+    2. Triggers a full broadcast catch-up.
+    """
+    return _run_sync(_system_self_heal_async())
+
+async def _system_self_heal_async():
+    from datetime import datetime, timezone
+    from app.workers.tasks.flow_tasks import _broadcast_logic
+    
+    broadcaster = BroadcasterService()
+    await broadcaster.send_log("🩹 **Self-Heal**: Starting system-wide sync and recovery...")
+    
+    try:
+        response = db.table("discovered_credentials")\
+            .select("*")\
+            .eq("status", "active")\
+            .execute()
+        credentials = response.data or []
+    except Exception as e:
+        logger.error(f"    ❌ [Self-Heal] DB Error: {e}")
+        return f"DB Error: {e}"
+
+    heal_count = 0
+    group_id = settings.MONITOR_GROUP_ID
+    
+    for cred in credentials:
+        cred_id = cred["id"]
+        meta = cred.get("meta") or {}
+        topic_id = meta.get("topic_id")
+        
+        bot_username = meta.get("bot_username", "unknown")
+        bot_id = meta.get("bot_id", "0")
+        topic_name = f"@{bot_username} / {bot_id}"
+
+        if not topic_id or topic_id == 0:
+            try:
+                new_topic_id = await broadcaster.ensure_topic(group_id, topic_name)
+                meta["topic_id"] = new_topic_id
+                meta["healed_at"] = datetime.now(timezone.utc).isoformat()
+                
+                db.table("discovered_credentials")\
+                    .update({"meta": meta})\
+                    .eq("id", cred_id)\
+                    .execute()
+                heal_count += 1
+            except Exception as e:
+                logger.error(f"    ❌ [Self-Heal] Failed to heal {cred_id}: {e}")
+
+    await broadcaster.send_log(f"🏁 **Self-Heal**: Topic healing complete. Repaired {heal_count} records.")
+
+    # Trigger Broadcast Catch-up
+    try:
+        result = await _broadcast_logic()
+        return f"Self-Heal finished. Repaired {heal_count}. Broadcast: {result}"
+    except Exception as e:
+        return f"Self-Heal finished. Repaired {heal_count}. Broadcast failed: {e}"

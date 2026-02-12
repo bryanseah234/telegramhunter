@@ -118,11 +118,15 @@ app.conf.update(
             "schedule": crontab(minute=0, hour=f"1-23/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"), 
         },
         # ============================================
-        # SYSTEM AUDIT & FAILSAFES
+        # SYSTEM AUDIT, SELF-HEAL & FAILSAFES
         # ============================================
-        "audit-active-topics-2hours": {
+        "audit-active-topics-hourly": {
             "task": "audit.audit_active_topics",
-            "schedule": crontab(minute=15, hour=f"*/{int(os.getenv('AUDIT_INTERVAL_HOURS', 2))}"),
+            "schedule": crontab(minute=15, hour=f"*/{int(os.getenv('AUDIT_INTERVAL_HOURS', 1))}"),
+        },
+        "system-self-heal-6hours": {
+            "task": "system.self_heal",
+            "schedule": crontab(minute=45, hour="*/6"),
         },
     }
 )
