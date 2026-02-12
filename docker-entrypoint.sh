@@ -52,6 +52,10 @@ else
     echo "   Place files in: /app/imports/ or /app/import_tokens.csv"
 fi
 
+# 4. Run Self-Healing Sync (Bridge gaps between DB and Telegram)
+echo "🩹 [Entrypoint] Running Self-Healing Sync..."
+python /app/scripts/self_heal_sync.py || echo "⚠️ [Entrypoint] Warning: Self-healing sync failed (ignoring to allow startup)"
+
 # Execute the main command passed to the container
 echo "🎯 [Entrypoint] Starting main service: $@"
 exec "$@"
