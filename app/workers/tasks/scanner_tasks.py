@@ -1,4 +1,5 @@
 from app.workers.celery_app import app
+from app.workers.tasks.flow_tasks import enrich_credential # Import for triggering
 import asyncio # Ensure asyncio is imported
 import random
 from app.core.config import settings
@@ -134,7 +135,13 @@ async def _save_credentials_async(results, source_name: str):
                         f"Chat: {chat_name or chat_id} ({chat_type or 'extracted'})"
                     )
                     saved_count += 1
+                    
+                    # TRIGGER ENRICHMENT if still missing chat_id or just to be safe
+                    enrich_credential.delay(existing_id)
                 elif existing_id and not chat_id:
+                    # Token exists but still no chat_id found in this scan
+                    # Trigger enrichment anyway to try recursive discovery
+                    enrich_credential.delay(existing_id)
                     pass
                 else:
                     # INSERT new record
@@ -169,6 +176,9 @@ async def _save_credentials_async(results, source_name: str):
                             f"Status: {status_label}"
                         )
                         saved_count += 1
+                        
+                        # TRIGGER ENRICHMENT for new credentials
+                        enrich_credential.delay(new_id)
                     
             except Exception as e:
                 logger.error(f"    ❌ [Validate] Error processing token: {str(e)}")
