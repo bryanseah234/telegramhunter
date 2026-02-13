@@ -34,8 +34,32 @@ class UserAgentService:
         if self.client and self.client.is_connected():
             return True
 
-        # 1. Check for Env Var Fallback (Railway)
-        if not os.path.exists(self.session_path) and not os.path.exists(f"{self.session_path}.session"):
+        # 1. Bypass Read-Only Mount: Copy session to /tmp
+        # Mounted volumes on Windows often fail with 'attempt to write a readonly database'
+        import shutil
+        TEMP_SESSION_PATH = "/tmp/user_agent_session"
+        
+        # Determine source
+        source_path = None
+        if os.path.exists(self.session_path):
+             source_path = self.session_path
+        elif os.path.exists(f"{self.session_path}.session"):
+             source_path = f"{self.session_path}.session"
+             
+        # If source exists, copy it
+        if source_path:
+            try:
+                # Always overwrite temp to ensure freshness
+                shutil.copy2(source_path, f"{TEMP_SESSION_PATH}.session")
+                # print(f"    📋 [UserAgent] Copied session to {TEMP_SESSION_PATH}.session for write access.")
+            except Exception as e:
+                print(f"    ⚠️ [UserAgent] Failed to copy session to tmp: {e}")
+        else:
+             # Fallback logic for Env Vars (omitted for brevity, handled below if needed)
+             pass
+
+        # 2. Check Env Vars (Railway/Cloud)
+        if not source_path:
             # Try single var logic
             session_b64 = settings.USER_SESSION_STRING
             
@@ -57,22 +81,21 @@ class UserAgentService:
                 try:
                     import base64
                     decoded = base64.b64decode(session_b64)
-                    # Telethon expects .session extension for the file path provided
-                    # But the file on disk should be exactly what we write.
-                    # Telethon client(path) -> adds .session if missing.
-                    # We will write to 'user_session.session' explicitly.
-                    real_path = f"{self.session_path}.session"
+                    real_path = f"{TEMP_SESSION_PATH}.session"
                     with open(real_path, "wb") as f:
                         f.write(decoded)
                     print(f"    ✅ [UserAgent] Session restored to {real_path}")
+                    source_path = real_path # Mark as found
                 except Exception as e:
                     print(f"    ❌ [UserAgent] Failed to decode session string: {e}")
 
-        if not os.path.exists(f"{self.session_path}") and not os.path.exists(f"{self.session_path}.session"):
-            print("    ⚠️ [UserAgent] No session file found. Run 'scripts/login_user.py' first.")
-            return False
+        # Check final existence in TMP
+        if not os.path.exists(f"{TEMP_SESSION_PATH}.session"):
+             print("    ⚠️ [UserAgent] No session file found. Run 'scripts/login_user.py' first.")
+             return False
             
-        self.client = TelegramClient(self.session_path, self.api_id, self.api_hash)
+        # Initialize with TEMP path
+        self.client = TelegramClient(TEMP_SESSION_PATH, self.api_id, self.api_hash)
         await self.client.connect()
         
         if not await self.client.is_user_authorized():
