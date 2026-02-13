@@ -19,15 +19,15 @@ class UserAgentService:
         self.session_path = SESSION_FILE
         self.client = None
         self.lock = asyncio.Lock()
-        self.cooldown_until = 0 # Unix timestamp until which usage is blocked
 
     async def start(self):
         """Starts the user client. Requires existing session file or env var."""
+        from app.core.redis_srv import redis_srv
         
-        # Check cooldown
-        if time.time() < self.cooldown_until:
-             wait_left = int(self.cooldown_until - time.time())
-             print(f"    ⏳ [UserAgent] In Cooldown for {wait_left}s. Skipping action.")
+        # 0. Check Persistent Cooldown (Redis)
+        if redis_srv.is_on_cooldown("user_agent"):
+             ttl = redis_srv.get_cooldown_remaining("user_agent")
+             print(f"    ⏳ [UserAgent] PERSISTENT COOLDOWN: {ttl}s remaining. Skipping.")
              return False
 
         # Check if already connected (Persistent Mode)
@@ -133,8 +133,11 @@ class UserAgentService:
                     target = group_id # Assume username string
                     
                 group_entity = await self.client.get_entity(target)
+            except errors.FloodWaitError as e:
+                await self._handle_flood_error(e)
+                return False
             except Exception as e:
-                print(f"    ❌ [UserAgent] Could not resolve entities: {e}")
+                print(f"    ❌ [UserAgent] Entity resolution failed: {e}")
                 return False
 
             print(f"    🚀 [UserAgent] Inviting {bot_username} to group...")
@@ -166,14 +169,26 @@ class UserAgentService:
                     return False
                     
         except errors.FloodWaitError as e:
-            print(f"    🛑 [UserAgent] FLOOD WAIT: Must wait {e.seconds} seconds.")
-            self.cooldown_until = time.time() + e.seconds + 5
+            await self._handle_flood_error(e)
             return False
         except Exception as e:
             print(f"    ❌ [UserAgent] Error: {e}")
             return False
-        finally:
-            pass
+
+    async def _handle_flood_error(self, e):
+        """Logs and sets persistent cooldown for FloodWaitError."""
+        from app.core.redis_srv import redis_srv
+        wait_seconds = e.seconds
+        
+        if wait_seconds > 300: # Over 5 minutes is "Serious"
+            print(f"\n🛑 [UserAgent] SEVERE FLOOD WAIT: {wait_seconds} seconds (~{wait_seconds//3600}h).")
+            print("👉 Feature 'Kickstart' will be disabled until this expires to protect the account.")
+            # Set persistent Redis key
+            redis_srv.set_cooldown("user_agent", wait_seconds + 60)
+        else:
+            print(f"    🛑 [UserAgent] FLOOD WAIT: {wait_seconds}s.")
+            # Still set it in Redis for worker safety
+            redis_srv.set_cooldown("user_agent", wait_seconds + 10)
 
     async def find_topic_id(self, group_id: int | str, topic_name: str) -> int | None:
         """
