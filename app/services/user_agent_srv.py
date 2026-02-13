@@ -378,4 +378,61 @@ class UserAgentService:
         finally:
             pass
 
+    async def get_history(self, group_id: int | str, limit: int) -> list[dict]:
+        """
+        Fetches message history as a real user.
+        Used as a fallback when bots are restricted from GetHistory.
+        """
+        from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
+        async with self.lock:
+            if not await self.start():
+                return []
+            
+        msgs = []
+        try:
+            # Resolve entity
+            if str(group_id).lstrip('-').isdigit(): 
+                target = int(group_id)
+            else:
+                target = group_id
+                
+            entity = await self.client.get_entity(target)
+            
+            async for message in self.client.iter_messages(entity, limit=limit):
+                if not isinstance(message, Message): continue
+                
+                content = message.text or ""
+                media_type = "text"
+                file_meta = {}
+
+                if message.media:
+                    if isinstance(message.media, MessageMediaPhoto):
+                        media_type = "photo"
+                        file_meta = {"wc": "photo", "id": getattr(message.media.photo, 'id', 0)}
+                    elif isinstance(message.media, MessageMediaDocument):
+                        media_type = "document"
+                        file_meta = {"mime": message.media.document.mime_type}
+                    else:
+                        media_type = "other"
+
+                sender_name = "Unknown"
+                if message.sender:
+                    if hasattr(message.sender, 'username') and message.sender.username:
+                        sender_name = message.sender.username
+                    elif hasattr(message.sender, 'first_name'):
+                        sender_name = message.sender.first_name
+
+                msgs.append({
+                    "telegram_msg_id": message.id,
+                    "sender_name": sender_name,
+                    "content": content,
+                    "media_type": media_type,
+                    "file_meta": file_meta,
+                    "chat_id": entity.id if hasattr(entity, 'id') else group_id
+                })
+        except Exception as e:
+            print(f"    ❌ [UserAgent] Failed to fetch history: {e}")
+            
+        return msgs
+
 user_agent = UserAgentService()
