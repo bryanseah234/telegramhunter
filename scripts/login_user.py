@@ -29,6 +29,13 @@ def interactive_login():
     session_name = "user_session"
     session_file_path = os.path.join(base_dir, session_name)
     
+    # Check for directory conflict
+    if os.path.isdir(session_file_path + ".session"):
+        print(f"\n❌ CRITICAL ERROR: '{session_name}.session' exists as a DIRECTORY!")
+        print(f"👉 Docker has likely created this as a folder because the file didn't exist when mounted.")
+        print(f"👉 ACTION REQUIRED: Delete the directory '{session_file_path}.session' and run this script again.")
+        return
+    
     print(f"📍 Session will be saved to: {session_file_path}.session")
 
     import sqlite3
