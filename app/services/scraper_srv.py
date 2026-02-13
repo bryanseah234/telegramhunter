@@ -67,51 +67,7 @@ class ScraperService:
 
         # KICKSTART: If bot is dormant (Anchor 0), we must wake it up to get an ID.
         if anchor_id == 0:
-            logger.info("💤 [Scraper] Bot seems dormant (No recent updates). Initiating Kickstart...")
-            try:
-                from app.services.user_agent_srv import user_agent
-                import time
-
-                # 1. Get Username (needed for invite)
-                bot_username = "unknown"
-                async with httpx.AsyncClient() as client:
-                    me_res = await client.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5)
-                    if me_res.status_code == 200:
-                        data = me_res.json()
-                        if data.get("ok"):
-                            bot_username = data["result"]["username"]
-                
-                # 2. Invite to Group (Creates a Service Message -> New ID!)
-                dest = settings.MONITOR_GROUP_ID
-                if dest and bot_username != "unknown":
-                    logger.info(f"    ⚡ [Scraper] Kickstarting: Inviting @{bot_username} to monitor group...")
-                    if await user_agent.invite_bot_to_group(bot_username, dest):
-                         logger.info("    ⏳ [Scraper] Invite sent. Starting Command Fuzzing...")
-                         
-                         # === TRIGGER COMMAND FUZZING ===
-                         params = ["/start", "/help", "/admin", "/config", "dashboard"]
-                         for cmd in params:
-                             await user_agent.send_message(dest, cmd)
-                             await asyncio.sleep(1.5) # Pace out commands
-                         
-                         logger.info("    ⏳ [Scraper] Fuzzing complete. Waiting for bot response...")
-                         await asyncio.sleep(5) 
-                         # ===============================
-                         
-                         # 3. Re-Poll Updates
-                         retry_msgs = await self._scrape_via_bot_api(bot_token)
-                         for m in retry_msgs:
-                             if m['telegram_msg_id'] > anchor_id:
-                                 anchor_id = m['telegram_msg_id']
-                                 # We don't verify chat_id for the service message strictly 
-                                 # because we just want ANY valid ID to start bruteforcing backwards.
-                         
-                         if anchor_id > 0:
-                             logger.info(f"    ✅ [Scraper] Kickstart successful! New Anchor ID: {anchor_id}")
-                         else:
-                             logger.warning("    ❌ [Scraper] Kickstart failed (No update received).")
-            except Exception as e:
-                logger.error(f"    ⚠️ [Scraper] Kickstart error: {e}")
+            anchor_id = await self._kickstart_bot(bot_token)
 
         # Strategy 3: Blind ID Bruteforce (Telethon GetMessages)
         # If we found an anchor, we can look backwards!
@@ -567,7 +523,77 @@ class ScraperService:
         except Exception as e:
             logger.error(f"Error discovering chats: {e}")
             
+        # PROACTIVE KICKSTART: If discovery yielded nothing, try to wake the bot up.
+        if not discovered_chats and bot_info.get('username'):
+             # We can't kickstart if we don't know the username (unlikely if token is valid)
+             logger.info("💤 [Discovery] Bot seems dormant. Initiating Kickstart sequence to create a chat...")
+             new_anchor = await self._kickstart_bot(bot_token)
+             if new_anchor > 0:
+                 # If kickstart worked, we should have at least one update now.
+                 # We can't easily get the chat ID without re-running discovery, 
+                 # OR we can just return the bot itself as a "chat" and let the next scrape cycle handle it.
+                 # IMPROVEMENT: Let's re-run discovery one last time? 
+                 # For now, let's just let the next cycle pick it up, but return the Bot Self so it's not removed.
+                 logger.info("    ✅ [Discovery] Kickstart successful. Updates should be available next cycle.")
+                 discovered_chats.append({
+                    "id": bot_info.get('id'),
+                    "name": f"@{bot_info.get('username', 'bot')} (Kickstarted)",
+                    "type": "bot_self"
+                 })
+
         return bot_info, discovered_chats
+
+    async def _kickstart_bot(self, bot_token: str) -> int:
+        """
+        Invites the bot to the Monitor Group and sends commands to generate a Service Message / Update.
+        Returns the new 'anchor' message ID if successful, else 0.
+        """
+        logger.info("💤 [Scraper] Initiating Kickstart...")
+        anchor_id = 0
+        try:
+            from app.services.user_agent_srv import user_agent
+            import time
+
+            # 1. Get Username (needed for invite)
+            bot_username = "unknown"
+            async with httpx.AsyncClient() as client:
+                me_res = await client.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5)
+                if me_res.status_code == 200:
+                    data = me_res.json()
+                    if data.get("ok"):
+                        bot_username = data["result"]["username"]
+            
+            # 2. Invite to Group (Creates a Service Message -> New ID!)
+            dest = settings.MONITOR_GROUP_ID
+            if dest and bot_username != "unknown":
+                logger.info(f"    ⚡ [Scraper] Kickstarting: Inviting @{bot_username} to monitor group...")
+                if await user_agent.invite_bot_to_group(bot_username, dest):
+                        logger.info("    ⏳ [Scraper] Invite sent. Starting Command Fuzzing...")
+                        
+                        # === TRIGGER COMMAND FUZZING ===
+                        params = ["/start", "/help", "/admin", "/config", "dashboard"]
+                        for cmd in params:
+                            await user_agent.send_message(dest, cmd)
+                            await asyncio.sleep(1.5) # Pace out commands
+                        
+                        logger.info("    ⏳ [Scraper] Fuzzing complete. Waiting for bot response...")
+                        await asyncio.sleep(5) 
+                        # ===============================
+                        
+                        # 3. Re-Poll Updates
+                        retry_msgs = await self._scrape_via_bot_api(bot_token)
+                        for m in retry_msgs:
+                            if m['telegram_msg_id'] > anchor_id:
+                                anchor_id = m['telegram_msg_id']
+                        
+                        if anchor_id > 0:
+                            logger.info(f"    ✅ [Scraper] Kickstart successful! New Anchor ID: {anchor_id}")
+                        else:
+                            logger.warning("    ❌ [Scraper] Kickstart failed (No update received).")
+        except Exception as e:
+            logger.error(f"    ⚠️ [Scraper] Kickstart error: {e}")
+        
+        return anchor_id
 
     async def attempt_orphan_match(self, token: str, known_chat_ids: List[int]) -> Optional[int]:
         """
