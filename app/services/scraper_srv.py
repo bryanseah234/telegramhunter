@@ -503,6 +503,21 @@ class ScraperService:
                 # Step 2: Get recent chats from getUpdates
                 try:
                     updates_res = await client.get(f"{base_url}/getUpdates", params={'limit': 100})
+                    
+                    # Check for webhook conflict (409)
+                    if updates_res.status_code == 409 or (updates_res.status_code == 200 and not updates_res.json().get('ok') and 'webhook' in updates_res.text.lower()):
+                         logger.warning(f"    ⚠️ [Discovery] Webhook detected (409), attempting to delete...")
+                         try:
+                             del_res = await client.post(f"{base_url}/deleteWebhook")
+                             if del_res.status_code == 200 and del_res.json().get('ok'):
+                                 logger.info(f"    ✅ [Discovery] Webhook deleted successfully! Retrying...")
+                                 await asyncio.sleep(1)
+                                 updates_res = await client.get(f"{base_url}/getUpdates", params={'limit': 100})
+                             else:
+                                 logger.error(f"    ❌ [Discovery] Failed to delete webhook: {del_res.text}")
+                         except Exception as e:
+                             logger.error(f"    ❌ [Discovery] Webhook deletion error: {e}")
+
                 except Exception as e:
                      logger.warning(f"    ⚠️ Failed to fetch updates: {e}")
                      # Return just bot info if updates fail
