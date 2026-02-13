@@ -31,14 +31,22 @@ def interactive_login():
     
     print(f"📍 Session will be saved to: {session_file_path}.session")
 
-    client = TelegramClient(session_file_path, api_id, api_hash)
+    import sqlite3
+    try:
+        client = TelegramClient(session_file_path, api_id, api_hash)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+        print(f"\n❌ Error initializing Telegram Client: {e}")
+        print(f"⚠️  The session file '{session_name}.session' might be corrupted or locked by another process.")
+        print("👉 Try running 'docker-compose down' to stop all other containers.")
+        print(f"👉 If that fails, delete the file '{session_file_path}.session' and try again.")
+        return
 
     async def main():
         await client.start()
         print("\n✅ Login Successful!")
         me = await client.get_me()
         print(f"Logged in as: {me.first_name} (@{me.username})")
-        print(f"Session saved to: {os.path.abspath(session_file + '.session')}")
+        print(f"Session saved to: {os.path.abspath(session_file_path + '.session')}")
         print("\nYou can now run the scraper with auto-invite enabled.")
 
     client.loop.run_until_complete(main())
