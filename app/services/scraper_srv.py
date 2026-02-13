@@ -351,6 +351,10 @@ class ScraperService:
                     "file_meta": file_meta,
                     "chat_id": chat_id # Ensure we track where it came from
                 })
+        except errors.rpcerrorlist.ApiBotRestrictedError:
+             logger.warning(f"    🛡️ [Scraper] Bot Restricted from history. Falling back to UserAgent...")
+             from app.services.user_agent_srv import user_agent
+             return await user_agent.get_history(chat_id, limit)
         except Exception as e:
             logger.error(f"❌ [Scraper] Telethon history error: {e}")
         return msgs
