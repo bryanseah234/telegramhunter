@@ -24,7 +24,7 @@ services:
     environment:
       - ENV=development  # Enable dev mode for manual scan triggers
     volumes:
-      - ./imports:/app/imports  # Auto-import CSV files from here
+      - .:/app
     logging:
       driver: "json-file"
       options:
@@ -45,7 +45,7 @@ services:
         max-size: "10m"
         max-file: "3"
     volumes:
-      - ./user_session.session:/app/user_session.session
+      - .:/app
 
   beat:
     build: .
@@ -61,6 +61,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    volumes:
+      - .:/app
 
   bot:
     build: .
@@ -77,7 +79,7 @@ services:
         max-size: "10m"
         max-file: "3"
     volumes:
-      - ./user_session.session:/app/user_session.session
+      - .:/app
 
 volumes:
   redis_data:
