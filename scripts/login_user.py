@@ -37,12 +37,6 @@ def interactive_login():
         print(f"👉 ACTION REQUIRED: Delete the directory '{session_file_path}.session' and run this script again.")
         return
     
-    # Debug Permissions
-    print(f"🔍 DEBUG: Current User: {os.getuid()}:{os.getgid()}")
-    print(f"🔍 DEBUG: Base Directory: {base_dir}")
-    print(f"🔍 DEBUG: Permissions for {base_dir}: {oct(os.stat(base_dir).st_mode)[-3:]}")
-    print(f"🔍 DEBUG: File Exists? {os.path.exists(session_file_path + '.session')}")
-    
     print(f"📍 Session will be saved to: {session_file_path}.session")
 
     import sqlite3
