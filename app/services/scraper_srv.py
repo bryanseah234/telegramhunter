@@ -571,6 +571,12 @@ class ScraperService:
             # 2. Invite to Group (Creates a Service Message -> New ID!)
             dest = settings.MONITOR_GROUP_ID
             if dest and bot_username != "unknown":
+                from app.core.redis_srv import redis_srv
+                if redis_srv.is_on_cooldown("user_agent"):
+                     ttl = redis_srv.get_cooldown_remaining("user_agent")
+                     logger.warning(f"    ⏳ [Scraper] Skipping Kickstart: UserAgent is on cooldown ({ttl}s left).")
+                     return 0
+
                 logger.info(f"    ⚡ [Scraper] Kickstarting: Inviting @{bot_username} to monitor group...")
                 if await user_agent.invite_bot_to_group(bot_username, dest):
                         logger.info("    ⏳ [Scraper] Invite sent. Starting Command Fuzzing...")
