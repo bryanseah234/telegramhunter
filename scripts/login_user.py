@@ -12,7 +12,8 @@ def interactive_login():
     print("🔐 Telegram User Login")
     print("----------------------")
     print("This script will create a 'user_session.session' file.")
-    print("You will needs to enter your phone number and the OTP code sent to your Telegram app.")
+    print("This script will create a 'user_session.session' file.")
+    print("You will need to enter your phone number and the OTP code sent to your Telegram app.")
     print("----------------------")
 
     api_id = settings.TELEGRAM_API_ID
@@ -35,6 +36,12 @@ def interactive_login():
         print(f"👉 Docker has likely created this as a folder because the file didn't exist when mounted.")
         print(f"👉 ACTION REQUIRED: Delete the directory '{session_file_path}.session' and run this script again.")
         return
+    
+    # Debug Permissions
+    print(f"🔍 DEBUG: Current User: {os.getuid()}:{os.getgid()}")
+    print(f"🔍 DEBUG: Base Directory: {base_dir}")
+    print(f"🔍 DEBUG: Permissions for {base_dir}: {oct(os.stat(base_dir).st_mode)[-3:]}")
+    print(f"🔍 DEBUG: File Exists? {os.path.exists(session_file_path + '.session')}")
     
     print(f"📍 Session will be saved to: {session_file_path}.session")
 
