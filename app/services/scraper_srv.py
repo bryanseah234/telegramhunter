@@ -26,15 +26,20 @@ class ScraperService:
         
         # Strategy 1: Telethon (GetHistory)
         try:
-            telethon_msgs = await self._scrape_via_telethon(bot_token, chat_id, limit)
-            for m in telethon_msgs:
-                if m['telegram_msg_id'] not in unique_ids:
-                    scraped_messages.append(m)
-                    unique_ids.add(m['telegram_msg_id'])
-            
-            if len(scraped_messages) > 10: # If we got a decent amount, likely success
-                logger.info(f"✨ [Scraper] Telethon normal dump success: {len(scraped_messages)} messages.")
-                return scraped_messages
+            from telethon import errors
+            try:
+                telethon_msgs = await self._scrape_via_telethon(bot_token, chat_id, limit)
+                for m in telethon_msgs:
+                    if m['telegram_msg_id'] not in unique_ids:
+                        scraped_messages.append(m)
+                        unique_ids.add(m['telegram_msg_id'])
+                
+                if len(scraped_messages) > 10: # If we got a decent amount, likely success
+                    logger.info(f"✨ [Scraper] Telethon normal dump success: {len(scraped_messages)} messages.")
+                    return scraped_messages
+            except errors.FloodWaitError as e:
+                logger.warning(f"    🛑 [Scraper] Telethon FloodWait: Sleeping {e.seconds}s...")
+                await asyncio.sleep(e.seconds)
         except Exception as e:
             # Check for common "ChatAdminRequired" or "ChatWriteForbidden"
             err_str = str(e)

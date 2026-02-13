@@ -102,6 +102,48 @@ async def self_heal():
 
     print(f"🏁 Topic healing complete. Repaired {heal_count} records.")
 
+    # C. FAILSAFE: Reset "Stuck" Tasks (Processing > 1 hour)
+    # If a worker crashes, the task stays in 'processing' forever.
+    # We will reset them to 'pending' so another worker can pick them up.
+    print(f"\n🚑 [Self-Heal] Checking for stuck worker tasks...")
+    try:
+        from datetime import timedelta
+        one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        
+        # Find tasks stuck in processing
+        stuck_res = db.table("processing_queue")\
+            .select("*")\
+            .filter("status", "eq", "processing")\
+            .filter("updated_at", "lt", one_hour_ago)\
+            .execute()
+        
+        stuck_tasks = stuck_res.data
+        if stuck_tasks:
+            print(f"    ⚠️ Found {len(stuck_tasks)} stuck tasks (Processing > 1h). Recovering...")
+            for task in stuck_tasks:
+                task_id = task['id']
+                attempts = task.get('attempt_count', 0) + 1
+                
+                new_status = 'pending'
+                # If too many resets, fail it permanently
+                if attempts > 5:
+                    new_status = 'failed'
+                    print(f"        ❌ Task {task_id} exceeded max retries. Marking FAILED.")
+                else:
+                    print(f"        🔄 Resetting Task {task_id} to PENDING (Attempt {attempts}).")
+
+                db.table("processing_queue").update({
+                    "status": new_status,
+                    "attempt_count": attempts,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "error_log": f"{task.get('error_log','')}\n[Self-Heal] Reset from stuck processing state."
+                }).eq("id", task_id).execute()
+        else:
+             print(f"    ✅ No stuck tasks found.")
+
+    except Exception as e:
+        print(f"    ❌ Task recovery failed: {e}")
+
     # 2. Trigger Broadcast Logic
     print("\n🚀 [Self-Heal] Triggering full broadcast catch-up...")
     try:
