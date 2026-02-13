@@ -52,7 +52,7 @@ services:
     restart: always
     env_file: .env
     # Running Celery Beat Scheduler
-    command: celery -A app.workers.celery_app beat --loglevel=info
+    command: celery -A app.workers.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
     depends_on:
       - redis
       - worker
