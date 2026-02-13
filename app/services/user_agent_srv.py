@@ -22,92 +22,95 @@ class UserAgentService:
 
     async def start(self):
         """Starts the user client. Requires existing session file or env var."""
-        from app.core.redis_srv import redis_srv
-        
-        # 0. Check Persistent Cooldown (Redis)
-        if redis_srv.is_on_cooldown("user_agent"):
-             ttl = redis_srv.get_cooldown_remaining("user_agent")
-             print(f"    ⏳ [UserAgent] PERSISTENT COOLDOWN: {ttl}s remaining. Skipping.")
-             return False
-
-        # Check if already connected (Persistent Mode)
+        # 1. Check if already connected (Persistent Mode)
+        # Check this BEFORE the lock to allow concurrent checks if already connected
         if self.client and self.client.is_connected():
             return True
 
-        # 1. Bypass Read-Only Mount: Copy session to /tmp
-        # Mounted volumes on Windows often fail with 'attempt to write a readonly database'
-        import shutil
-        TEMP_SESSION_PATH = "/tmp/user_agent_session"
-        
-        # Determine source
-        source_path = None
-        if os.path.exists(self.session_path):
-             source_path = self.session_path
-        elif os.path.exists(f"{self.session_path}.session"):
-             source_path = f"{self.session_path}.session"
-             
-        # If source exists, copy it
-        if source_path:
-            try:
-                # Always overwrite temp to ensure freshness
-                shutil.copy2(source_path, f"{TEMP_SESSION_PATH}.session")
-                # print(f"    📋 [UserAgent] Copied session to {TEMP_SESSION_PATH}.session for write access.")
-            except Exception as e:
-                print(f"    ⚠️ [UserAgent] Failed to copy session to tmp: {e}")
-        else:
-             # Fallback logic for Env Vars (omitted for brevity, handled below if needed)
-             pass
+        async with self.lock:
+            # Re-check after acquiring lock in case another task connected it
+            if self.client and self.client.is_connected():
+                return True
 
-        # 2. Check Env Vars (Railway/Cloud)
-        if not source_path:
-            # Try single var logic
-            session_b64 = settings.USER_SESSION_STRING
+            from app.core.redis_srv import redis_srv
             
-            # Try split var logic if single is missing
-            if not session_b64:
-                parts = []
-                idx = 1
-                while True:
-                    val = os.getenv(f"USER_SESSION_STRING_{idx}")
-                    if not val: break
-                    parts.append(val)
-                    idx += 1
-                if parts:
-                    session_b64 = "".join(parts)
-                    print(f"    ✨ [UserAgent] Detected {len(parts)} split session variables.")
+            # 2. Check Persistent Cooldown (Redis)
+            if redis_srv.is_on_cooldown("user_agent"):
+                 ttl = redis_srv.get_cooldown_remaining("user_agent")
+                 print(f"    ⏳ [UserAgent] PERSISTENT COOLDOWN: {ttl}s remaining. Skipping.")
+                 return False
 
-            if session_b64:
-                print("    ✨ [UserAgent] Recovering session from Environment Variable...")
+            # 3. Bypass Read-Only Mount: Copy session to /tmp
+            import shutil
+            TEMP_SESSION_PATH = "/tmp/user_agent_session"
+            
+            source_path = None
+            if os.path.exists(self.session_path):
+                 source_path = self.session_path
+            elif os.path.exists(f"{self.session_path}.session"):
+                 source_path = f"{self.session_path}.session"
+                 
+            if source_path:
                 try:
-                    import base64
-                    decoded = base64.b64decode(session_b64)
-                    real_path = f"{TEMP_SESSION_PATH}.session"
-                    with open(real_path, "wb") as f:
-                        f.write(decoded)
-                    print(f"    ✅ [UserAgent] Session restored to {real_path}")
-                    source_path = real_path # Mark as found
+                    shutil.copy2(source_path, f"{TEMP_SESSION_PATH}.session")
                 except Exception as e:
-                    print(f"    ❌ [UserAgent] Failed to decode session string: {e}")
+                    print(f"    ⚠️ [UserAgent] Failed to copy session to tmp: {e}")
 
-        # Check final existence in TMP
-        if not os.path.exists(f"{TEMP_SESSION_PATH}.session"):
-             print("    ⚠️ [UserAgent] No session file found. Run 'scripts/login_user.py' first.")
-             return False
+            # 4. Check Env Vars (Railway/Cloud)
+            if not source_path:
+                session_b64 = settings.USER_SESSION_STRING
+                if not session_b64:
+                    parts = []
+                    idx = 1
+                    while True:
+                        val = os.getenv(f"USER_SESSION_STRING_{idx}")
+                        if not val: break
+                        parts.append(val)
+                        idx += 1
+                    if parts:
+                        session_b64 = "".join(parts)
+
+                if session_b64:
+                    try:
+                        import base64
+                        decoded = base64.b64decode(session_b64)
+                        real_path = f"{TEMP_SESSION_PATH}.session"
+                        with open(real_path, "wb") as f:
+                            f.write(decoded)
+                        source_path = real_path
+                    except Exception as e:
+                        print(f"    ❌ [UserAgent] Failed to decode session string: {e}")
+
+            if not os.path.exists(f"{TEMP_SESSION_PATH}.session"):
+                 print("    ⚠️ [UserAgent] No session file found. Run 'scripts/login_user.py' first.")
+                 return False
             
-        # Initialize with TEMP path
-        self.client = TelegramClient(TEMP_SESSION_PATH, self.api_id, self.api_hash)
-        await self.client.connect()
-        
-        if not await self.client.is_user_authorized():
-            print("    ⚠️ [UserAgent] Session invalid or expired.")
-            await self.client.disconnect()
-            return False
+            # 5. Enable WAL Mode & Busy Timeout (Fixes 'database is locked')
+            try:
+                import sqlite3
+                conn = sqlite3.connect(f"{TEMP_SESSION_PATH}.session")
+                # WAL allows concurrent reads and one writer without blocking
+                conn.execute("PRAGMA journal_mode=WAL")
+                # Wait up to 20s for a lock instead of failing instantly
+                conn.execute("PRAGMA busy_timeout=20000")
+                conn.close()
+            except Exception as e:
+                print(f"    ⚠️ [UserAgent] Failed to set SQLite PRAGMAs: {e}")
+                
+            self.client = TelegramClient(TEMP_SESSION_PATH, self.api_id, self.api_hash)
+            await self.client.connect()
             
-        return True
+            if not await self.client.is_user_authorized():
+                print("    ⚠️ [UserAgent] Session invalid or expired.")
+                await self.client.disconnect()
+                return False
+                
+            return True
 
     async def stop(self):
-        if self.client:
-            await self.client.disconnect()
+        async with self.lock:
+            if self.client:
+                await self.client.disconnect()
 
     async def invite_bot_to_group(self, bot_username: str, group_id: int | str) -> bool:
         """

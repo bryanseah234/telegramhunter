@@ -239,11 +239,10 @@ class ScraperService:
         Fetches messages by ID batches (GetMessages) instead of listing history (GetHistory).
         Bypasses 'API restricted' error for listing history.
         """
-        # Use MemorySession to avoid creating files
-        client = TelegramClient(MemorySession(), self.api_id, self.api_hash)
+        from app.services.bot_manager_srv import bot_manager
         msgs = []
         try:
-            await client.start(bot_token=bot_token)
+            client = await bot_manager.get_client(bot_token)
             
             # Create batches of IDs to check
             # Scan backwards from start_id
@@ -293,22 +292,20 @@ class ScraperService:
                 except Exception as e:
                     # print(f"Batch fail: {e}")
                     pass
-        finally:
-            await client.disconnect()
+        except Exception as e:
+            logger.error(f"❌ [Scraper] Bruteforce Telethon error: {e}")
         return msgs
 
     async def _scrape_via_telethon(self, bot_token: str, chat_id: int, limit: int) -> List[Dict]:
-        # Use MemorySession to avoid creating files
-        client = TelegramClient(MemorySession(), self.api_id, self.api_hash)
+        from app.services.bot_manager_srv import bot_manager
         msgs = []
         try:
-            logger.info(f"🔐 [Scraper] Logging in as bot (Telethon)...")
-            await client.start(bot_token=bot_token)
+            # logger.info(f"🔐 [Scraper] Getting shared client for bot...")
+            client = await bot_manager.get_client(bot_token)
             
             logger.info(f"📖 [Scraper] Fetching history via Telethon (Limit: {limit})...")
             
             # ATTEMPT 1: Resolve Entity explicitly
-            # Fresh MemorySession needs to "eager load" the chat
             entity = None
             try:
                 entity = await client.get_entity(chat_id)
@@ -354,8 +351,8 @@ class ScraperService:
                     "file_meta": file_meta,
                     "chat_id": chat_id # Ensure we track where it came from
                 })
-        finally:
-            await client.disconnect()
+        except Exception as e:
+            logger.error(f"❌ [Scraper] Telethon history error: {e}")
         return msgs
 
     async def _scrape_via_bot_api(self, bot_token: str) -> List[Dict]:
