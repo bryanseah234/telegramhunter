@@ -2,6 +2,7 @@ from typing import List, Dict, Optional
 import asyncio
 import httpx
 from telethon import TelegramClient, errors
+from telethon.errors import rpcerrorlist
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
 from app.core.config import settings
 import logging
@@ -349,7 +350,7 @@ class ScraperService:
                     "file_meta": file_meta,
                     "chat_id": chat_id # Ensure we track where it came from
                 })
-        except errors.ApiBotRestrictedError:
+        except rpcerrorlist.ApiBotRestrictedError:
              logger.warning(f"    🛡️ [Scraper] Bot Restricted from history. Falling back to UserAgent...")
              from app.services.user_agent_srv import user_agent
              return await user_agent.get_history(chat_id, limit)

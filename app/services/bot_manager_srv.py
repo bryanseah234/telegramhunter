@@ -27,13 +27,10 @@ class BotClientManager:
             # Check if client exists and is still connected
             if client:
                 if client.is_connected():
-                    try:
-                        # Test connection with a simple request
-                        await client.get_me()
-                        return client
-                    except Exception as e:
-                        logger.warning(f"Existing client for bot disconnected or invalid: {e}")
-                        await client.disconnect()
+                    return client
+                else:
+                    logger.warning(f"Existing client for bot disconnected or invalid.")
+                    await client.disconnect()
                 
             # Create new client if needed
             import os

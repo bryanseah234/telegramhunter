@@ -6,6 +6,9 @@ import requests
 import base64
 import re
 import urllib3
+import logging
+
+logger = logging.getLogger("scanners")
 
 # Suppress SSL warnings for active scanning of random IPs (self-signed certs etc)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -198,7 +201,7 @@ class ShodanService:
             full_query = query
             if country_code:
                 full_query = f'{query} country:"{country_code}"'
-                print(f"    [Shodan] Adding country filter: {country_code}")
+                logger.info(f"    [Shodan] Adding country filter: {country_code}")
             
             # Shodan API call must be async or threaded. Since it's one call, requests is fine IF wrapped,
             # but ideally use httpx.
@@ -226,7 +229,7 @@ class ShodanService:
             else: matches = matches[:300]
 
             results = []
-            print(f"    [Shodan] Processing {len(matches)} matches...")
+            logger.info(f"    [Shodan] Processing {len(matches)} matches...")
 
             # CONCURRENT PROCESSING
             async with httpx.AsyncClient(verify=False, timeout=10.0) as scan_client:
@@ -290,13 +293,13 @@ class ShodanService:
                     })
             return results
         except httpx.TimeoutException:
-            print("    [Shodan] Error: Request Timed Out")
+            logger.warning("    [Shodan] Error: Request Timed Out")
             return []
         except httpx.RequestError as e:
-            print(f"    [Shodan] Network Error: {e}")
+            logger.error(f"    [Shodan] Network Error: {e}")
             return []
         except Exception as e:
-            print(f"    [Shodan] Error: {e}")
+            logger.error(f"    [Shodan] Error: {e}")
             return []
 
 class FofaService:
@@ -359,13 +362,13 @@ class FofaService:
 
             return valid_results
         except httpx.TimeoutException:
-            print("    [FOFA] Error: Request Timed Out")
+            logger.warning("    [FOFA] Error: Request Timed Out")
             return []
         except httpx.RequestError as e:
-            print(f"    [FOFA] Network Error: {e}")
+            logger.error(f"    [FOFA] Network Error: {e}")
             return []
         except Exception as e:
-            print(f"    [FOFA] Error: {e}")
+            logger.error(f"    [FOFA] Error: {e}")
             return []
 
 class UrlScanService:
@@ -379,7 +382,7 @@ class UrlScanService:
         
     async def search(self, query: str, country_code: str = None) -> List[Dict[str, Any]]:
         if not self.api_key:
-            print("    [URLScan] No API key found")
+            logger.warning("    [URLScan] No API key found")
             return []
             
         try:
@@ -406,7 +409,7 @@ class UrlScanService:
                 data = res.json()
             
             results_list = data.get('results', [])
-            print(f"    [URLScan] Found {len(results_list)} hits. scanning cache & live...")
+            logger.info(f"    [URLScan] Found {len(results_list)} hits. scanning cache & live...")
             
             # Filter Logic (Date etc)
             from datetime import datetime, timedelta
@@ -505,17 +508,17 @@ class UrlScanService:
                             }
                         })
             
-            print(f"    [URLScan] Scan complete. {len(final_results)} valid tokens found.")
+            logger.info(f"    [URLScan] Scan complete. {len(final_results)} valid tokens found.")
             return final_results
             
         except httpx.TimeoutException:
-            print("    [URLScan] Error: Search Request Timed Out")
+            logger.warning("    [URLScan] Error: Search Request Timed Out")
             return []
         except httpx.RequestError as e:
-            print(f"    [URLScan] Network Error: {e}")
+            logger.error(f"    [URLScan] Network Error: {e}")
             return []
         except Exception as e:
-            print(f"    [URLScan] Error: {e}")
+            logger.error(f"    [URLScan] Error: {e}")
             return []
 
 class GithubService:
@@ -525,7 +528,7 @@ class GithubService:
         
     async def search(self, query: str) -> List[Dict[str, Any]]:
         if not self.token:
-            print("GitHub Token missing")
+            logger.warning("GitHub Token missing")
             return []
             
         try:
@@ -538,7 +541,7 @@ class GithubService:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 res = await client.get(self.base_url, headers=headers, params=params)
                 if res.status_code in [403, 429]:
-                    print("GitHub Rate Limit Exceeded")
+                    logger.warning("GitHub Rate Limit Exceeded")
                     return []
                 res.raise_for_status()
                 
@@ -587,13 +590,13 @@ class GithubService:
                             
             return results
         except httpx.TimeoutException:
-            print("    [GitHub] Error: Request Timed Out")
+            logger.warning("    [GitHub] Error: Request Timed Out")
             return []
         except httpx.RequestError as e:
-            print(f"    [GitHub] Network Error: {e}")
+            logger.error(f"    [GitHub] Network Error: {e}")
             return []
         except Exception as e:
-            print(f"    [GitHub] Error: {e}")
+            logger.error(f"    [GitHub] Error: {e}")
             return []
 
 # CensysService REMOVED - Free tier doesn't have search API access

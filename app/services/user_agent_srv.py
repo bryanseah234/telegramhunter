@@ -3,6 +3,9 @@ import asyncio
 from telethon import TelegramClient, functions, types, errors
 from app.core.config import settings
 import time
+import logging
+
+logger = logging.getLogger("user_agent")
 
 # Determine absolute path to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,7 +40,7 @@ class UserAgentService:
             # 2. Check Persistent Cooldown (Redis)
             if redis_srv.is_on_cooldown("user_agent"):
                  ttl = redis_srv.get_cooldown_remaining("user_agent")
-                 print(f"    ⏳ [UserAgent] PERSISTENT COOLDOWN: {ttl}s remaining. Skipping.")
+                 logger.info(f"    ⏳ [UserAgent] PERSISTENT COOLDOWN: {ttl}s remaining. Skipping.")
                  return False
 
             # 3. Bypass Read-Only Mount: Copy session to /tmp
@@ -54,7 +57,7 @@ class UserAgentService:
                 try:
                     shutil.copy2(source_path, f"{TEMP_SESSION_PATH}.session")
                 except Exception as e:
-                    print(f"    ⚠️ [UserAgent] Failed to copy session to tmp: {e}")
+                    logger.warning(f"    ⚠️ [UserAgent] Failed to copy session to tmp: {e}")
 
             # 4. Check Env Vars (Railway/Cloud)
             if not source_path:
@@ -79,10 +82,10 @@ class UserAgentService:
                             f.write(decoded)
                         source_path = real_path
                     except Exception as e:
-                        print(f"    ❌ [UserAgent] Failed to decode session string: {e}")
+                        logger.error(f"    ❌ [UserAgent] Failed to decode session string: {e}")
 
             if not os.path.exists(f"{TEMP_SESSION_PATH}.session"):
-                 print("    ⚠️ [UserAgent] No session file found. Run 'scripts/login_user.py' first.")
+                 logger.warning("    ⚠️ [UserAgent] No session file found. Run 'scripts/login_user.py' first.")
                  return False
             
             # 5. Enable WAL Mode & Busy Timeout (Fixes 'database is locked')
@@ -95,13 +98,13 @@ class UserAgentService:
                 conn.execute("PRAGMA busy_timeout=20000")
                 conn.close()
             except Exception as e:
-                print(f"    ⚠️ [UserAgent] Failed to set SQLite PRAGMAs: {e}")
+                logger.warning(f"    ⚠️ [UserAgent] Failed to set SQLite PRAGMAs: {e}")
                 
             self.client = TelegramClient(TEMP_SESSION_PATH, self.api_id, self.api_hash)
             await self.client.connect()
             
             if not await self.client.is_user_authorized():
-                print("    ⚠️ [UserAgent] Session invalid or expired.")
+                logger.warning("    ⚠️ [UserAgent] Session invalid or expired.")
                 await self.client.disconnect()
                 return False
                 
@@ -140,7 +143,7 @@ class UserAgentService:
                 await self._handle_flood_error(e)
                 return False
             except Exception as e:
-                print(f"    ❌ [UserAgent] Entity resolution failed: {e}")
+                logger.error(f"    ❌ [UserAgent] Entity resolution failed: {e}")
                 return False
 
             print(f"    🚀 [UserAgent] Inviting {bot_username} to group...")
@@ -155,7 +158,7 @@ class UserAgentService:
                     channel=group_entity,
                     users=[bot_entity]
                 ))
-                print("    ✅ [UserAgent] Invite successful (Channel/Supergroup).")
+                logger.info("    ✅ [UserAgent] Invite successful (Channel/Supergroup).")
                 return True
             except Exception as e_channel:
                 # Fallback to basic chat
@@ -165,17 +168,17 @@ class UserAgentService:
                         user_id=bot_entity,
                         fwd_limit=0
                     ))
-                    print("    ✅ [UserAgent] Invite successful (Basic Chat).")
+                    logger.info("    ✅ [UserAgent] Invite successful (Basic Chat).")
                     return True
                 except Exception as e_chat:
-                    print(f"    ❌ [UserAgent] Invite failed: {e_channel} | {e_chat}")
+                    logger.error(f"    ❌ [UserAgent] Invite failed: {e_channel} | {e_chat}")
                     return False
                     
         except errors.FloodWaitError as e:
             await self._handle_flood_error(e)
             return False
         except Exception as e:
-            print(f"    ❌ [UserAgent] Error: {e}")
+            logger.error(f"    ❌ [UserAgent] Error: {e}")
             return False
 
     async def _handle_flood_error(self, e):
@@ -184,12 +187,12 @@ class UserAgentService:
         wait_seconds = e.seconds
         
         if wait_seconds > 300: # Over 5 minutes is "Serious"
-            print(f"\n🛑 [UserAgent] SEVERE FLOOD WAIT: {wait_seconds} seconds (~{wait_seconds//3600}h).")
-            print("👉 Feature 'Kickstart' will be disabled until this expires to protect the account.")
+            logger.warning(f"\n🛑 [UserAgent] SEVERE FLOOD WAIT: {wait_seconds} seconds (~{wait_seconds//3600}h).")
+            logger.warning("👉 Feature 'Kickstart' will be disabled until this expires to protect the account.")
             # Set persistent Redis key
             redis_srv.set_cooldown("user_agent", wait_seconds + 60)
         else:
-            print(f"    🛑 [UserAgent] FLOOD WAIT: {wait_seconds}s.")
+            logger.warning(f"    🛑 [UserAgent] FLOOD WAIT: {wait_seconds}s.")
             # Still set it in Redis for worker safety
             redis_srv.set_cooldown("user_agent", wait_seconds + 10)
 
@@ -228,13 +231,13 @@ class UserAgentService:
                 for topic in res.topics:
                     # Strict match
                     if topic.title == topic_name:
-                        print(f"    🔍 [UserAgent] Found existing topic: {topic.title} ({topic.id})")
+                        logger.info(f"    🔍 [UserAgent] Found existing topic: {topic.title} ({topic.id})")
                         return topic.id
                         
             return None
             
         except Exception as e:
-            print(f"    ⚠️ [UserAgent] Find topic failed: {e}")
+            logger.warning(f"    ⚠️ [UserAgent] Find topic failed: {e}")
             return None
         finally:
             pass
@@ -258,7 +261,7 @@ class UserAgentService:
             
             entity = await self.client.get_entity(target)
             
-            print(f"    🧹 [UserAgent] Starting Bot Cleanup in {entity.title}...")
+            logger.info(f"    🧹 [UserAgent] Starting Bot Cleanup in {entity.title}...")
             
             # Iterate participants
             # We filter for bots only
@@ -286,7 +289,7 @@ class UserAgentService:
                     # Check if it is ME (User Agent) - unlikely as I am not a bot, but safety first
                     if user.is_self: continue
                     
-                    print(f"    🚫 [UserAgent] Kicking unauthorized bot: @{user.username} ({user.id})")
+                    logger.info(f"    🚫 [UserAgent] Kicking unauthorized bot: @{user.username} ({user.id})")
                     try:
                         await self.client(EditBannedRequest(
                             channel=entity,
@@ -307,13 +310,13 @@ class UserAgentService:
                             banned_rights=ChatBannedRights(until_date=None, view_messages=False)
                         ))
                     except Exception as e_kick:
-                        print(f"        ❌ Failed to kick: {e_kick}")
+                        logger.error(f"        ❌ Failed to kick: {e_kick}")
 
             print(f"    ✨ [UserAgent] Cleanup Complete. Removed {removed_count} bots.")
             return removed_count
 
         except Exception as e:
-            print(f"    ❌ [UserAgent] Cleanup failed: {e}")
+            logger.error(f"    ❌ [UserAgent] Cleanup failed: {e}")
             return 0
         finally:
             pass
@@ -334,10 +337,10 @@ class UserAgentService:
                 entity = target
 
             await self.client.send_message(entity, message)
-            print(f"    🗣️ [UserAgent] Sent: '{message}'")
+            logger.info(f"    🗣️ [UserAgent] Sent: '{message}'")
             return True
         except Exception as e:
-            print(f"    ❌ [UserAgent] Send failed: {e}")
+            logger.error(f"    ❌ [UserAgent] Send failed: {e}")
             return False
 
     async def get_last_message_id(self, group_id: int | str, topic_id: int) -> int | None:
@@ -373,7 +376,7 @@ class UserAgentService:
             return None
             
         except Exception as e:
-            print(f"    ❌ [UserAgent] Failed to get last message: {e}")
+            logger.error(f"    ❌ [UserAgent] Failed to get last message: {e}")
             return None
         finally:
             pass
@@ -431,7 +434,7 @@ class UserAgentService:
                     "chat_id": entity.id if hasattr(entity, 'id') else group_id
                 })
         except Exception as e:
-            print(f"    ❌ [UserAgent] Failed to fetch history: {e}")
+            logger.error(f"    ❌ [UserAgent] Failed to fetch history: {e}")
             
         return msgs
 
