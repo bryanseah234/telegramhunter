@@ -4,6 +4,7 @@ from telethon import TelegramClient, errors
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
 from app.core.config import settings
 import logging
+import httpx
 
 logger = logging.getLogger("scraper")
 
@@ -300,6 +301,16 @@ class ScraperService:
             # logger.info(f"🔐 [Scraper] Getting shared client for bot...")
             client = await bot_manager.get_client(bot_token)
             
+            # 0. Check Redis Cache for known restrictions
+            from app.core.redis_srv import redis_srv
+            
+            # Key format: bot_restricted:{chat_id}
+            # If exists, skip Telethon entirely to save time/logs
+            if redis_srv.is_on_cooldown(f"bot_restricted:{chat_id}"):
+                logger.info(f"    ⏩ [Scraper] Skipping Telethon (Cached Restriction) for Chat {chat_id}. Using UserAgent...")
+                from app.services.user_agent_srv import user_agent
+                return await user_agent.get_history(chat_id, limit)
+
             logger.info(f"📖 [Scraper] Fetching history via Telethon (Limit: {limit})...")
             
             # ATTEMPT 1: Resolve Entity explicitly
@@ -352,8 +363,16 @@ class ScraperService:
              err_str = str(e)
              if "API access for bot users is restricted" in err_str or "ChatAdminRequired" in err_str:
                  logger.warning(f"    🛡️ [Scraper] Bot Restricted ({err_str}). Falling back to UserAgent...")
+                 
+                 # Cache this restriction for 6 hours (21600s)
+                 # This prevents the "WARNING" log on every subsequent scrape
+                 try:
+                     redis_srv.set_cooldown(f"bot_restricted:{chat_id}", 21600)
+                 except: pass # Non-critical if Redis fails
+                 
                  from app.services.user_agent_srv import user_agent
                  return await user_agent.get_history(chat_id, limit)
+                 # return [{"telegram_msg_id": 999, "content": "HARDCODED"}]
              
              logger.error(f"❌ [Scraper] Telethon history error: {e}")
         return msgs
