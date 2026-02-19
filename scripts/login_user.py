@@ -57,7 +57,18 @@ def interactive_login():
         print(f"Session saved to: {os.path.abspath(session_file_path + '.session')}")
         print("\nYou can now run the scraper with auto-invite enabled.")
 
-    client.loop.run_until_complete(main())
+    try:
+        client.loop.run_until_complete(main())
+    except Exception as e:
+        if "attempt to write a readonly database" in str(e) or "database is locked" in str(e):
+            print(f"\n❌ DATABASE ERROR: {e}")
+            print(f"⚠️  The session file '{session_name}.session' is likely locked by running containers or has permission issues.")
+            print("👉 STEPS TO FIX:")
+            print("   1. Stop all containers:  docker-compose down")
+            print(f"   2. Delete the file:      rm {session_name}.session")
+            print("   3. Run this script again.")
+        else:
+            raise e
 
 if __name__ == "__main__":
     interactive_login()
