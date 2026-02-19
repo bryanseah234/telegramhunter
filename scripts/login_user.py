@@ -46,19 +46,40 @@ def interactive_login():
     
     print(f"📍 Session will be saved to: {session_file_path}.session")
 
+    # Use /tmp to avoid SQLite locking issues on mounted volumes (WSL/Docker)
+    import shutil
+    temp_session_path = os.path.join("/tmp", session_name)
+    
+    # Clean up temp if exists
+    if os.path.exists(temp_session_path + ".session"):
+        os.remove(temp_session_path + ".session")
+
+    print(f"📍 Session will be temporarily created at: {temp_session_path}.session")
+
     import sqlite3
     try:
-        client = TelegramClient(session_file_path, api_id, api_hash)
+        # Create client on temp path
+        client = TelegramClient(temp_session_path, api_id, api_hash)
     except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
         print(f"\n❌ Error initializing Telegram Client: {e}")
-        print(f"⚠️  The session file '{session_name}.session' might be corrupted or locked by another process.")
-        print("👉 Try running 'docker-compose down' to stop all other containers.")
-        print(f"👉 If that fails, delete the file '{session_file_path}.session' and try again.")
         return
 
     async def main():
         await client.start()
         print("\n✅ Login Successful!")
+        me = await client.get_me()
+        print(f"Logged in as: {me.first_name} (@{me.username})")
+        
+        # Disconnect to release lock
+        await client.disconnect()
+        
+        # Copy to final destination
+        final_path = session_file_path + ".session"
+        print(f"📦 Moving session to: {final_path}")
+        shutil.copy2(temp_session_path + ".session", final_path)
+        
+        print(f"✅ Session saved successfully to: {final_path}")
+        print("\nYou can now run the scraper with auto-invite enabled.")
         me = await client.get_me()
         print(f"Logged in as: {me.first_name} (@{me.username})")
         print(f"Session saved to: {os.path.abspath(session_file_path + '.session')}")
