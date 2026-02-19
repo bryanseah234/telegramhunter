@@ -22,96 +22,125 @@ class UserAgentService:
     def __init__(self):
         self.api_id = settings.TELEGRAM_API_ID
         self.api_hash = settings.TELEGRAM_API_HASH
-        self.session_path = SESSION_FILE
         self.client = None
         self.lock = asyncio.Lock()
+        
+        # Rotation Logic
+        self.sessions = [] # List of session paths
+        self.current_index = 0
+        self.current_session_name = "unknown"
+
+    def _discover_sessions(self):
+        """Scans BASE_DIR for valid .session files."""
+        self.sessions = []
+        
+        # 1. Check Env Var Override first (Single Session Mode)
+        env_session = os.getenv("USER_SESSION_NAME")
+        if env_session:
+            path = os.path.join(BASE_DIR, f"{env_session}.session")
+            if os.path.exists(path):
+                self.sessions.append(path)
+                return
+
+        # 2. Scan Directory
+        try:
+            for f in os.listdir(BASE_DIR):
+                if f.endswith(".session"):
+                    # Exclude known non-user sessions
+                    if f in ["anon.session", "journal.session"]: continue
+                    if f.startswith("bot_"): continue 
+                    
+                    full_path = os.path.join(BASE_DIR, f)
+                    self.sessions.append(full_path)
+        except Exception as e:
+            logger.error(f"    ❌ [UserAgent] Session discovery failed: {e}")
+
+        # Fallback to default if nothing found (legacy support)
+        if not self.sessions:
+            default_path = os.path.join(BASE_DIR, "user_session.session")
+            # We add it even if it doesn't exist yet, so we can warn later
+            self.sessions.append(default_path)
+            
+        self.sessions.sort() # Ensure deterministic order (e.g. user_1, user_2)
+        logger.info(f"    🔄 [UserAgent] Discovered {len(self.sessions)} session(s): {[os.path.basename(s) for s in self.sessions]}")
 
     async def start(self):
-        """Starts the user client. Requires existing session file or env var."""
-        # 1. Check if already connected (Persistent Mode)
-        # Check this BEFORE the lock to allow concurrent checks if already connected
-        if self.client and self.client.is_connected():
-            return True
+        """
+        Starts the user client. 
+        Rotates through available sessions to find a usable one.
+        """
+        if not self.sessions:
+            self._discover_sessions()
 
-        async with self.lock:
-            # Re-check after acquiring lock in case another task connected it
+        # Try up to N times (where N = number of sessions) to find a usable one
+        from app.core.redis_srv import redis_srv
+        
+        attempts = len(self.sessions)
+        for _ in range(attempts):
+            # 1. Round Robin Selection
+            session_path = self.sessions[self.current_index]
+            session_name = os.path.splitext(os.path.basename(session_path))[0]
+            
+            # Increment for next time (even if this one fails, we rotate)
+            self.current_index = (self.current_index + 1) % len(self.sessions)
+            
+            # 2. Check Cooldown for THIS session
+            cooldown_key = f"user_agent:{session_name}"
+            if redis_srv.is_on_cooldown(cooldown_key):
+                 ttl = redis_srv.get_cooldown_remaining(cooldown_key)
+                 logger.info(f"    ⏳ [UserAgent] Session '{session_name}' on cooldown ({ttl}s). Rotating...")
+                 continue
+
+            # 3. Check if already connected is THIS session
             if self.client and self.client.is_connected():
-                return True
+                # If we are already connected, check if it's the SAME session we just picked?
+                # Actually, if we are connected, we might want to keep using it to save handshake overhead?
+                # BUT user requested ROTATION.
+                # So we should probably disconnect if it's a different session.
+                
+                # Check current session path
+                if getattr(self.client.session, 'filename', '') == session_path:
+                    self.current_session_name = session_name # Update tracker
+                    return True
+                
+                # Disconnect old
+                await self.client.disconnect()
 
-            from app.core.redis_srv import redis_srv
-            
-            # 2. Check Persistent Cooldown (Redis)
-            if redis_srv.is_on_cooldown("user_agent"):
-                 ttl = redis_srv.get_cooldown_remaining("user_agent")
-                 logger.info(f"    ⏳ [UserAgent] PERSISTENT COOLDOWN: {ttl}s remaining. Skipping.")
-                 return False
-
-            # 3. Bypass Read-Only Mount: Copy session to /tmp
+            # 4. Initialize & Connect
+            # Copy to tmp (Bypass Read-Only)
             import shutil
-            TEMP_SESSION_PATH = "/tmp/user_agent_session"
+            import sqlite3
+            TEMP_SESSION_PATH = f"/tmp/{session_name}" # Unique tmp path per session
             
-            source_path = None
-            if os.path.exists(self.session_path):
-                 source_path = self.session_path
-            elif os.path.exists(f"{self.session_path}.session"):
-                 source_path = f"{self.session_path}.session"
-                 
-            if source_path:
-                try:
-                    shutil.copy2(source_path, f"{TEMP_SESSION_PATH}.session")
-                except Exception as e:
-                    logger.warning(f"    ⚠️ [UserAgent] Failed to copy session to tmp: {e}")
-
-            # 4. Check Env Vars (Railway/Cloud)
-            if not source_path:
-                session_b64 = settings.USER_SESSION_STRING
-                if not session_b64:
-                    parts = []
-                    idx = 1
-                    while True:
-                        val = os.getenv(f"USER_SESSION_STRING_{idx}")
-                        if not val: break
-                        parts.append(val)
-                        idx += 1
-                    if parts:
-                        session_b64 = "".join(parts)
-
-                if session_b64:
-                    try:
-                        import base64
-                        decoded = base64.b64decode(session_b64)
-                        real_path = f"{TEMP_SESSION_PATH}.session"
-                        with open(real_path, "wb") as f:
-                            f.write(decoded)
-                        source_path = real_path
-                    except Exception as e:
-                        logger.error(f"    ❌ [UserAgent] Failed to decode session string: {e}")
-
-            if not os.path.exists(f"{TEMP_SESSION_PATH}.session"):
-                 logger.warning("    ⚠️ [UserAgent] No session file found. Run 'scripts/login_user.py' first.")
-                 return False
-            
-            # 5. Enable WAL Mode & Busy Timeout (Fixes 'database is locked')
             try:
-                import sqlite3
+                # Copy logic
+                if os.path.exists(session_path):
+                    shutil.copy2(session_path, f"{TEMP_SESSION_PATH}.session")
+                
+                # WAL Mode
                 conn = sqlite3.connect(f"{TEMP_SESSION_PATH}.session")
-                # WAL allows concurrent reads and one writer without blocking
                 conn.execute("PRAGMA journal_mode=WAL")
-                # Wait up to 20s for a lock instead of failing instantly
                 conn.execute("PRAGMA busy_timeout=20000")
                 conn.close()
+                
+                self.client = TelegramClient(TEMP_SESSION_PATH, self.api_id, self.api_hash)
+                await self.client.connect()
+                
+                if not await self.client.is_user_authorized():
+                    logger.warning(f"    ⚠️ [UserAgent] Session '{session_name}' invalid/expired. Skipping.")
+                    await self.client.disconnect()
+                    continue
+                    
+                self.current_session_name = session_name
+                logger.info(f"    ✅ [UserAgent] Connected with session: {session_name}")
+                return True
+
             except Exception as e:
-                logger.warning(f"    ⚠️ [UserAgent] Failed to set SQLite PRAGMAs: {e}")
-                
-            self.client = TelegramClient(TEMP_SESSION_PATH, self.api_id, self.api_hash)
-            await self.client.connect()
-            
-            if not await self.client.is_user_authorized():
-                logger.warning("    ⚠️ [UserAgent] Session invalid or expired.")
-                await self.client.disconnect()
-                return False
-                
-            return True
+                logger.warning(f"    ⚠️ [UserAgent] Failed to connect '{session_name}': {e}")
+                continue
+        
+        logger.error("    ❌ [UserAgent] All sessions failed or on cooldown.")
+        return False
 
     async def stop(self):
         async with self.lock:
@@ -185,19 +214,21 @@ class UserAgentService:
             return False
 
     async def _handle_flood_error(self, e):
-        """Logs and sets persistent cooldown for FloodWaitError."""
+        """Logs and sets persistent cooldown for FloodWaitError (Per Session)."""
         from app.core.redis_srv import redis_srv
         wait_seconds = e.seconds
         
+        # Use current session name for granular cooldown
+        current_session = getattr(self, 'current_session_name', 'unknown')
+        cooldown_key = f"user_agent:{current_session}"
+        
         if wait_seconds > 300: # Over 5 minutes is "Serious"
-            logger.warning(f"\n🛑 [UserAgent] SEVERE FLOOD WAIT: {wait_seconds} seconds (~{wait_seconds//3600}h).")
-            logger.warning("👉 Feature 'Kickstart' will be disabled until this expires to protect the account.")
+            logger.warning(f"\n🛑 [UserAgent] SEVERE FLOOD WAIT for '{current_session}': {wait_seconds}s.")
             # Set persistent Redis key
-            redis_srv.set_cooldown("user_agent", wait_seconds + 60)
+            redis_srv.set_cooldown(cooldown_key, wait_seconds + 60)
         else:
-            logger.warning(f"    🛑 [UserAgent] FLOOD WAIT: {wait_seconds}s.")
-            # Still set it in Redis for worker safety
-            redis_srv.set_cooldown("user_agent", wait_seconds + 10)
+            logger.warning(f"    🛑 [UserAgent] FLOOD WAIT for '{current_session}': {wait_seconds}s.")
+            redis_srv.set_cooldown(cooldown_key, wait_seconds + 10)
 
     async def find_topic_id(self, group_id: int | str, topic_name: str) -> int | None:
         """
