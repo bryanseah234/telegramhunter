@@ -53,8 +53,13 @@ else
 fi
 
 # 4. Run Self-Healing Sync (Bridge gaps between DB and Telegram)
-echo "🩹 [Entrypoint] Running Self-Healing Sync..."
-python /app/scripts/self_heal_sync.py || echo "⚠️ [Entrypoint] Warning: Self-healing sync failed (ignoring to allow startup)"
+# Skip if we are running the login script to prevent database locking issues
+if [[ "$*" == *"scripts/login_user.py"* ]]; then
+    echo "🔐 [Entrypoint] Login detected. Skipping Self-Healing Sync to avoid locks."
+else
+    echo "🩹 [Entrypoint] Running Self-Healing Sync..."
+    python /app/scripts/self_heal_sync.py || echo "⚠️ [Entrypoint] Warning: Self-healing sync failed (ignoring to allow startup)"
+fi
 
 # Execute the main command passed to the container
 echo "🎯 [Entrypoint] Starting main service: $@"
