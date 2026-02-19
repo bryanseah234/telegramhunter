@@ -9,7 +9,10 @@ logger = logging.getLogger("user_agent")
 
 # Determine absolute path to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SESSION_FILE = os.path.join(BASE_DIR, "user_session.session")
+
+# Support multiple accounts via Env Var (default: user_session)
+SESSION_NAME = os.getenv("USER_SESSION_NAME", "user_session")
+SESSION_FILE = os.path.join(BASE_DIR, f"{SESSION_NAME}.session")
 
 class UserAgentService:
     """

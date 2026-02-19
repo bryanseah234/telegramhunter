@@ -67,12 +67,23 @@ class BroadcasterService:
         except Exception as e:
             print(f"⚠️ Failed to check existing topics via UserAgent: {e}")
 
+        # Check for "General" topic collision or if user tries to create topic 1
+        if topic_name in ["General", "general", "main"] or group_id == 1:
+             return 1 # ID 1 is usually reserved for General in topics view (or None)
+
+
         # 2. Create if not found
         try:
-            topic = await self._retry_on_flood(
-                self.bot.create_forum_topic, chat_id=group_id, name=topic_name
+            print(f"    [Broadcaster] Creating topic '{topic_name}' in {group_id}...")
+            # Enforce strict timeout specifically for creation which can hang
+            topic = await asyncio.wait_for(
+                self._retry_on_flood(
+                    self.bot.create_forum_topic, chat_id=group_id, name=topic_name
+                ), 
+                timeout=15.0
             )
             thread_id = topic.message_thread_id
+            print(f"    ✅ [Broadcaster] Created topic {thread_id}")
             
             # 3. Lay the ground: Send Topic Name as first message
             try:
@@ -81,6 +92,9 @@ class BroadcasterService:
                 print(f"⚠️ Failed to send header for new topic: {e}")
                 
             return thread_id
+        except asyncio.TimeoutError:
+             print(f"❌ [Broadcaster] Topic creation timed out for '{topic_name}'")
+             raise TimedOut("Topic creation timed out inside ensure_topic")
         except TelegramError as e:
             print(f"Error creating topic: {e}")
             raise e
