@@ -77,16 +77,20 @@ def interactive_login():
         final_path = session_file_path + ".session"
         print(f"📦 Moving session to: {final_path}")
         try:
+            if os.path.exists(final_path):
+                os.remove(final_path)
             shutil.copy2(temp_session_path + ".session", final_path)
         except PermissionError:
-            print(f"\n❌ Permission Error: Unable to write to {final_path}")
-            print("💡 The container is running as a non-root user and cannot write to the mounted volume.")
-            print("👉 Try running the script as root:")
-            print("   docker-compose run --rm --user root api python scripts/login_user.py")
+            print(f"\n❌ Permission Error: Cannot write to '{final_path}'")
+            print(f"� The file '{final_path}' likely exists and is owned by another user (e.g. root).")
+            print(f"👉 Please run this command inside the container to fix it:")
+            print(f"   rm {final_path}")
+            return
+        except Exception as e:
+            print(f"\n❌ Error saving session: {e}")
             return
         
         print(f"✅ Session saved successfully to: {final_path}")
-        print("\nYou can now run the scraper with auto-invite enabled.")
         me = await client.get_me()
         print(f"Logged in as: {me.first_name} (@{me.username})")
         print(f"Session saved to: {os.path.abspath(session_file_path + '.session')}")
