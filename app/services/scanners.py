@@ -7,8 +7,37 @@ import base64
 import re
 import urllib3
 import logging
+import random
+import functools
 
 logger = logging.getLogger("scanners")
+
+# NEW: Resilience Helper
+async def retry_with_backoff(func, max_retries=3, initial_delay=2, backoff_factor=2):
+    """Exponential backoff decorator for async functions."""
+    retries = 0
+    delay = initial_delay
+    while retries <= max_retries:
+        try:
+            return await func()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429: # Rate limit
+                retry_after = e.response.headers.get("Retry-After")
+                wait_time = int(retry_after) if retry_after and retry_after.isdigit() else delay
+                logger.warning(f"⚠️ Rate limited. Waiting {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            elif e.response.status_code in [500, 502, 503, 504]: # Server errors
+                logger.warning(f"⚠️ Server error {e.response.status_code}. Retrying in {delay}s...")
+                await asyncio.sleep(delay)
+            else:
+                raise # 400, 401, 403, 404 should probably fail immediately
+        except (httpx.RequestError, asyncio.TimeoutError) as e:
+            logger.warning(f"⚠️ Network error: {e}. Retrying in {delay}s...")
+            await asyncio.sleep(delay)
+        
+        retries += 1
+        delay *= backoff_factor
+    return None # exhausted retries
 
 # Suppress SSL warnings for active scanning of random IPs (self-signed certs etc)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -207,10 +236,14 @@ class ShodanService:
             # but ideally use httpx.
             params = {'key': self.api_key, 'query': full_query}
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.get(self.base_url, params=params)
-                res.raise_for_status()
-                matches = res.json().get('matches', [])
+            async def do_search():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.get(self.base_url, params=params)
+                    res.raise_for_status()
+                    return res.json().get('matches', [])
+            
+            matches = await retry_with_backoff(do_search)
+            if matches is None: return []
             
             # Sort/Filter
             from datetime import datetime, timedelta
@@ -320,10 +353,15 @@ class FofaService:
             params = {'email': self.email, 'key': self.key, 'qbase64': qbase64, 'fields': 'host,ip,port', 'size': 100}
             print(f"    [FOFA] Searching: {full_query}")
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.get(self.base_url, params=params)
-                if res.status_code != 200: return []
-                results_data = res.json().get("results", [])
+            async def do_fofa():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.get(self.base_url, params=params)
+                    if res.status_code != 200: 
+                        res.raise_for_status() # Trigger retry on non-200
+                    return res.json().get("results", [])
+            
+            results_data = await retry_with_backoff(do_fofa)
+            if results_data is None: return []
             
             valid_results = []
             
@@ -400,13 +438,15 @@ class UrlScanService:
             params = {'q': api_query, 'size': 500}
             print(f"    [URLScan] Searching: {api_query[:50]}...")
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.get(self.search_url, headers=headers, params=params)
-                
-                if res.status_code == 401: return []
-                if res.status_code == 429: return []
-                res.raise_for_status()
-                data = res.json()
+            async def do_urlscan():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.get(self.search_url, headers=headers, params=params)
+                    if res.status_code in [401, 403]: raise Exception("Invalid URLScan Key")
+                    res.raise_for_status()
+                    return res.json()
+            
+            data = await retry_with_backoff(do_urlscan)
+            if not data: return []
             
             results_list = data.get('results', [])
             logger.info(f"    [URLScan] Found {len(results_list)} hits. scanning cache & live...")
@@ -538,56 +578,54 @@ class GithubService:
             }
             params = {'q': query, 'per_page': 100, 'sort': 'indexed', 'order': 'desc'} 
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.get(self.base_url, headers=headers, params=params)
-                if res.status_code in [403, 429]:
-                    logger.warning("GitHub Rate Limit Exceeded")
-                    return []
-                res.raise_for_status()
-                
-                # We only fetch page 1 in async version for speed/safety, 
-                # OR we implement pagination carefully. 
-                # Let's fetch up to 3 pages to be safe but efficient.
-                
-                items = res.json().get('items', [])
-                
-                # Parallel Raw Fetching
-                results = []
-                async with httpx.AsyncClient(verify=False, timeout=10.0) as raw_client:
-                    tasks = []
-                    sem = asyncio.Semaphore(10) # GitHub raw is sensitive to speed?
+            async def do_github():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.get(self.base_url, headers=headers, params=params)
+                    if res.status_code in [403, 429]:
+                        # Check Rate Limit sleep
+                        raise httpx.HTTPStatusError("Rate Limit", request=res.request, response=res)
+                    res.raise_for_status()
+                    return res.json().get('items', [])
+            
+            items = await retry_with_backoff(do_github, max_retries=2)
+            if not items: items = []
+            
+            # Parallel Raw Fetching
+            results = []
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as raw_client:
+                tasks = []
+                sem = asyncio.Semaphore(10) # GitHub raw is sensitive to speed?
 
-                    async def fetch_raw(item):
-                        async with sem:
-                            raw_url = item.get('html_url', '').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
-                            try:
-                                raw_res = await raw_client.get(raw_url)
-                                content = raw_res.text
-                                found = TOKEN_PATTERN.findall(content)
-                                local_res = []
-                                for t in found:
-                                    if not _is_valid_token(t): continue
-                                    local_res.append({
-                                        "token": t,
-                                        "meta": {
-                                            "source": "github",
-                                            "repo": item.get('repository', {}).get('full_name'),
-                                            "file_url": item.get('html_url')
-                                        }
-                                    })
-                                return local_res
-                            except Exception:
-                                return []
+                async def fetch_raw(item):
+                    async with sem:
+                        raw_url = item.get('html_url', '').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
+                        try:
+                            raw_res = await raw_client.get(raw_url)
+                            content = raw_res.text
+                            found = TOKEN_PATTERN.findall(content)
+                            local_res = []
+                            for t in found:
+                                if not _is_valid_token(t): continue
+                                local_res.append({
+                                    "token": t,
+                                    "meta": {
+                                        "source": "github",
+                                        "repo": item.get('repository', {}).get('full_name'),
+                                        "file_url": item.get('html_url')
+                                    }
+                                })
+                            return local_res
+                        except Exception:
+                            return []
+
+                for item in items:
+                    tasks.append(fetch_raw(item))
                     
-                    for item in items:
-                        tasks.append(fetch_raw(item))
-                        
-                    scan_results = await asyncio.gather(*tasks, return_exceptions=True)
-                    
-                    for batch in scan_results:
-                        if batch and isinstance(batch, list):
-                            results.extend(batch)
-                            
+                scan_results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for batch in scan_results:
+                    if batch and isinstance(batch, list):
+                        results.extend(batch)
             return results
         except httpx.TimeoutException:
             logger.warning("    [GitHub] Error: Request Timed Out")
@@ -618,10 +656,14 @@ class GitlabService:
             headers = {"PRIVATE-TOKEN": self.token}
             params = {"scope": "blobs", "search": query}
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.get(self.base_url, headers=headers, params=params)
-                res.raise_for_status()
-                items = res.json()
+            async def do_gitlab_search():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.get(self.base_url, headers=headers, params=params)
+                    res.raise_for_status()
+                    return res.json()
+            
+            items = await retry_with_backoff(do_gitlab_search)
+            if not items: items = []
             
             # GitLab blobs api returns project_id and filename. 
             # We must fetch the raw blob or the file content via projects API.
@@ -689,10 +731,14 @@ class GithubGistService:
             }
             params = {"per_page": 100}
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.get(self.base_url, headers=headers, params=params)
-                res.raise_for_status()
-                items = res.json()
+            async def do_gist_search():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.get(self.base_url, headers=headers, params=params)
+                    res.raise_for_status()
+                    return res.json()
+            
+            items = await retry_with_backoff(do_gist_search)
+            if not items: items = []
             
             results = []
             async with httpx.AsyncClient(verify=False, timeout=10.0) as raw_client:
@@ -747,10 +793,14 @@ class GrepAppService:
         
         try:
             params = {"q": query, "regexp": "true"}
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.get(self.base_url, params=params)
-                res.raise_for_status()
-                data = res.json()
+            async def do_grepapp():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.get(self.base_url, params=params)
+                    res.raise_for_status()
+                    return res.json()
+            
+            data = await retry_with_backoff(do_grepapp)
+            if not data: return []
                 
             results = []
             from app.services.scanners import TOKEN_PATTERN, _is_valid_token
@@ -786,14 +836,23 @@ class PublicWwwService:
             url = f"{self.base_url}{query}/"
             params = {"export": "json", "key": self.key, "limit": 100}
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.get(url, params=params)
-                if res.status_code == 403:
-                    logger.warning("    [PublicWWW] Rate limit or Bad Key")
-                    return []
-                res.raise_for_status()
-                # Returns list of domains
-                domains = res.json()
+            async def do_publicwww():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.get(url, params=params)
+                    if "API available for paid search results only" in res.text:
+                        logger.warning("    [PublicWWW] Paid plan required for API.")
+                        return []
+                    if res.status_code == 403:
+                        logger.warning("    [PublicWWW] Access Denied")
+                        return []
+                    res.raise_for_status()
+                    try:
+                        return res.json()
+                    except:
+                        return []
+            
+            domains = await retry_with_backoff(do_publicwww)
+            if not domains: return []
                 
             results = []
             async with httpx.AsyncClient(verify=False, timeout=10.0) as scan_client:
@@ -848,14 +907,14 @@ class SerperService:
                 "num": 20
             }
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.post(self.base_url, headers=headers, json=payload)
-                res.raise_for_status()
-                data = res.json()
-                
-            results = []
-            from app.services.scanners import _perform_active_deep_scan
-            organic = data.get("organic", [])
+            async def do_serper():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.post(self.base_url, headers=headers, json=payload)
+                    res.raise_for_status()
+                    return res.json().get("organic", [])
+            
+            organic = await retry_with_backoff(do_serper)
+            if not organic: return []
             
             async with httpx.AsyncClient(verify=False, timeout=10.0) as scan_client:
                 tasks = []
