@@ -272,11 +272,12 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     # Initialize a temporary client
     import tempfile
+    import uuid
     temp_dir = tempfile.gettempdir()
-    session_name = phone.replace("+", "").replace(" ", "").replace("-", "")
-    temp_session_path = os.path.join(temp_dir, f"temp_login_{session_name}")
+    session_id = uuid.uuid4().hex
+    temp_session_path = os.path.join(temp_dir, f"temp_login_{session_id}")
     
-    # Clean up old temp file if exists
+    # Clean up old temp file if exists (not strictly needed with uuid but good practice)
     if os.path.exists(temp_session_path + ".session"):
         try:
             os.remove(temp_session_path + ".session")
@@ -403,9 +404,48 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await client.disconnect()
 
         # Copy to final destination
-        if os.path.exists(final_path):
-            os.remove(final_path)
-        shutil.copy2(temp_session_path + ".session", final_path)
+        saved_successfully = False
+        try:
+            if os.path.exists(final_path):
+                os.remove(final_path)
+            shutil.copy2(temp_session_path + ".session", final_path)
+            saved_successfully = True
+        except PermissionError:
+            logger.warning(f"File {final_path} is locked. Attempting sqlite3 injection...")
+            try:
+                import sqlite3
+                src_conn = sqlite3.connect(temp_session_path + ".session")
+                dst_conn = sqlite3.connect(final_path, timeout=30.0)
+                
+                src_cur = src_conn.cursor()
+                dst_cur = dst_conn.cursor()
+                
+                # Copy sessions table
+                src_cur.execute("SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions")
+                row = src_cur.fetchone()
+                dst_cur.execute("CREATE TABLE IF NOT EXISTS sessions (dc_id integer primary key, server_address text, port integer, auth_key blob, takeout_id integer)")
+                dst_cur.execute("DELETE FROM sessions")
+                if row:
+                    dst_cur.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)", row)
+                
+                # Copy entities table safely
+                try:
+                    src_cur.execute("SELECT id, hash, username, phone, name, date FROM entities")
+                    entities = src_cur.fetchall()
+                    dst_cur.execute("CREATE TABLE IF NOT EXISTS entities (id integer primary key, hash integer not null, username text, phone text, name text, date integer)")
+                    dst_cur.executemany("INSERT OR REPLACE INTO entities VALUES (?, ?, ?, ?, ?, ?)", entities)
+                except Exception as e:
+                    logger.warning(f"Failed to copy entities: {e}")
+                
+                dst_conn.commit()
+                src_conn.close()
+                dst_conn.close()
+                saved_successfully = True
+            except Exception as e:
+                logger.error(f"Sqlite injection failed: {e}")
+
+        if not saved_successfully:
+            raise Exception("Could not save session file because it is locked by another process.")
         
         # Clean up temp
         try:
