@@ -5,14 +5,28 @@ import sys
 import signal
 import redis.asyncio as redis
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Application
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    ConversationHandler,
+    filters,
+    Application
+)
 from telegram.constants import ParseMode
+from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError
+import shutil
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from app.core.config import settings
 from app.core.database import db
+
+# Login flow states
+WAIT_PHONE, WAIT_CODE, WAIT_PASSWORD = range(3)
 
 # Configure Logging
 logging.basicConfig(
@@ -214,6 +228,212 @@ async def _send_alert(bot, msg):
     except Exception as e:
         logger.error(f"Failed to send watchdog alert: {e}")
 
+# ==========================================
+# LOGIN CONVERSATION HANDLER
+# ==========================================
+
+async def schedule_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay: int = 30):
+    """Deletes a message after a delay."""
+    async def delete_task():
+        await asyncio.sleep(delay)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            logger.error(f"Failed to delete sensitive message {message_id}: {e}")
+    
+    asyncio.create_task(delete_task())
+
+async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the login flow."""
+    if not is_admin(update):
+        return ConversationHandler.END
+
+    msg = (
+        "👋 Login Bot\n\n"
+        "Please send your phone number with country code.\n"
+        "Accepted formats: +1234567890, +1 234 567 890, +1-234-567-890\n\n"
+        "Reply /cancel at any time to abort."
+    )
+    sent_msg = await update.message.reply_text(msg)
+    
+    # Schedule deletion of user's command if possible
+    await schedule_deletion(context, update.effective_chat.id, update.message.message_id)
+    
+    context.user_data['bot_messages'] = [sent_msg.message_id]
+    
+    return WAIT_PHONE
+
+async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    phone = update.message.text.strip()
+    chat_id = update.effective_chat.id
+    
+    # Delete the user's message containing the phone number
+    await schedule_deletion(context, chat_id, update.message.message_id)
+
+    # Initialize a temporary client
+    import tempfile
+    temp_dir = tempfile.gettempdir()
+    session_name = phone.replace("+", "").replace(" ", "").replace("-", "")
+    temp_session_path = os.path.join(temp_dir, f"temp_login_{session_name}")
+    
+    # Clean up old temp file if exists
+    if os.path.exists(temp_session_path + ".session"):
+        try:
+            os.remove(temp_session_path + ".session")
+        except:
+            pass
+
+    try:
+        client = TelegramClient(temp_session_path, settings.TELEGRAM_API_ID, settings.TELEGRAM_API_HASH)
+        await client.connect()
+        
+        sent_code = await client.send_code_request(phone)
+        
+        context.user_data['client'] = client
+        context.user_data['phone'] = phone
+        context.user_data['phone_code_hash'] = sent_code.phone_code_hash
+        context.user_data['temp_session_path'] = temp_session_path
+
+        msg = (
+            "✅ Code requested!\n\n"
+            "Please check your Telegram app for the login code.\n"
+            "⚠️ Telegram does not allow forwarding the code to bots. Please send the code with spaces in between numbers, or dashes, or commas.\n"
+            "Example: 1 2 3 4 5 instead of 12345"
+        )
+        sent_msg = await update.message.reply_text(msg)
+        context.user_data['bot_messages'].append(sent_msg.message_id)
+        
+        return WAIT_CODE
+
+    except Exception as e:
+        logger.error(f"Error requesting code: {e}")
+        await update.message.reply_text(f"❌ Error requesting code: {str(e)}\nPlease try again with /starthunter")
+        if 'client' in context.user_data:
+            await context.user_data['client'].disconnect()
+        return ConversationHandler.END
+
+async def handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw_code = update.message.text
+    chat_id = update.effective_chat.id
+    
+    # Always schedule deletion of the code
+    await schedule_deletion(context, chat_id, update.message.message_id)
+
+    # Sanitize code
+    code = raw_code.replace(" ", "").replace("-", "").replace(",", "").strip()
+    
+    client = context.user_data.get('client')
+    phone = context.user_data.get('phone')
+    phone_code_hash = context.user_data.get('phone_code_hash')
+
+    if not client or not client.is_connected():
+        await update.message.reply_text("❌ Session expired. Please start over with /starthunter")
+        return ConversationHandler.END
+
+    try:
+        await client.sign_in(phone, code=code, phone_code_hash=phone_code_hash)
+        # Login success!
+        return await finalize_login(update, context)
+
+    except SessionPasswordNeededError:
+        msg = "🔐 Two-Step Verification is enabled.\nPlease enter your password:"
+        sent_msg = await update.message.reply_text(msg)
+        context.user_data['bot_messages'].append(sent_msg.message_id)
+        return WAIT_PASSWORD
+    except Exception as e:
+        logger.error(f"Error signing in: {e}")
+        await update.message.reply_text(f"❌ Login failed: {str(e)}\nPlease try again with /starthunter")
+        await client.disconnect()
+        return ConversationHandler.END
+
+async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    password = update.message.text
+    chat_id = update.effective_chat.id
+    
+    # Always schedule deletion of password
+    await schedule_deletion(context, chat_id, update.message.message_id)
+
+    client = context.user_data.get('client')
+    
+    if not client or not client.is_connected():
+        await update.message.reply_text("❌ Session expired. Please start over with /starthunter")
+        return ConversationHandler.END
+
+    try:
+        await client.sign_in(password=password)
+        return await finalize_login(update, context)
+    except Exception as e:
+        logger.error(f"Error with 2FA password: {e}")
+        await update.message.reply_text(f"❌ Incorrect password or error: {str(e)}\nPlease try again with /starthunter")
+        await client.disconnect()
+        return ConversationHandler.END
+
+async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Finishes the login process, saves the session, and cleans up."""
+    client = context.user_data.get('client')
+    temp_session_path = context.user_data.get('temp_session_path')
+    chat_id = update.effective_chat.id
+    
+    try:
+        me = await client.get_me()
+        
+        # Determine filename
+        filename = me.username if me.username else me.phone
+        # Ensure it doesn't start with + (though me.phone usually doesn't, but just in case)
+        filename = filename.lstrip('+')
+        
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        final_path = os.path.join(base_dir, filename + ".session")
+        
+        # Delete bot messages we sent during the flow
+        for msg_id in context.user_data.get('bot_messages', []):
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except:
+                pass
+
+        # Use the USER account to clear history with the bot itself (last 24 hours)
+        try:
+            bot_entity = await client.get_entity(context.bot.username)
+            await client.delete_dialog(bot_entity)
+            logger.info(f"Deleted dialog with bot {context.bot.username} for logged in user {filename}")
+        except Exception as e:
+            logger.error(f"Failed to delete history with bot: {e}")
+        
+        await client.disconnect()
+
+        # Copy to final destination
+        if os.path.exists(final_path):
+            os.remove(final_path)
+        shutil.copy2(temp_session_path + ".session", final_path)
+        
+        # Clean up temp
+        try:
+            os.remove(temp_session_path + ".session")
+        except:
+            pass
+
+        success_msg = f"✅ Successfully logged in as {me.first_name} (@{me.username or 'No Username'}).\nSession saved to {filename}.session"
+        sent_msg = await update.message.reply_text(success_msg)
+        await schedule_deletion(context, chat_id, sent_msg.message_id, delay=30)
+        
+        return ConversationHandler.END
+
+    except Exception as e:
+        logger.error(f"Error finalizing login: {e}")
+        await update.message.reply_text(f"❌ Error finalizing login: {str(e)}")
+        await client.disconnect()
+        return ConversationHandler.END
+
+async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels and ends the conversation."""
+    client = context.user_data.get('client')
+    if client:
+        await client.disconnect()
+    
+    await update.message.reply_text('Login process cancelled.')
+    return ConversationHandler.END
+
 async def post_init(application: Application):
     """
     Post-initialization hook.
@@ -245,6 +465,18 @@ async def main():
     application.add_handler(CommandHandler("restart", restart))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("commands", help_command))
+
+    # Add Login Conversation Handler
+    login_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('starthunter', starthunter)],
+        states={
+            WAIT_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone)],
+            WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code)],
+            WAIT_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_login)],
+    )
+    application.add_handler(login_conv_handler)
 
     # Handle signals for graceful shutdown (Unix only, Windows ignored)
     if os.name != 'nt':
