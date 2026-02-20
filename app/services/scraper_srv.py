@@ -311,68 +311,81 @@ class ScraperService:
                 from app.services.user_agent_srv import user_agent
                 return await user_agent.get_history(chat_id, limit)
 
+            # Pre-check via Bot API to Prevent ApiBotRestrictedError / bans proactively
+            async with httpx.AsyncClient(timeout=5.0) as http_client:
+                check_res = await http_client.get(f"https://api.telegram.org/bot{bot_token}/getChat", params={"chat_id": chat_id})
+                if check_res.status_code in [400, 401, 403]:
+                    logger.warning(f"    🛡️ [Scraper] Bot API reports no access (HTTP {check_res.status_code}). Falling back to UserAgent...")
+                    redis_srv.set_cooldown(f"bot_restricted:{chat_id}", 21600)
+                    from app.services.user_agent_srv import user_agent
+                    return await user_agent.get_history(chat_id, limit)
+
             logger.info(f"📖 [Scraper] Fetching history via Telethon (Limit: {limit})...")
             
             # ATTEMPT 1: Resolve Entity explicitly
             entity = None
             try:
-                entity = await client.get_entity(chat_id)
-            except ValueError:
+                entity = await asyncio.wait_for(client.get_entity(chat_id), timeout=10.0)
+            except (ValueError, asyncio.TimeoutError):
                 logger.warning("    ⚠️ [Scraper] Entity not found directly. Refreshing dialogs...")
-                await client.get_dialogs(limit=100) # Populate cache
                 try:
-                    entity = await client.get_entity(chat_id)
-                except:
-                    logger.error("    ❌ [Scraper] Could not resolve entity even after dialog refresh.")
+                    await asyncio.wait_for(client.get_dialogs(limit=100), timeout=15.0) # Populate cache
+                    entity = await asyncio.wait_for(client.get_entity(chat_id), timeout=10.0)
+                except Exception as e:
+                    logger.error(f"    ❌ [Scraper] Could not resolve entity even after dialog refresh: {e}")
             
             target = entity if entity else chat_id
             
-            async for message in client.iter_messages(target, limit=limit):
-                if not isinstance(message, Message): continue
+            async def _fetch():
+                local_msgs = []
+                async for message in client.iter_messages(target, limit=limit):
+                    if not isinstance(message, Message): continue
+                    
+                    content = message.text or ""
+                    media_type = "text"
+                    file_meta = {}
+
+                    if message.media:
+                        if isinstance(message.media, MessageMediaPhoto):
+                            media_type = "photo"
+                            file_meta = {"wc": "photo", "id": getattr(message.media.photo, 'id', 0)}
+                        elif isinstance(message.media, MessageMediaDocument):
+                            media_type = "document"
+                            file_meta = {"mime": message.media.document.mime_type}
+                        else:
+                            media_type = "other"
+
+                    sender_name = "Unknown"
+                    if message.sender:
+                        if hasattr(message.sender, 'username') and message.sender.username:
+                            sender_name = message.sender.username
+                        elif hasattr(message.sender, 'first_name'):
+                            sender_name = message.sender.first_name
+
+                    local_msgs.append({
+                        "telegram_msg_id": message.id,
+                        "sender_name": sender_name,
+                        "content": content,
+                        "media_type": media_type,
+                        "file_meta": file_meta,
+                        "chat_id": chat_id # Ensure we track where it came from
+                    })
+                return local_msgs
                 
-                content = message.text or ""
-                media_type = "text"
-                file_meta = {}
-
-                if message.media:
-                    if isinstance(message.media, MessageMediaPhoto):
-                        media_type = "photo"
-                        file_meta = {"wc": "photo", "id": getattr(message.media.photo, 'id', 0)}
-                    elif isinstance(message.media, MessageMediaDocument):
-                        media_type = "document"
-                        file_meta = {"mime": message.media.document.mime_type}
-                    else:
-                        media_type = "other"
-
-                sender_name = "Unknown"
-                if message.sender:
-                    if hasattr(message.sender, 'username') and message.sender.username:
-                        sender_name = message.sender.username
-                    elif hasattr(message.sender, 'first_name'):
-                        sender_name = message.sender.first_name
-
-                msgs.append({
-                    "telegram_msg_id": message.id,
-                    "sender_name": sender_name,
-                    "content": content,
-                    "media_type": media_type,
-                    "file_meta": file_meta,
-                    "chat_id": chat_id # Ensure we track where it came from
-                })
+            msgs = await asyncio.wait_for(_fetch(), timeout=90.0)
+            
+        except asyncio.TimeoutError:
+             logger.error("    ⏰ [Scraper] Telethon history fetch timed out (asyncio.TimeoutError).")
         except Exception as e:
              err_str = str(e)
              if "API access for bot users is restricted" in err_str or "ChatAdminRequired" in err_str:
                  logger.warning(f"    🛡️ [Scraper] Bot Restricted ({err_str}). Falling back to UserAgent...")
-                 
-                 # Cache this restriction for 6 hours (21600s)
-                 # This prevents the "WARNING" log on every subsequent scrape
                  try:
                      redis_srv.set_cooldown(f"bot_restricted:{chat_id}", 21600)
                  except: pass # Non-critical if Redis fails
                  
                  from app.services.user_agent_srv import user_agent
                  return await user_agent.get_history(chat_id, limit)
-                 # return [{"telegram_msg_id": 999, "content": "HARDCODED"}]
              
              logger.error(f"❌ [Scraper] Telethon history error: {e}")
         return msgs

