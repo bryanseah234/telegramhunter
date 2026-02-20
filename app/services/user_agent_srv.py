@@ -104,7 +104,10 @@ class UserAgentService:
                     return True
                 
                 # Disconnect old
+                session_filename = getattr(self.client.session, 'filename', None)
                 await self.client.disconnect()
+                if session_filename:
+                    self._cleanup_temp_session(session_filename)
 
             # 4. Initialize & Connect
             # Copy to tmp (Bypass Read-Only)
@@ -129,6 +132,7 @@ class UserAgentService:
                 if not await self.client.is_user_authorized():
                     logger.warning(f"    ⚠️ [UserAgent] Session '{session_name}' invalid/expired. Skipping.")
                     await self.client.disconnect()
+                    self._cleanup_temp_session(f"{TEMP_SESSION_PATH}.session")
                     continue
                     
                 self.current_session_name = session_name
@@ -137,6 +141,7 @@ class UserAgentService:
 
             except Exception as e:
                 logger.warning(f"    ⚠️ [UserAgent] Failed to connect '{session_name}': {e}")
+                self._cleanup_temp_session(f"{TEMP_SESSION_PATH}.session")
                 continue
         
         logger.error("    ❌ [UserAgent] All sessions failed or on cooldown.")
@@ -145,7 +150,20 @@ class UserAgentService:
     async def stop(self):
         async with self.lock:
             if self.client:
+                session_filename = getattr(self.client.session, 'filename', None)
                 await self.client.disconnect()
+                if session_filename:
+                    self._cleanup_temp_session(session_filename)
+
+    def _cleanup_temp_session(self, filename: str):
+        """Removes the temporary session files from /tmp/"""
+        if not filename or not filename.startswith("/tmp/"): return
+        try:
+            if os.path.exists(filename): os.remove(filename)
+            if os.path.exists(filename + "-wal"): os.remove(filename + "-wal")
+            if os.path.exists(filename + "-shm"): os.remove(filename + "-shm")
+        except OSError as e:
+            logger.warning(f"    ⚠️ [UserAgent] Failed to cleanup {filename}: {e}")
 
     async def invite_bot_to_group(self, bot_username: str, group_id: int | str) -> bool:
         """
