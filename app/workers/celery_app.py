@@ -117,6 +117,34 @@ app.conf.update(
             # Fofa offset by +1 hour from base interval to stagger
             "schedule": crontab(minute=0, hour=f"1-23/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"), 
         },
+        "scan-gitlab-6hours": {
+            "task": "scanner.scan_gitlab",
+            "schedule": crontab(minute=10, hour="*/6"), 
+        },
+        "scan-grepapp-6hours": {
+            "task": "scanner.scan_grepapp",
+            "schedule": crontab(minute=25, hour="*/6"), 
+        },
+        "scan-gist-6hours": {
+            "task": "scanner.scan_gist",
+            "schedule": crontab(minute=45, hour="*/6"), 
+        },
+        "scan-publicwww-6hours": {
+            "task": "scanner.scan_publicwww",
+            "schedule": crontab(minute=5, hour="1-23/6"), 
+        },
+        "scan-pastebin-12hours": {
+            "task": "scanner.scan_pastebin",
+            "schedule": crontab(minute=15, hour="*/12"), 
+        },
+        "scan-serper-12hours": {
+            "task": "scanner.scan_serper",
+            "schedule": crontab(minute=35, hour="*/12"), 
+        },
+        "scan-bitbucket-24hours": {
+            "task": "scanner.scan_bitbucket",
+            "schedule": crontab(minute=55, hour="*"), # Runs rarely/once a day effectively if customized
+        },
         # ============================================
         # SYSTEM AUDIT, SELF-HEAL & FAILSAFES
         # ============================================

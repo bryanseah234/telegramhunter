@@ -4,6 +4,8 @@ import asyncio # Ensure asyncio is imported
 import random
 from app.core.config import settings
 from app.services.scanners import ShodanService, GithubService, UrlScanService, FofaService
+from app.services.scanners import GitlabService, BitbucketService, GithubGistService, GrepAppService, PublicWwwService, PastebinService, SerperService
+
 from app.core.security import security
 from app.core.database import db
 import hashlib
@@ -18,6 +20,15 @@ shodan = ShodanService()
 github = GithubService()
 urlscan = UrlScanService()
 fofa = FofaService()
+
+gitlab_srv = GitlabService()
+bitbucket_srv = BitbucketService()
+gist_srv = GithubGistService()
+grepapp_srv = GrepAppService()
+publicwww_srv = PublicWwwService()
+pastebin_srv = PastebinService()
+serper_srv = SerperService()
+
 
 def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -460,3 +471,248 @@ async def _scan_fofa_async(task_self, query: str = None, country_code: str = Non
     
     logger.info(f"🏁 [FOFA] Finished | Total Saved: {total_saved} | Errors: {len(errors)}")
     return result_msg
+
+@app.task(name="scanner.scan_gitlab")
+def scan_gitlab(query: str = None):
+    return _run_sync(_scan_gitlab_async(query))
+
+async def _scan_gitlab_async(query: str = None):
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [GitLab] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
+    logger.info("🔍 [GitLab] Starting scan...")
+    await _send_log_async("🔍 [GitLab] Starting scheduled scan...")
+    
+    total_saved = 0
+    errors = []
+    
+    try:
+        results = await gitlab_srv.search()
+        logger.info(f"    ✅ [GitLab] Returned {len(results)} matches.")
+        saved = await _save_credentials_async(results, "gitlab")
+        total_saved += saved
+    except Exception as e:
+        logger.error(f"    ❌ [GitLab] Scan failed: {str(e)}")
+        errors.append(str(e))
+        
+    result_msg = f"GitLab scan finished. Saved {total_saved} new credentials."
+    if errors:
+         result_msg += f" (Errors: {len(errors)})"
+         await _send_log_async(f"❌ [GitLab] Completed with errors: {errors[0]}...")
+    else:
+         await _send_log_async(f"🏁 [GitLab] Finished. Saved {total_saved} new credentials.")
+         
+    return result_msg
+
+@app.task(name="scanner.scan_bitbucket")
+def scan_bitbucket(query: str = None):
+    return _run_sync(_scan_bitbucket_async(query))
+
+async def _scan_bitbucket_async(query: str = None):
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [Bitbucket] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
+    logger.info("🔍 [Bitbucket] Starting scan...")
+    await _send_log_async("🔍 [Bitbucket] Starting scheduled scan...")
+    
+    total_saved = 0
+    errors = []
+    
+    try:
+        results = await bitbucket_srv.search()
+        logger.info(f"    ✅ [Bitbucket] Returned {len(results)} matches.")
+        saved = await _save_credentials_async(results, "bitbucket")
+        total_saved += saved
+    except Exception as e:
+        logger.error(f"    ❌ [Bitbucket] Scan failed: {str(e)}")
+        errors.append(str(e))
+        
+    result_msg = f"Bitbucket scan finished. Saved {total_saved} new credentials."
+    if errors:
+         result_msg += f" (Errors: {len(errors)})"
+         await _send_log_async(f"❌ [Bitbucket] Completed with errors: {errors[0]}...")
+    else:
+         await _send_log_async(f"🏁 [Bitbucket] Finished. Saved {total_saved} new credentials.")
+         
+    return result_msg
+
+@app.task(name="scanner.scan_gist")
+def scan_gist(query: str = None):
+    return _run_sync(_scan_gist_async(query))
+
+async def _scan_gist_async(query: str = None):
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [Gist] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
+    logger.info("🔍 [Gist] Starting scan...")
+    await _send_log_async("🔍 [Gist] Starting scheduled scan...")
+    
+    total_saved = 0
+    errors = []
+    
+    try:
+        results = await gist_srv.search()
+        logger.info(f"    ✅ [Gist] Returned {len(results)} matches.")
+        saved = await _save_credentials_async(results, "gist")
+        total_saved += saved
+    except Exception as e:
+        logger.error(f"    ❌ [Gist] Scan failed: {str(e)}")
+        errors.append(str(e))
+        
+    result_msg = f"Gist scan finished. Saved {total_saved} new credentials."
+    if errors:
+         result_msg += f" (Errors: {len(errors)})"
+         await _send_log_async(f"❌ [Gist] Completed with errors: {errors[0]}...")
+    else:
+         await _send_log_async(f"🏁 [Gist] Finished. Saved {total_saved} new credentials.")
+         
+    return result_msg
+
+@app.task(name="scanner.scan_grepapp")
+def scan_grepapp(query: str = None):
+    return _run_sync(_scan_grepapp_async(query))
+
+async def _scan_grepapp_async(query: str = None):
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [GrepApp] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
+    logger.info("🔍 [GrepApp] Starting scan...")
+    await _send_log_async("🔍 [GrepApp] Starting scheduled scan...")
+    
+    total_saved = 0
+    errors = []
+    
+    try:
+        results = await grepapp_srv.search()
+        logger.info(f"    ✅ [GrepApp] Returned {len(results)} matches.")
+        saved = await _save_credentials_async(results, "grepapp")
+        total_saved += saved
+    except Exception as e:
+        logger.error(f"    ❌ [GrepApp] Scan failed: {str(e)}")
+        errors.append(str(e))
+        
+    result_msg = f"GrepApp scan finished. Saved {total_saved} new credentials."
+    if errors:
+         result_msg += f" (Errors: {len(errors)})"
+         await _send_log_async(f"❌ [GrepApp] Completed with errors: {errors[0]}...")
+    else:
+         await _send_log_async(f"🏁 [GrepApp] Finished. Saved {total_saved} new credentials.")
+         
+    return result_msg
+
+@app.task(name="scanner.scan_publicwww")
+def scan_publicwww(query: str = None):
+    return _run_sync(_scan_publicwww_async(query))
+
+async def _scan_publicwww_async(query: str = None):
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [PublicWWW] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
+    logger.info("🔍 [PublicWWW] Starting scan...")
+    await _send_log_async("🔍 [PublicWWW] Starting scheduled scan...")
+    
+    total_saved = 0
+    errors = []
+    
+    try:
+        results = await publicwww_srv.search()
+        logger.info(f"    ✅ [PublicWWW] Returned {len(results)} matches.")
+        saved = await _save_credentials_async(results, "publicwww")
+        total_saved += saved
+    except Exception as e:
+        logger.error(f"    ❌ [PublicWWW] Scan failed: {str(e)}")
+        errors.append(str(e))
+        
+    result_msg = f"PublicWWW scan finished. Saved {total_saved} new credentials."
+    if errors:
+         result_msg += f" (Errors: {len(errors)})"
+         await _send_log_async(f"❌ [PublicWWW] Completed with errors: {errors[0]}...")
+    else:
+         await _send_log_async(f"🏁 [PublicWWW] Finished. Saved {total_saved} new credentials.")
+         
+    return result_msg
+
+@app.task(name="scanner.scan_pastebin")
+def scan_pastebin(query: str = None):
+    return _run_sync(_scan_pastebin_async(query))
+
+async def _scan_pastebin_async(query: str = None):
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        logger.warning("⏸️ [Pastebin] System is PAUSED. Skipping scan.")
+        return "System Paused"
+
+    logger.info("🔍 [Pastebin] Starting scan...")
+    await _send_log_async("🔍 [Pastebin] Starting scheduled scan...")
+    
+    total_saved = 0
+    errors = []
+    
+    try:
+        results = await pastebin_srv.search()
+        logger.info(f"    ✅ [Pastebin] Returned {len(results)} matches.")
+        saved = await _save_credentials_async(results, "pastebin")
+        total_saved += saved
+    except Exception as e:
+        logger.error(f"    ❌ [Pastebin] Scan failed: {str(e)}")
+        errors.append(str(e))
+        
+    result_msg = f"Pastebin scan finished. Saved {total_saved} new credentials."
+    if errors:
+         result_msg += f" (Errors: {len(errors)})"
+         await _send_log_async(f"❌ [Pastebin] Completed with errors: {errors[0]}...")
+    else:
+         await _send_log_async(f"🏁 [Pastebin] Finished. Saved {total_saved} new credentials.")
+         
+    return result_msg
+
+@app.task(name="scanner.scan_serper")
+def scan_serper(query: str = None):
+    return _run_sync(_scan_serper_async(query))
+
+async def _scan_serper_async(query: str = None):
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+         return "System Paused"
+
+    # Default clones to sweep
+    dorks = [
+        'site:pastebin.com "api.telegram.org/bot"',
+        'site:hastebin.com "api.telegram.org/bot"',
+        'site:ghostbin.com "api.telegram.org/bot"',
+        'site:rentry.co "api.telegram.org/bot"',
+    ]
+    if query:
+        dorks = [query]
+
+    logger.info(f"🔍 [Serper] Starting scan with {len(dorks)} dorks...")
+    await _send_log_async(f"🔍 [Serper] Starting sweep across {len(dorks)} paste sites via Serper.dev...")
+    
+    total_saved = 0
+    for dork in dorks:
+        try:
+            results = await serper_srv.search(dork)
+            saved = await _save_credentials_async(results, "serper_dev")
+            total_saved += saved
+        except Exception as e:
+            logger.error(f"    ❌ [Serper] Failed on {dork}: {e}")
+            
+    await _send_log_async(f"🏁 [Serper] Finished. Saved {total_saved} new credentials.")
+    return f"Serper scan finished. Saved {total_saved}."

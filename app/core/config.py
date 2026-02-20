@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     FOFA_KEY: Optional[str] = None
     URLSCAN_KEY: Optional[str] = None
     GITHUB_TOKEN: Optional[str] = None
+    GITLAB_TOKEN: Optional[str] = None
+    BITBUCKET_USER: Optional[str] = None
+    BITBUCKET_APP_PASSWORD: Optional[str] = None
+    PUBLICWWW_KEY: Optional[str] = None
+    SERPER_API_KEY: Optional[str] = None
     CENSYS_ID: Optional[str] = None
     CENSYS_SECRET: Optional[str] = None
     HYBRID_ANALYSIS_KEY: Optional[str] = None
