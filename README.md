@@ -114,6 +114,34 @@ docker-compose logs -f
 docker-compose down
 ```
 
+## 🔑 Free OSINT API Key Setup Guide
+
+You can significantly increase your hit rate by adding free API keys from various intelligence search engines to your `.env` file. These engines crawl the web differently from GitHub and often catch tokens missed by others.
+
+**1. Serper.dev (Replaces Google Search)**
+*Highly recommended for automated web search and paste site dorking.*
+
+- Go to [Serper.dev](https://serper.dev/) and sign up for a free account.
+- You get **2,500 free queries** on signup.
+- Copy your API Key from the dashboard and add it to `.env` as `SERPER_API_KEY`.
+- *(Our scanner uses this to automatically sweep Pastebin, Hastebin, and other paste clones every 12 hours).*
+
+**2. GitLab Search API**
+*Finds tokens leaked in raw GitLab repo blobs.*
+
+- Log into GitLab and go to **Edit profile > Access Tokens** (`https://gitlab.com/-/profile/personal_access_tokens`).
+- Click "Add New Token".
+- Tick the `read_api` box and click Create. Copy the token (`GITLAB_TOKEN`).
+
+**3. PublicWWW**
+*Source code search engine that finds tokens embedded in raw HTML/JS.*
+
+- Go to [PublicWWW Registration](https://publicwww.com/register.html).
+- Sign up for a free account.
+- Your API key will be right on your Dashboard (`PUBLICWWW_KEY`).
+
+**Note:** The `grep.app` scanner requires **no API keys** and runs completely free out of the box!
+
 ## 🔄 Auto-Update System
 
 Telegram Hunter includes an **automatic update system** that checks for new releases and updates your deployment automatically. Once configured, it's fully self-healing!

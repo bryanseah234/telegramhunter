@@ -77,12 +77,14 @@ class UserAgentService:
         
         attempts = len(self.sessions)
         for _ in range(attempts):
-            # 1. Round Robin Selection
-            session_path = self.sessions[self.current_index]
+            # 1. Round Robin Selection (Global Redis Counter)
+            global_idx = redis_srv.get_next_rotation_index("user_agent", attempts)
+            
+            session_path = self.sessions[global_idx]
             session_name = os.path.splitext(os.path.basename(session_path))[0]
             
-            # Increment for next time (even if this one fails, we rotate)
-            self.current_index = (self.current_index + 1) % len(self.sessions)
+            # Update local reference
+            self.current_index = global_idx
             
             # 2. Check Cooldown for THIS session
             cooldown_key = f"user_agent:{session_name}"

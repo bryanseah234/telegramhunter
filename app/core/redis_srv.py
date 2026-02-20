@@ -29,4 +29,10 @@ class RedisService:
         ttl = self.client.ttl(f"cooldown:{key}")
         return max(0, ttl)
 
+    def get_next_rotation_index(self, key: str, max_val: int) -> int:
+        """Atomically increments and returns the next index modulo max_val."""
+        if max_val <= 0: return 0
+        idx = self.client.incr(f"rotation_index:{key}")
+        return idx % max_val
+
 redis_srv = RedisService()
