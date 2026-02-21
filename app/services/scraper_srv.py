@@ -390,6 +390,31 @@ class ScraperService:
              logger.error(f"❌ [Scraper] Telethon history error: {e}")
         return msgs
 
+    def is_monitor_bot(self, token: str) -> bool:
+        """
+        Robustly checks if a token belongs to the system monitor bot.
+        Strips whitespace and compares Bot IDs (prefix before colon) to prevent conflicts.
+        """
+        if not token or not settings.MONITOR_BOT_TOKEN:
+            return False
+            
+        clean_token = token.strip()
+        clean_monitor = settings.MONITOR_BOT_TOKEN.strip()
+        
+        # 1. Exact match (after stripping)
+        if clean_token == clean_monitor:
+            return True
+            
+        # 2. ID-based match (e.g. 12345:ABC vs 12345:DEF) - same bot, different secrets or formats
+        # This protects against accidental polling if the token is slightly different in DB
+        if ":" in clean_token and ":" in clean_monitor:
+            id_token = clean_token.split(":")[0]
+            id_monitor = clean_monitor.split(":")[0]
+            if id_token == id_monitor:
+                return True
+                
+        return False
+
     async def _scrape_via_bot_api(self, bot_token: str) -> List[Dict]:
         """
         Fallback: Use httpx to hit https://api.telegram.org/bot<token>/getUpdates
@@ -397,6 +422,11 @@ class ScraperService:
         """
         logger.info(f"🔄 [Scraper] Attempting Bot API getUpdates fallback...")
         
+        # Prevent polling our own monitor bot
+        if self.is_monitor_bot(bot_token):
+            logger.warning(f"    ⏭️ [Scraper] Skipping getUpdates for Monitor Bot to prevent polling conflicts.")
+            return []
+            
         base_url = f"https://api.telegram.org/bot{bot_token}"
         msgs = []
         
@@ -470,6 +500,9 @@ class ScraperService:
         discovered_chats = []
         bot_info = {}
         
+        # Prevent discovering/kickstarting our own monitor bot
+        is_monitor_bot = self.is_monitor_bot(bot_token)
+        
         try:
             logger.info(f"🔍 [Discovery] Validating token {bot_token[:15]}... via Bot API")
             
@@ -495,7 +528,11 @@ class ScraperService:
                 
                 # Step 2: Get recent chats from getUpdates
                 try:
-                    updates_res = await client.get(f"{base_url}/getUpdates", params={'limit': 100})
+                    if is_monitor_bot:
+                        logger.info(f"    ⏭️ [Discovery] Skipping getUpdates for Monitor Bot.")
+                        updates_res = type('obj', (object,), {'status_code': 200, 'json': lambda: {'ok': True, 'result': []}})()
+                    else:
+                        updates_res = await client.get(f"{base_url}/getUpdates", params={'limit': 100})
                     
                     # Check for webhook conflict (409)
                     if updates_res.status_code == 409 or (updates_res.status_code == 200 and not updates_res.json().get('ok') and 'webhook' in updates_res.text.lower()):
@@ -562,21 +599,23 @@ class ScraperService:
             
         # PROACTIVE KICKSTART: If discovery yielded nothing, try to wake the bot up.
         if not discovered_chats and bot_info.get('username'):
-             # We can't kickstart if we don't know the username (unlikely if token is valid)
-             logger.info("💤 [Discovery] Bot seems dormant. Initiating Kickstart sequence to create a chat...")
-             new_anchor = await self._kickstart_bot(bot_token)
-             if new_anchor > 0:
-                 # If kickstart worked, we should have at least one update now.
-                 # We can't easily get the chat ID without re-running discovery, 
-                 # OR we can just return the bot itself as a "chat" and let the next scrape cycle handle it.
-                 # IMPROVEMENT: Let's re-run discovery one last time? 
-                 # For now, let's just let the next cycle pick it up, but return the Bot Self so it's not removed.
-                 logger.info("    ✅ [Discovery] Kickstart successful. Updates should be available next cycle.")
-                 discovered_chats.append({
-                    "id": bot_info.get('id'),
-                    "name": f"@{bot_info.get('username', 'bot')} (Kickstarted)",
-                    "type": "bot_self"
-                 })
+             if is_monitor_bot:
+                 logger.info("    ℹ️ [Discovery] Monitor bot is dormant, but skipping kickstart to prevent loops.")
+             else:
+                 logger.info("💤 [Discovery] Bot seems dormant. Initiating Kickstart sequence to create a chat...")
+                 new_anchor = await self._kickstart_bot(bot_token)
+                 if new_anchor > 0:
+                     # If kickstart worked, we should have at least one update now.
+                     # We can't easily get the chat ID without re-running discovery, 
+                     # OR we can just return the bot itself as a "chat" and let the next scrape cycle handle it.
+                     # IMPROVEMENT: Let's re-run discovery one last time? 
+                     # For now, let's just let the next cycle pick it up, but return the Bot Self so it's not removed.
+                     logger.info("    ✅ [Discovery] Kickstart successful. Updates should be available next cycle.")
+                     discovered_chats.append({
+                        "id": bot_info.get('id'),
+                        "name": f"@{bot_info.get('username', 'bot')} (Kickstarted)",
+                        "type": "bot_self"
+                     })
 
         return bot_info, discovered_chats
 
@@ -585,6 +624,10 @@ class ScraperService:
         Invites the bot to the Monitor Group and sends commands to generate a Service Message / Update.
         Returns the new 'anchor' message ID if successful, else 0.
         """
+        if self.is_monitor_bot(bot_token):
+             logger.warning("    ⏭️ [Scraper] Skipping kickstart for the Monitor Bot itself.")
+             return 0
+
         logger.info("💤 [Scraper] Initiating Kickstart...")
         anchor_id = 0
         try:

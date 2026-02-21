@@ -29,17 +29,19 @@ class UserAgentService:
         self.sessions = [] # List of session paths
         self.current_index = 0
         self.current_session_name = "unknown"
+        self._refresher_task = None
 
     def _discover_sessions(self):
         """Scans BASE_DIR for valid .session files."""
-        self.sessions = []
+        new_sessions = []
         
         # 1. Check Env Var Override first (Single Session Mode)
         env_session = os.getenv("USER_SESSION_NAME")
         if env_session:
             path = os.path.join(BASE_DIR, f"{env_session}.session")
             if os.path.exists(path):
-                self.sessions.append(path)
+                new_sessions.append(path)
+                self.sessions = new_sessions
                 return
 
         # 2. Scan Directory
@@ -51,18 +53,30 @@ class UserAgentService:
                     if f.startswith("bot_"): continue 
                     
                     full_path = os.path.join(BASE_DIR, f)
-                    self.sessions.append(full_path)
+                    new_sessions.append(full_path)
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] Session discovery failed: {e}")
 
         # Fallback to default if nothing found (legacy support)
-        if not self.sessions:
+        if not new_sessions:
             default_path = os.path.join(BASE_DIR, "user_session.session")
             # We add it even if it doesn't exist yet, so we can warn later
-            self.sessions.append(default_path)
+            new_sessions.append(default_path)
             
-        self.sessions.sort() # Ensure deterministic order (e.g. user_1, user_2)
-        logger.info(f"    🔄 [UserAgent] Discovered {len(self.sessions)} session(s): {[os.path.basename(s) for s in self.sessions]}")
+        new_sessions.sort() # Ensure deterministic order (e.g. user_1, user_2)
+        
+        # Log only if the session list has changed
+        if new_sessions != self.sessions:
+            logger.info(f"    🔄 [UserAgent] Discovered {len(new_sessions)} session(s): {[os.path.basename(s) for s in new_sessions]}")
+            
+        # Atomic assignment is safe in Python
+        self.sessions = new_sessions
+
+    async def _session_refresher_loop(self):
+        """Background loop to periodically scan for new .session files."""
+        while True:
+            await asyncio.sleep(60)
+            self._discover_sessions()
 
     async def start(self):
         """
@@ -71,6 +85,10 @@ class UserAgentService:
         """
         if not self.sessions:
             self._discover_sessions()
+            
+        # Start background refresher if not already running
+        if self._refresher_task is None:
+            self._refresher_task = asyncio.create_task(self._session_refresher_loop())
 
         # Try up to N times (where N = number of sessions) to find a usable one
         from app.core.redis_srv import redis_srv

