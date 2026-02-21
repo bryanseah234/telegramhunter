@@ -31,12 +31,44 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  worker:
+  worker-core:
     build: .
     restart: always
     env_file: .env
-    # Aggressive: 4 concurrent workers for parallel task processing
-    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4
+    # Core worker handles fast tasks (discovery, broadcast, system)
+    command: celery -A app.workers.celery_app worker -Q celery --loglevel=info --concurrency=4
+    depends_on:
+      - redis
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - .:/app
+
+  worker-scanners:
+    build: .
+    restart: always
+    env_file: .env
+    # Dedicated worker for OSINT gathering (github, shodan, urlscan)
+    command: celery -A app.workers.celery_app worker -Q scanners --loglevel=info --concurrency=2
+    depends_on:
+      - redis
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - .:/app
+
+  worker-scrape:
+    build: .
+    restart: always
+    env_file: .env
+    # Dedicated worker for heavy chat history exfiltration
+    command: celery -A app.workers.celery_app worker -Q scrape --loglevel=info --concurrency=2
     depends_on:
       - redis
     logging:
@@ -55,7 +87,9 @@ services:
     command: celery -A app.workers.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
     depends_on:
       - redis
-      - worker
+      - worker-core
+      - worker-scanners
+      - worker-scrape
     logging:
       driver: "json-file"
       options:

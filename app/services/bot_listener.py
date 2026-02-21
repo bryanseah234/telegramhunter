@@ -486,7 +486,7 @@ async def post_init(application: Application):
 async def main():
     global redis_client
     
-    token = settings.MONITOR_BOT_TOKEN
+    token = settings.MONITOR_BOT_TOKEN.strip()
     if not token:
         logger.error("MONITOR_BOT_TOKEN not set!")
         return

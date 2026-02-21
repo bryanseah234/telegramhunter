@@ -74,6 +74,21 @@ app.conf.update(
         "app.workers.tasks.scanner_tasks",
         "app.workers.tasks.audit_tasks"
     ],
+    
+    # ============================================
+    # QUEUE SEGREGATION
+    # ============================================
+    task_routes={
+        # Slow Exfiltration -> 'scrape' queue
+        'flow.exfiltrate_chat': {'queue': 'scrape'},
+        'flow.rescrape_active': {'queue': 'scrape'},
+        
+        # Scanners -> 'scanners' queue
+        'scanner.*': {'queue': 'scanners'},
+        
+        # Everything else (discover_chats, broadcast, heal) goes to default 'celery' queue
+    },
+    
     beat_schedule={
         # ============================================
         # AGGRESSIVE BROADCAST & RESCRAPE
