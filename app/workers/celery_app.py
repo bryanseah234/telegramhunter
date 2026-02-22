@@ -171,5 +171,9 @@ app.conf.update(
             "task": "system.self_heal",
             "schedule": crontab(minute=45, hour="*/6"),
         },
+        "system-enforce-whitelist-6hours": {
+            "task": "system.enforce_whitelist",
+            "schedule": crontab(minute=0, hour="1-23/6"),  # Offset from self-heal
+        },
     }
 )
