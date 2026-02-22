@@ -141,16 +141,33 @@ class BroadcasterService:
     async def send_log(self, message: str):
         """
         Sends a log message to the General topic of the monitor group.
+        Retries with the next bot in the pool if the current one was kicked (403 Forbidden).
         """
-        try:
-            await self._retry_on_flood(
-                self.bot.send_message,
-                chat_id=settings.MONITOR_GROUP_ID,
-                message_thread_id=None, # Explicitly target General Topic
-                text=f"🤖 [System Log]\n{message}"
-            )
-        except Exception as e:
-            print(f"Failed to send log: {e}")
+        last_err = None
+        for _ in range(len(self.bot_tokens)):
+            try:
+                await self._retry_on_flood(
+                    self.bot.send_message,
+                    chat_id=settings.MONITOR_GROUP_ID,
+                    message_thread_id=None, # Explicitly target General Topic
+                    text=f"🤖 [System Log]\n{message}"
+                )
+                return  # Success — stop trying
+            except TelegramError as e:
+                err_str = str(e)
+                if "Forbidden" in err_str or "not a member" in err_str:
+                    print(f"⚠️ Bot not in monitor group, rotating to next bot... ({e})")
+                    last_err = e
+                    continue  # Try next bot in rotation
+                # Non-recoverable Telegram error
+                print(f"Failed to send log: {e}")
+                return
+            except Exception as e:
+                print(f"Failed to send log: {e}")
+                return
+        # All bots failed
+        if last_err:
+            print(f"Failed to send log (all {len(self.bot_tokens)} bots kicked from group): {last_err}")
 
     async def send_topic_header(self, group_id: int | str, thread_id: int, text: str):
         """
