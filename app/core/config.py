@@ -1,6 +1,6 @@
 import os
 from typing import Optional
-from pydantic import field_validator, ValidationError
+from pydantic import field_validator, model_validator, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -18,11 +18,11 @@ class Settings(BaseSettings):
     # Security
     ENCRYPTION_KEY: str  # Fernet Key
 
-    # Telegram Monitoring (The Bot WE control)
+    # Telegram Monitoring (The Bot(s) WE control - supports multi-bot rotation)
+    # Comma-separated bot tokens, e.g. "token1,token2,token3"
     MONITOR_BOT_TOKEN: str
     MONITOR_GROUP_ID: int | str
     WHITELISTED_BOT_IDS: str = "" # Comma-separated IDs (or usernames)
-
 
     # Telegram Client (For Scraping)
     TELEGRAM_API_ID: int
@@ -47,9 +47,34 @@ class Settings(BaseSettings):
     HYBRID_ANALYSIS_KEY: Optional[str] = None
     
     # Target Countries (High Volume Telegram Usage)
-    # RU: Russia, IR: Iran, IN: India, ID: Indonesia, BR: Brazil, UA: Ukraine
-    # VN: Vietnam, US: USA, NG: Nigeria, EG: Egypt, KB: Kazakhstan (KZ)
     TARGET_COUNTRIES: list[str] = ["RU", "IR", "IN", "ID", "BR", "UA", "VN", "US", "NG", "EG", "KZ", "CN", "DE"]
+
+    # Parsed bot tokens list (computed from MONITOR_BOT_TOKEN)
+    _bot_tokens: list[str] = []
+
+    @property
+    def bot_tokens(self) -> list[str]:
+        """Returns parsed list of bot tokens from MONITOR_BOT_TOKEN."""
+        return self._bot_tokens
+
+    @model_validator(mode='after')
+    def parse_bot_tokens(self) -> 'Settings':
+        """Parse comma-separated MONITOR_BOT_TOKEN into a validated list."""
+        raw = self.MONITOR_BOT_TOKEN
+        if isinstance(raw, str):
+            tokens = [t.strip() for t in raw.split(',') if t.strip()]
+        else:
+            tokens = [raw] if raw else []
+            
+        if not tokens:
+            raise ValueError('MONITOR_BOT_TOKEN cannot be empty')
+            
+        for token in tokens:
+            if ':' not in token or not token.split(':')[0].isdigit():
+                raise ValueError(f'Invalid bot token format: {token}')
+        
+        object.__setattr__(self, '_bot_tokens', tokens)
+        return self
 
     @field_validator('SUPABASE_URL')
     @classmethod
@@ -72,14 +97,6 @@ class Settings(BaseSettings):
         if len(v) != 44:
             raise ValueError('ENCRYPTION_KEY must be 44 characters (Fernet key)')
         return v
-    
-    @field_validator('MONITOR_BOT_TOKEN')
-    @classmethod
-    def validate_bot_token(cls, v: str) -> str:
-        # Basic Telegram bot token format: digits:alphanumeric
-        if ':' not in v or not v.split(':')[0].isdigit():
-            raise ValueError('MONITOR_BOT_TOKEN has invalid format')
-        return v
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env"),
@@ -88,3 +105,4 @@ class Settings(BaseSettings):
     )
 
 settings = Settings()
+

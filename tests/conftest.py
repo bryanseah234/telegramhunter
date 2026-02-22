@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 valid_key = Fernet.generate_key().decode()
 os.environ["ENCRYPTION_KEY"] = valid_key
 
-os.environ["MONITOR_BOT_TOKEN"] = "123:ABC"
+os.environ["MONITOR_BOT_TOKEN"] = "123:ABC,456:DEF,789:GHI"
 os.environ["MONITOR_GROUP_ID"] = "-100123"
 os.environ["TELEGRAM_API_ID"] = "12345"
 os.environ["TELEGRAM_API_HASH"] = "abc"

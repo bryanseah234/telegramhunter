@@ -7,12 +7,19 @@ from app.core.config import settings
 
 class BroadcasterService:
     def __init__(self):
-        self.bot_token = settings.MONITOR_BOT_TOKEN
-        self._bot = None # Lazy initialization
+        self.bot_tokens = settings.bot_tokens
+        self._bots = {} # token -> Bot instance
+        
+        # Simple round-robin for broadcaster
+        import itertools
+        self._token_cycle = itertools.cycle(self.bot_tokens)
 
     @property
     def bot(self):
-        if self._bot is None:
+        """Returns the next bot in the rotation pool."""
+        token = next(self._token_cycle)
+        
+        if token not in self._bots:
             # Initialize Bot and HTTPXRequest strictly ON DEMAND
             # This ensures they are created inside the current Worker process/Event Loop
             request = HTTPXRequest(
@@ -21,8 +28,9 @@ class BroadcasterService:
                 read_timeout=25.0,        
                 write_timeout=25.0,       
             )
-            self._bot = Bot(token=self.bot_token, request=request)
-        return self._bot
+            self._bots[token] = Bot(token=token, request=request)
+            
+        return self._bots[token]
 
     async def _retry_on_flood(self, func, *args, **kwargs):
         """

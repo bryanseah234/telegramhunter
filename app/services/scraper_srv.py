@@ -172,10 +172,10 @@ class ScraperService:
 
             # 2. Create Topic (using Hunter Bot) with correct naming convention
             target_thread_id = 0
-            if settings.MONITOR_BOT_TOKEN:
+            if settings.bot_tokens:
                 topic_name = f"@{bot_username} / {bot_id}"
                 logger.info(f"    [Scraper] Creating topic '{topic_name}'...")
-                target_thread_id = await self._create_forum_topic(settings.MONITOR_BOT_TOKEN, to_chat_id, topic_name)
+                target_thread_id = await self._create_forum_topic(settings.bot_tokens[0], to_chat_id, topic_name)
             
             if not target_thread_id:
                  logger.warning("    [Scraper] Could not create topic (check permissions/forum mode). Forwarding to 'General'...")
@@ -395,24 +395,25 @@ class ScraperService:
         Robustly checks if a token belongs to the system monitor bot.
         Strips whitespace and compares Bot IDs (prefix before colon) to prevent conflicts.
         """
-        if not token or not settings.MONITOR_BOT_TOKEN:
+        if not token or not settings.bot_tokens:
             return False
             
         clean_token = token.strip()
-        clean_monitor = settings.MONITOR_BOT_TOKEN.strip()
         
-        # 1. Exact match (after stripping)
-        if clean_token == clean_monitor:
-            return True
+        for monitor_token in settings.bot_tokens:
+            clean_monitor = monitor_token.strip()
             
-        # 2. ID-based match (e.g. 12345:ABC vs 12345:DEF) - same bot, different secrets or formats
-        # This protects against accidental polling if the token is slightly different in DB
-        if ":" in clean_token and ":" in clean_monitor:
-            id_token = clean_token.split(":")[0]
-            id_monitor = clean_monitor.split(":")[0]
-            if id_token == id_monitor:
+            # 1. Exact match (after stripping)
+            if clean_token == clean_monitor:
                 return True
                 
+            # 2. ID-based match
+            if ":" in clean_token and ":" in clean_monitor:
+                id_token = clean_token.split(":")[0]
+                id_monitor = clean_monitor.split(":")[0]
+                if id_token == id_monitor:
+                    return True
+                    
         return False
 
     async def _scrape_via_bot_api(self, bot_token: str) -> List[Dict]:
