@@ -45,9 +45,23 @@ class Settings(BaseSettings):
     CENSYS_ID: Optional[str] = None
     CENSYS_SECRET: Optional[str] = None
     HYBRID_ANALYSIS_KEY: Optional[str] = None
+    GOOGLE_SEARCH_KEY: Optional[str] = None
+    GOOGLE_CSE_ID: Optional[str] = None
     
-    # Target Countries (High Volume Telegram Usage)
-    TARGET_COUNTRIES: list[str] = ["RU", "IR", "IN", "ID", "BR", "UA", "VN", "US", "NG", "EG", "KZ", "CN", "DE"]
+    # Target Countries (Tiered by Telegram usage volume)
+    # Primary:   Top Telegram DAU per capita (CIS, South/Southeast Asia, MENA, LatAm)
+    # Secondary: Large tech populations with significant Telegram usage
+    # Tertiary:  Emerging Telegram markets and growing adoption regions
+    TARGET_COUNTRIES: list[str] = [
+        # Primary — Highest Telegram penetration
+        "RU", "IR", "IN", "ID", "BR", "UA", "UZ", "KZ", "BY",
+        # Secondary — High volume tech populations
+        "US", "DE", "GB", "FR", "ES", "IT", "TR", "EG", "NG",
+        "PK", "BD", "PH", "VN", "TH", "MY", "CN", "KR", "JP",
+        # Tertiary — Emerging markets
+        "AZ", "GE", "TJ", "KG", "MD", "AM", "SA", "AE", "IQ",
+        "CO", "MX", "AR", "PE", "RO", "PL", "CZ", "NL", "SE", "FI",
+    ]
 
     # Parsed bot tokens list (computed from MONITOR_BOT_TOKEN)
     _bot_tokens: list[str] = []
