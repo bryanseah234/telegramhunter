@@ -256,7 +256,7 @@ class ShodanService:
                     if ts:
                         match_time = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
                         if match_time >= three_hours_ago: recent_matches.append(m)
-                except: pass
+                except Exception: pass
             
             if len(recent_matches) > len(matches[:300]): matches = recent_matches
             else: matches = matches[:300]
@@ -347,11 +347,11 @@ class FofaService:
             full_query = query
             if country_code:
                 full_query = f'{query} && country="{country_code}"'
-                print(f"    [FOFA] Adding country filter: {country_code}")
+                logger.info(f"    [FOFA] Adding country filter: {country_code}")
 
             qbase64 = base64.b64encode(full_query.encode()).decode()
             params = {'email': self.email, 'key': self.key, 'qbase64': qbase64, 'fields': 'host,ip,port', 'size': 100}
-            print(f"    [FOFA] Searching: {full_query}")
+            logger.info(f"    [FOFA] Searching: {full_query}")
             
             async def do_fofa():
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -433,10 +433,10 @@ class UrlScanService:
             api_query = f'page.body:"{query}" OR page.url:*{query}*'
             if country_code:
                 api_query = f'({api_query}) AND page.country:"{country_code}"'
-                print(f"    [URLScan] Adding country filter: {country_code}")
+                logger.info(f"    [URLScan] Adding country filter: {country_code}")
             
             params = {'q': api_query, 'size': 500}
-            print(f"    [URLScan] Searching: {api_query[:50]}...")
+            logger.info(f"    [URLScan] Searching: {api_query[:50]}...")
             
             async def do_urlscan():
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -463,7 +463,7 @@ class UrlScanService:
                         scan_time = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
                         if scan_time >= three_hours_ago:
                             valid_items.append(r)
-                except: pass
+                except Exception: pass
             
             # Sort and Cap
             valid_items = sorted(valid_items, key=lambda x: x.get('task', {}).get('time', ''), reverse=True)
@@ -848,7 +848,7 @@ class PublicWwwService:
                     res.raise_for_status()
                     try:
                         return res.json()
-                    except:
+                    except Exception:
                         return []
             
             domains = await retry_with_backoff(do_publicwww)
@@ -915,6 +915,8 @@ class SerperService:
             
             organic = await retry_with_backoff(do_serper)
             if not organic: return []
+            
+            results = []
             
             async with httpx.AsyncClient(verify=False, timeout=10.0) as scan_client:
                 tasks = []
