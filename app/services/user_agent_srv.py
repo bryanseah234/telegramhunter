@@ -314,9 +314,11 @@ class UserAgentService:
         finally:
             pass
 
-    async def cleanup_bots(self, group_id: int | str, whitelist_ids: list[int | str]) -> int:
+    async def cleanup_bots(self, group_id: int | str, whitelist_ids: list[int | str] = None, only_non_admins: bool = True) -> int:
         """
-        Removes all bots from the group that are NOT in the whitelist.
+        Removes bots from the group.
+        - whitelist_ids: Bots to ignore.
+        - only_non_admins: If True, only kicks bots that are NOT admins.
         Returns the number of bots removed.
         """
         async with self.lock:
@@ -335,33 +337,38 @@ class UserAgentService:
             
             logger.info(f"    🧹 [UserAgent] Starting Bot Cleanup in {entity.title}...")
             
-            # Iterate participants
-            # We filter for bots only
-            from telethon.tl.functions.channels import EditBannedRequest
-            from telethon.tl.types import ChatBannedRights
-            
             # Prepare rights for kicking (view_messages=True banning kicks them)
-            # Actually, standard kick is often just banning with default rights? 
-            # Or setting ChatBannedRights(view_messages=True)
+            from telethon.tl.functions.channels import EditBannedRequest, GetParticipantRequest
+            from telethon.tl.types import ChatBannedRights, ChannelParticipantAdmin, ChannelParticipantCreator
+            
             kick_rights = ChatBannedRights(
                 until_date=None,
                 view_messages=True
             )
             
-            # Normalize whitelist: Convert to string, strip whitespace, remove leading '@'
-            whitelist_str = [str(x).strip().lstrip('@') for x in whitelist_ids]
+            # Normalize whitelist
+            whitelist_str = [str(x).strip().lstrip('@') for x in (whitelist_ids or [])]
             
             async for user in self.client.iter_participants(entity):
                 if user.bot:
-                    # Check Whitelist
+                    # 1. Check Whitelist
                     if str(user.id) in whitelist_str or user.username in whitelist_str:
-                         # print(f"    🛡️ [UserAgent] Safe: {user.username} ({user.id})")
                          continue
                          
-                    # Check if it is ME (User Agent) - unlikely as I am not a bot, but safety first
+                    # 2. Check Admin Status if requested
+                    if only_non_admins:
+                        try:
+                            participant = await self.client(GetParticipantRequest(channel=entity, participant=user))
+                            if isinstance(participant.participant, (ChannelParticipantAdmin, ChannelParticipantCreator)):
+                                # logger.info(f"    🛡️ [UserAgent] Skipping admin bot: @{user.username}")
+                                continue
+                        except Exception:
+                            pass
+
+                    # Check if it is ME (User Agent)
                     if user.is_self: continue
                     
-                    logger.info(f"    🚫 [UserAgent] Kicking unauthorized bot: @{user.username} ({user.id})")
+                    logger.info(f"    🚫 [UserAgent] Kicking bot: @{user.username} ({user.id})")
                     try:
                         await self.client(EditBannedRequest(
                             channel=entity,
@@ -369,13 +376,9 @@ class UserAgentService:
                             banned_rights=kick_rights
                         ))
                         removed_count += 1
-                        # Unban immediately so they can be re-added later if needed? 
-                        # Or just leave them banned?
-                        # Usually for "Testing", kicking is enough. 
-                        # EditBannedRequest with view_messages=True removes them.
-                        # Do we need to Unban? If we re-invite them manually later, we might need to unban.
-                        # Let's unban them right after to just "Kick" (Remove) but not "Ban" forever.
-                        # To Unban: set rights to empty/default.
+                        
+                        # Unban immediately to clear from "Removed Users" list in UI 
+                        # and allow re-inviting if needed.
                         await self.client(EditBannedRequest(
                             channel=entity,
                             participant=user,
@@ -389,6 +392,46 @@ class UserAgentService:
 
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] Cleanup failed: {e}")
+            return 0
+
+    async def clear_removed_users(self, group_id: int | str) -> int:
+        """
+        Iterates over the 'Kicked' participants list and unbans them.
+        This clears the "Removed Users" list in Telegram groups.
+        """
+        async with self.lock:
+            if not await self.start():
+                return 0
+                
+        cleared_count = 0
+        try:
+            if str(group_id).lstrip('-').isdigit():
+                target = int(group_id)
+            else:
+                target = group_id
+            entity = await self.client.get_entity(target)
+            
+            from telethon.tl.types import ChannelParticipantsKicked, ChatBannedRights
+            from telethon.tl.functions.channels import EditBannedRequest
+            
+            logger.info(f"    🧹 [UserAgent] Clearing Removed Users list in {entity.title}...")
+            
+            async for user in self.client.iter_participants(entity, filter=ChannelParticipantsKicked()):
+                try:
+                    # Setting view_messages=False effectively unbans/clears them
+                    await self.client(EditBannedRequest(
+                        channel=entity,
+                        participant=user,
+                        banned_rights=ChatBannedRights(until_date=None, view_messages=False)
+                    ))
+                    cleared_count += 1
+                except Exception as e:
+                    logger.warning(f"    ⚠️ [UserAgent] Could not clear user {user.id}: {e}")
+            
+            logger.info(f"    ✨ [UserAgent] Cleared {cleared_count} users from removed list.")
+            return cleared_count
+        except Exception as e:
+            logger.error(f"    ❌ [UserAgent] clear_removed_users failed: {e}")
             return 0
         finally:
             pass
