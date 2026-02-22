@@ -175,5 +175,9 @@ app.conf.update(
             "task": "system.enforce_whitelist",
             "schedule": crontab(minute=0, hour="1-23/6"),  # Offset from self-heal
         },
+        "cleanup-general-topic-hourly": {
+            "task": "system.cleanup_general_topic",
+            "schedule": crontab(minute=30), # Every hour at :30
+        },
     }
 )
