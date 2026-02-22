@@ -45,6 +45,14 @@ ANONYMOUS_ADMIN_ID = 1087968824
 # Global Stop Event
 stop_event = asyncio.Event()
 
+# ==========================================
+# MULTI-BOT ROTATION STATE
+# ==========================================
+# Maps bot_token -> bot_username (populated at startup via getMe)
+_bot_usernames: dict[str, str] = {}
+# Set of bot tokens currently considered "locked" (session save failed)
+_locked_bots: set[str] = set()
+
 def _get_whitelisted_usernames():
     raw = settings.WHITELISTED_BOT_IDS or ""
     return [u.strip().lower().replace("@", "") for u in raw.split(",") if u.strip()]
@@ -69,6 +77,21 @@ def is_admin(update: Update) -> bool:
             
     return False
 
+def _get_other_bot_usernames(current_bot_username: str) -> list[str]:
+    """Returns usernames of OTHER available bots (excluding current and locked ones)."""
+    other_bots = []
+    for token, username in _bot_usernames.items():
+        if username.lower() != current_bot_username.lower() and token not in _locked_bots:
+            other_bots.append(username)
+    return other_bots
+
+def _get_all_bot_usernames_except(current_bot_username: str) -> list[str]:
+    """Returns usernames of ALL other bots (even locked) for fallback messaging."""
+    return [
+        username for username in _bot_usernames.values()
+        if username.lower() != current_bot_username.lower()
+    ]
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return # Silent ignore
@@ -78,6 +101,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     
+    # Show all available bots in the help text
+    bot_list = ", ".join([f"@{u}" for u in _bot_usernames.values()])
+    
     help_text = (
         "📖 **Telegram Hunter Bot Help**\n\n"
         "Here are the available commands:\n"
@@ -85,10 +111,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /pause - Pause scanners and broadcaster\n"
         "• /resume - Resume operations\n"
         "• /restart - Restart the bot service\n"
-        "• /commands - List all commands (Alias for /help)\n\n"
+        "• /commands - List all commands (Alias for /help)\n"
+        "• /starthunter - Login a new Telegram account\n"
+        "• /bots - Show all available bots\n\n"
+        f"**Available Bots**: {bot_list}\n\n"
         "Only authorized administrators can use these commands."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows all available bots and their lock status."""
+    if not is_admin(update):
+        return
+    
+    lines = ["🤖 **Bot Rotation Pool**\n"]
+    for token, username in _bot_usernames.items():
+        status = "🔒 Locked" if token in _locked_bots else "✅ Available"
+        lines.append(f"• @{username} — {status}")
+    
+    lines.append(f"\n**Total**: {len(_bot_usernames)} bots")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -123,11 +165,16 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     system_status = "⏸️ **PAUSED**" if is_paused else "▶️ **RUNNING**"
     
+    # 4. Bot pool info
+    bot_count = len(_bot_usernames)
+    locked_count = len(_locked_bots)
+    
     msg = (
         f"📊 **System Status**\n\n"
         f"**State**: {system_status}\n"
         f"**Redis**: {redis_status}\n"
         f"**Pending Broadcasts**: `{queue_count}`\n"
+        f"**Bot Pool**: `{bot_count} bots ({locked_count} locked)`\n"
         f"**Monitor Group**: `{settings.MONITOR_GROUP_ID}`\n"
         f"**Environment**: `{settings.ENV}`"
     )
@@ -374,6 +421,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     client = context.user_data.get('client')
     temp_session_path = context.user_data.get('temp_session_path')
     chat_id = update.effective_chat.id
+    current_bot_username = context.bot.username or "unknown"
     
     try:
         me = await client.get_me()
@@ -445,7 +493,49 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.error(f"Sqlite injection failed: {e}")
 
         if not saved_successfully:
-            raise Exception("Could not save session file because it is locked by another process.")
+            # ==========================================
+            # BOT LOCKED — RECOMMEND ANOTHER BOT
+            # ==========================================
+            logger.warning(f"Bot @{current_bot_username} could not save session — recommending alternative bot.")
+            
+            # Mark this bot as locked
+            current_token = context.bot_data.get('_bot_token', '')
+            if current_token:
+                _locked_bots.add(current_token)
+            
+            # Find alternative bots
+            other_bots = _get_other_bot_usernames(current_bot_username)
+            if not other_bots:
+                # All bots locked or only one — show all alternatives anyway
+                other_bots = _get_all_bot_usernames_except(current_bot_username)
+            
+            if other_bots:
+                bot_links = "\n".join([f"• @{b}" for b in other_bots])
+                lock_msg = (
+                    f"🔒 **Session Locked**\n\n"
+                    f"This bot (@{current_bot_username}) could not save the session file "
+                    f"because it is locked by another process.\n\n"
+                    f"👉 **Please use one of these other bots instead:**\n"
+                    f"{bot_links}\n\n"
+                    f"Just open a chat with the bot above and type /starthunter to login."
+                )
+            else:
+                lock_msg = (
+                    f"🔒 **Session Locked**\n\n"
+                    f"This bot (@{current_bot_username}) could not save the session file.\n"
+                    f"No other bots are available at this time. Please try again later."
+                )
+            
+            sent_msg = await update.message.reply_text(lock_msg, parse_mode=ParseMode.MARKDOWN)
+            # Auto-delete the lock message after 30 seconds
+            await schedule_deletion(context, chat_id, sent_msg.message_id, delay=30)
+            
+            return ConversationHandler.END
+        
+        # Session saved successfully — clear any lock on this bot
+        current_token = context.bot_data.get('_bot_token', '')
+        if current_token:
+            _locked_bots.discard(current_token)
         
         # Clean up temp
         try:
@@ -474,30 +564,18 @@ async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await update.message.reply_text('Login process cancelled.')
     return ConversationHandler.END
 
-async def post_init(application: Application):
-    """
-    Post-initialization hook.
-    """
-    logger.info("🤖 Bot Listener starting polling...")
+# ==========================================
+# MULTI-BOT APPLICATION BUILDER
+# ==========================================
+
+def _build_application(token: str) -> Application:
+    """Builds a python-telegram-bot Application for a single bot token."""
+    application = ApplicationBuilder().token(token).build()
     
-    # Start Watchdog as a background task, track it in the application
-    application.watchdog_task = asyncio.create_task(watchdog_loop(application.bot))
-
-async def main():
-    global redis_client
+    # Store the token in bot_data so handlers can identify which bot they're running on
+    application.bot_data['_bot_token'] = token
     
-    token = settings.MONITOR_BOT_TOKEN.strip()
-    if not token:
-        logger.error("MONITOR_BOT_TOKEN not set!")
-        return
-
-    # Initialize Redis inside the event loop
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
-
-    # Build Application
-    application = ApplicationBuilder().token(token).post_init(post_init).build()
-
-    # Add Handlers
+    # Add Handlers (same for all bots)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("pause", pause))
@@ -505,6 +583,7 @@ async def main():
     application.add_handler(CommandHandler("restart", restart))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("commands", help_command))
+    application.add_handler(CommandHandler("bots", bots_command))
 
     # Add Login Conversation Handler
     login_conv_handler = ConversationHandler(
@@ -517,6 +596,63 @@ async def main():
         fallbacks=[CommandHandler('cancel', cancel_login)],
     )
     application.add_handler(login_conv_handler)
+    
+    return application
+
+
+async def _run_bot(token: str, is_primary: bool = False):
+    """Runs a single bot's polling loop. Primary bot also runs the Watchdog."""
+    application = _build_application(token)
+    
+    async with application:
+        # Resolve bot username via getMe
+        bot_info = await application.bot.get_me()
+        bot_username = bot_info.username or f"bot_{bot_info.id}"
+        _bot_usernames[token] = bot_username
+        
+        logger.info(f"🤖 Bot @{bot_username} starting polling...")
+        
+        await application.updater.start_polling(drop_pending_updates=True)
+        
+        # Only primary bot runs the Watchdog
+        watchdog_task = None
+        if is_primary:
+            watchdog_task = asyncio.create_task(watchdog_loop(application.bot))
+            logger.info(f"🐶 Watchdog attached to primary bot @{bot_username}")
+    
+        logger.info(f"🚀 Bot @{bot_username} Started")
+
+        # Wait until stop_event is set (by /restart or signal)
+        while not stop_event.is_set():
+            await asyncio.sleep(1)
+        
+        logger.info(f"Stopping bot @{bot_username}...")
+        
+        # Cleanup Watchdog
+        if watchdog_task:
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Context manager exit handles application.stop() and application.shutdown()
+    
+    logger.info(f"Bot @{bot_username} stopped.")
+
+
+async def main():
+    global redis_client
+    
+    tokens = settings.bot_tokens
+    if not tokens:
+        logger.error("MONITOR_BOT_TOKEN not set!")
+        return
+
+    logger.info(f"🚀 Starting Multi-Bot Listener with {len(tokens)} bot(s)...")
+
+    # Initialize Redis inside the event loop
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
     # Handle signals for graceful shutdown (Unix only, Windows ignored)
     if os.name != 'nt':
@@ -524,27 +660,21 @@ async def main():
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, lambda: stop_event.set())
     
-    # Use context manager for correct lifecycle management
-    async with application:
-        await application.updater.start_polling(drop_pending_updates=True)
-        
-        logger.info("🚀 Bot Listener Started (Async Context Manager)")
-
-        # Wait until stop_event is set (by /restart or signal)
-        while not stop_event.is_set():
-            await asyncio.sleep(1)
-        
-        logger.info("Stopping bot...")
-        
-        # Cleanup Watchdog
-        if hasattr(application, 'watchdog_task'):
-            application.watchdog_task.cancel()
-            try:
-                await application.watchdog_task
-            except asyncio.CancelledError:
-                pass
-        
-        # Context manager exit handles application.stop() and application.shutdown()
+    # Run all bots concurrently — first token is primary (runs Watchdog)
+    tasks = []
+    for i, token in enumerate(tokens):
+        token = token.strip()
+        if not token:
+            continue
+        is_primary = (i == 0)
+        tasks.append(asyncio.create_task(_run_bot(token, is_primary=is_primary)))
+    
+    if not tasks:
+        logger.error("No valid bot tokens found!")
+        return
+    
+    # Wait for all bots to finish (they all stop on stop_event)
+    await asyncio.gather(*tasks, return_exceptions=True)
     
     # Close Redis
     await redis_client.close()
