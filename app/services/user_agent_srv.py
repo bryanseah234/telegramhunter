@@ -436,6 +436,54 @@ class UserAgentService:
         finally:
             pass
 
+    async def delete_old_messages(self, group_id: int | str, age_hours: int, topic_id: int | None = None) -> int:
+        """
+        Deletes messages older than age_hours in a specific topic (or General if topic_id is None).
+        Returns the number of messages deleted.
+        """
+        async with self.lock:
+            if not await self.start():
+                return 0
+
+        import datetime
+        from telethon.tl.types import Message
+        
+        deleted_count = 0
+        try:
+            if str(group_id).lstrip('-').isdigit():
+                target = int(group_id)
+            else:
+                target = group_id
+            entity = await self.client.get_entity(target)
+            
+            now = datetime.datetime.now(datetime.timezone.utc)
+            cutoff = now - datetime.timedelta(hours=age_hours)
+            
+            logger.info(f"    🧹 [UserAgent] Cleaning up messages older than {age_hours}h in topic {topic_id or 'General'}...")
+            
+            # Use iter_messages with reply_to=topic_id for specific topics
+            # If topic_id is None, it targets General (thread-less) in many Supergroups
+            # or simply the main chat.
+            async for message in self.client.iter_messages(entity, reply_to=topic_id):
+                if not isinstance(message, Message): continue
+                
+                # Check if message is older than cutoff
+                if message.date < cutoff:
+                    try:
+                        await self.client.delete_messages(entity, [message.id])
+                        deleted_count += 1
+                    except Exception as e:
+                        logger.warning(f"    ⚠️ [UserAgent] Failed to delete message {message.id}: {e}")
+                        
+            logger.info(f"    ✨ [UserAgent] Deleted {deleted_count} messages.")
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"    ❌ [UserAgent] delete_old_messages failed: {e}")
+            return 0
+        finally:
+            pass
+
     async def send_message(self, target: int | str, message: str) -> bool:
         """
         Sends a text message to a target (group/user) as the User Agent.

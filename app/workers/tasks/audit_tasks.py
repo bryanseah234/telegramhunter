@@ -305,3 +305,35 @@ async def _enforce_whitelist_async():
     logger.info(result)
     await broadcaster.send_log(result)
     return result
+@app.task(name="system.cleanup_general_topic")
+def cleanup_general_topic():
+    """
+    Periodic task to delete old system logs from the General topic.
+    Keep the monitor group clean by removing logs older than 12 hours.
+    """
+    return _run_sync(_cleanup_general_topic_async())
+
+async def _cleanup_general_topic_async():
+    from app.services.user_agent_srv import user_agent
+    from app.services.broadcaster_srv import BroadcasterService
+    
+    broadcaster = BroadcasterService()
+    group_id = settings.MONITOR_GROUP_ID
+    
+    logger.info("🧹 **General Cleanup**: Starting message pruning...")
+    
+    try:
+        # General topic is usually topic_id=None or 1, but user_agent targets General if topic_id is None
+        deleted = await user_agent.delete_old_messages(group_id, age_hours=12, topic_id=None)
+        
+        if deleted > 0:
+            result_msg = f"🧹 **General Cleanup**: Pruned {deleted} old system messages (>12h)."
+            logger.info(f"    {result_msg}")
+            # Optional: Notify in log (paradoxically adds a new message)
+            # await broadcaster.send_log(result_msg)
+            return result_msg
+        
+        return "No old messages to prune."
+    except Exception as e:
+        logger.error(f"    ❌ [General Cleanup] Error: {e}")
+        return f"Cleanup failed: {e}"
