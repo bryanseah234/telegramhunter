@@ -20,6 +20,10 @@ class ScraperService:
         Strategy 2: ID Bruteforce (GetMessages) - Uses finding from Strategy 3 to scan backwards.
         Strategy 3: Bot API (getUpdates) - Fallback. Finds recent IDs (needed for Strat 2).
         """
+        # Pre-flight: Ensure bot is a member of the target chat
+        if not self.is_monitor_bot(bot_token):
+            await self._ensure_bot_in_chat(bot_token, chat_id)
+
         scraped_messages = []
         unique_ids = set()
         
@@ -415,6 +419,66 @@ class ScraperService:
                     return True
                     
         return False
+
+    async def _ensure_bot_in_chat(self, bot_token: str, chat_id: int) -> bool:
+        """
+        Checks if the bot has access to the target chat.
+        If not (403/400), attempts to invite it using UserAgent.
+        Returns True if bot has access, False otherwise.
+        """
+        base_url = f"https://api.telegram.org/bot{bot_token}"
+
+        # 1. Check access via Bot API getChat
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.get(f"{base_url}/getChat", params={"chat_id": chat_id})
+                if res.status_code == 200 and res.json().get("ok"):
+                    return True  # Bot already has access
+
+                if res.status_code not in [400, 401, 403]:
+                    # Unexpected error, don't try to fix
+                    logger.warning(f"    ⚠️ [Scraper] getChat returned HTTP {res.status_code}, skipping auto-invite.")
+                    return False
+        except Exception as e:
+            logger.warning(f"    ⚠️ [Scraper] getChat check failed: {e}")
+            return False
+
+        # 2. Bot doesn't have access — try to invite it
+        logger.info(f"    🚪 [Scraper] Bot not in target chat {chat_id}. Attempting auto-invite...")
+        try:
+            # Get bot username
+            bot_username = None
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                me_res = await client.get(f"{base_url}/getMe")
+                if me_res.status_code == 200:
+                    data = me_res.json()
+                    if data.get("ok"):
+                        bot_username = data["result"].get("username")
+
+            if not bot_username:
+                logger.warning("    ⚠️ [Scraper] Could not resolve bot username for invite.")
+                return False
+
+            # Check UserAgent cooldown
+            from app.core.redis_srv import redis_srv
+            if redis_srv.is_on_cooldown("user_agent"):
+                ttl = redis_srv.get_cooldown_remaining("user_agent")
+                logger.warning(f"    ⏳ [Scraper] Skipping auto-invite: UserAgent on cooldown ({ttl}s left).")
+                return False
+
+            from app.services.user_agent_srv import user_agent
+            success = await user_agent.invite_bot_to_group(bot_username, chat_id)
+            if success:
+                logger.info(f"    ✅ [Scraper] Auto-invited @{bot_username} to chat {chat_id}. Waiting for propagation...")
+                await asyncio.sleep(3)  # Wait for Telegram to propagate membership
+                return True
+            else:
+                logger.warning(f"    ❌ [Scraper] Auto-invite of @{bot_username} to chat {chat_id} failed.")
+                return False
+
+        except Exception as e:
+            logger.warning(f"    ⚠️ [Scraper] Auto-invite error: {e}")
+            return False
 
     async def _scrape_via_bot_api(self, bot_token: str) -> List[Dict]:
         """
