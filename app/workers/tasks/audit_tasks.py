@@ -200,3 +200,91 @@ async def _system_self_heal_async():
         return f"Self-Heal finished. Repaired {heal_count}. Broadcast: {result}"
     except Exception as e:
         return f"Self-Heal finished. Repaired {heal_count}. Broadcast failed: {e}"
+
+@app.task(name="system.enforce_whitelist")
+def enforce_whitelist():
+    """
+    Periodic task to ensure all whitelisted bots/users are:
+    1. Present in the MONITOR_GROUP_ID
+    2. Promoted to admin with full permissions
+    """
+    return _run_sync(_enforce_whitelist_async())
+
+async def _enforce_whitelist_async():
+    from app.services.user_agent_srv import user_agent
+    
+    broadcaster = BroadcasterService()
+    await broadcaster.send_log("🛡️ **Enforce Whitelist**: Checking group membership and admin status...")
+
+    group_id = settings.MONITOR_GROUP_ID
+    raw_ids = settings.WHITELISTED_BOT_IDS or ""
+    whitelist = [x.strip() for x in raw_ids.split(",") if x.strip()]
+
+    if not whitelist:
+        return "No whitelisted IDs configured."
+
+    invited_count = 0
+    promoted_count = 0
+    already_ok_count = 0
+    failed_count = 0
+
+    for identifier in whitelist:
+        try:
+            # 1. Check if member exists in group
+            member_info = await user_agent.check_membership(group_id, identifier)
+
+            if member_info is None:
+                # Not in group — invite them
+                logger.info(f"    🚪 [Enforce] {identifier} not in group. Inviting...")
+                
+                # Determine if it's a bot ID (numeric) or username
+                if str(identifier).isdigit():
+                    # Numeric ID — we need to resolve it. For bots, we can try direct invite.
+                    # But invite_bot_to_group expects a username, so we need to try the ID directly
+                    success = await user_agent.invite_bot_to_group(identifier, group_id)
+                else:
+                    success = await user_agent.invite_bot_to_group(identifier, group_id)
+
+                if success:
+                    logger.info(f"    ✅ [Enforce] Invited {identifier} to group.")
+                    invited_count += 1
+                    await asyncio.sleep(2)  # Let Telegram propagate
+
+                    # Now promote them
+                    title = "Hunter Bot" if str(identifier).isdigit() else "Admin"
+                    if await user_agent.promote_to_admin(group_id, identifier, title=title):
+                        promoted_count += 1
+                        logger.info(f"    👑 [Enforce] Promoted {identifier} to admin.")
+                    await asyncio.sleep(1)
+                else:
+                    logger.warning(f"    ❌ [Enforce] Failed to invite {identifier}.")
+                    failed_count += 1
+            else:
+                # In group — check admin status
+                if not member_info.get("is_admin"):
+                    logger.info(f"    ⬆️ [Enforce] {identifier} is member but not admin. Promoting...")
+                    title = "Hunter Bot" if str(identifier).isdigit() else "Admin"
+                    if await user_agent.promote_to_admin(group_id, identifier, title=title):
+                        promoted_count += 1
+                        logger.info(f"    👑 [Enforce] Promoted {identifier} to admin.")
+                    else:
+                        failed_count += 1
+                    await asyncio.sleep(1)
+                else:
+                    already_ok_count += 1
+
+        except Exception as e:
+            logger.error(f"    ❌ [Enforce] Error processing {identifier}: {e}")
+            failed_count += 1
+            continue
+
+    result = (
+        f"🛡️ **Enforce Whitelist Complete**:\n"
+        f"✅ Already OK: {already_ok_count}\n"
+        f"🚪 Invited: {invited_count}\n"
+        f"👑 Promoted: {promoted_count}\n"
+        f"❌ Failed: {failed_count}"
+    )
+    logger.info(result)
+    await broadcaster.send_log(result)
+    return result

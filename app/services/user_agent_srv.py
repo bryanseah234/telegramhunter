@@ -510,4 +510,110 @@ class UserAgentService:
             
         return msgs
 
+    async def check_membership(self, group_id: int | str, user_identifier: str | int) -> dict | None:
+        """
+        Checks if a user/bot is a member of the group.
+        Returns participant info dict if found, None if not a member.
+        """
+        async with self.lock:
+            if not await self.start():
+                return None
+
+        try:
+            # Resolve group
+            if str(group_id).lstrip('-').isdigit():
+                target = int(group_id)
+            else:
+                target = group_id
+            group_entity = await self.client.get_entity(target)
+
+            # Resolve user/bot
+            if str(user_identifier).lstrip('-').isdigit():
+                user_target = int(user_identifier)
+            else:
+                user_target = user_identifier
+            
+            try:
+                user_entity = await self.client.get_entity(user_target)
+            except Exception:
+                logger.warning(f"    ⚠️ [UserAgent] Could not resolve entity: {user_identifier}")
+                return None
+
+            # Check if user is in the group
+            from telethon.tl.functions.channels import GetParticipantRequest
+            try:
+                result = await self.client(GetParticipantRequest(
+                    channel=group_entity,
+                    participant=user_entity
+                ))
+                return {
+                    "id": getattr(user_entity, 'id', 0),
+                    "username": getattr(user_entity, 'username', None),
+                    "is_admin": hasattr(result.participant, 'admin_rights') and result.participant.admin_rights is not None
+                }
+            except Exception as e:
+                err_str = str(e)
+                if "USER_NOT_PARTICIPANT" in err_str or "400" in err_str:
+                    return None  # Not a member
+                logger.warning(f"    ⚠️ [UserAgent] Membership check error: {e}")
+                return None
+
+        except Exception as e:
+            logger.error(f"    ❌ [UserAgent] check_membership failed: {e}")
+            return None
+
+    async def promote_to_admin(self, group_id: int | str, user_identifier: str | int, title: str = "Bot") -> bool:
+        """
+        Promotes a user/bot to admin in the specified group with full permissions.
+        """
+        async with self.lock:
+            if not await self.start():
+                return False
+
+        try:
+            # Resolve entities
+            if str(group_id).lstrip('-').isdigit():
+                target = int(group_id)
+            else:
+                target = group_id
+            group_entity = await self.client.get_entity(target)
+
+            if str(user_identifier).lstrip('-').isdigit():
+                user_target = int(user_identifier)
+            else:
+                user_target = user_identifier
+            user_entity = await self.client.get_entity(user_target)
+
+            from telethon.tl.functions.channels import EditAdminRequest
+            from telethon.tl.types import ChatAdminRights
+
+            admin_rights = ChatAdminRights(
+                change_info=True,
+                post_messages=True,
+                edit_messages=True,
+                delete_messages=True,
+                ban_users=True,
+                invite_users=True,
+                pin_messages=True,
+                manage_call=True,
+                other=True,
+                manage_topics=True,
+            )
+
+            await self.client(EditAdminRequest(
+                channel=group_entity,
+                user_id=user_entity,
+                admin_rights=admin_rights,
+                rank=title
+            ))
+            logger.info(f"    👑 [UserAgent] Promoted {user_identifier} to admin in group.")
+            return True
+
+        except errors.FloodWaitError as e:
+            await self._handle_flood_error(e)
+            return False
+        except Exception as e:
+            logger.error(f"    ❌ [UserAgent] Promote failed for {user_identifier}: {e}")
+            return False
+
 user_agent = UserAgentService()
