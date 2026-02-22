@@ -278,6 +278,23 @@ async def _enforce_whitelist_async():
             failed_count += 1
             continue
 
+    # 2. Cleanup non-admin bots and clear removed users list
+    try:
+        # Cleanup bots that are NOT admins and NOT in the whitelist
+        removed = await user_agent.cleanup_bots(group_id, whitelist_ids=whitelist, only_non_admins=True)
+        
+        # Periodically clear the "Removed Users" list to keep it small
+        cleared = await user_agent.clear_removed_users(group_id)
+        
+        cleanup_msg = f"🧹 **Bot Cleanup**: Removed {removed} non-admin bots. Cleared {cleared} from removed list."
+        logger.info(f"    {cleanup_msg}")
+        # Only notify if we actually did something
+        if removed > 0 or cleared > 0:
+            await broadcaster.send_log(cleanup_msg)
+            
+    except Exception as e:
+        logger.error(f"    ❌ [Enforce] Cleanup error: {e}")
+
     result = (
         f"🛡️ **Enforce Whitelist Complete**:\n"
         f"✅ Already OK: {already_ok_count}\n"
