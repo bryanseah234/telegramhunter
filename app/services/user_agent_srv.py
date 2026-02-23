@@ -109,8 +109,13 @@ class UserAgentService:
         if self._refresher_task is None:
             self._refresher_task = asyncio.create_task(self._session_refresher_loop())
 
-        # Ensure all broadcaster bots are in the monitor group
-        asyncio.create_task(self._ensure_monitor_bots_membership())
+        # Ensure all broadcaster bots are in the monitor group (Throttled)
+        if self._refresher_task is None or self._refresher_task.done():
+            from app.core.redis_srv import redis_srv
+            if not redis_srv.is_on_cooldown("user_agent:ensure_membership"):
+                self._refresher_task = asyncio.create_task(self._ensure_monitor_bots_membership())
+                # Set a long cooldown (e.g., 6 hours) to prevent spam
+                redis_srv.set_cooldown("user_agent:ensure_membership", 6 * 3600)
 
         # Try up to N times (where N = number of sessions) to find a usable one
         from app.core.redis_srv import redis_srv
@@ -745,13 +750,15 @@ class UserAgentService:
                     # Resolve bot ID from token (pre-calculated or fetched)
                     bot_id = int(token.split(':')[0])
                     
+                    # Add jitter to avoid burst rate limits
+                    await asyncio.sleep(2)
+
                     # 1. Check membership
                     member = await self.check_membership(group_id, bot_id)
                     if not member:
                         logger.warning(f"    ⚠️ [UserAgent] Bot {bot_id} NOT in monitor group. Inviting...")
                         # 2. Invite bot
-                        # We need the username if possible, but ID often works for invite
-                        # Fetch username if not cached
+                        await asyncio.sleep(5) # Delay before invite
                         try:
                             from telegram import Bot
                             temp_bot = Bot(token)
@@ -760,6 +767,7 @@ class UserAgentService:
                             if success:
                                 logger.info(f"    ✅ [UserAgent] Successfully invited @{me.username} to group.")
                                 # 3. Promote to admin (optional but usually needed for topics)
+                                await asyncio.sleep(3) # Delay before promote
                                 await self.promote_to_admin(group_id, me.username)
                         except Exception as e_bot:
                             logger.error(f"    ❌ [UserAgent] Failed to invite bot {bot_id}: {e_bot}")
@@ -767,6 +775,7 @@ class UserAgentService:
                         # Ensure it's admin if it's already a member
                         if not member.get("is_admin"):
                             logger.info(f"    👑 [UserAgent] Bot {bot_id} is member but not admin. Promoting...")
+                            await asyncio.sleep(2)
                             await self.promote_to_admin(group_id, bot_id)
                         
                 except Exception as e_tok:
