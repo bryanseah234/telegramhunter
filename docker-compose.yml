@@ -1,6 +1,7 @@
 services:
   redis:
     image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_redis
     restart: always
     init: true
     ports:
@@ -15,6 +16,7 @@ services:
 
   api:
     build: .
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_api
     restart: always
     init: true
     ports:
@@ -35,6 +37,7 @@ services:
 
   worker-core:
     build: .
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_worker-core
     restart: always
     init: true
     env_file: .env
@@ -52,6 +55,7 @@ services:
 
   worker-scanners:
     build: .
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_worker-scanners
     restart: always
     init: true
     env_file: .env
@@ -69,6 +73,7 @@ services:
 
   worker-scrape:
     build: .
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_worker-scrape
     restart: always
     init: true
     env_file: .env
@@ -86,6 +91,7 @@ services:
 
   beat:
     build: .
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_beat
     restart: always
     init: true
     env_file: .env
@@ -106,6 +112,7 @@ services:
 
   bot:
     build: .
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_bot
     restart: always
     init: true
     env_file: .env
@@ -124,4 +131,4 @@ services:
 
 volumes:
   redis_data:
-
+    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_redis_data
