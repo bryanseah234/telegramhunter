@@ -40,34 +40,3 @@ def trigger_scan_dev(source: str, request: Request):
     DISABLED by user request. Use manual script or POST (if authenticated) during dev.
     """
     raise HTTPException(status_code=403, detail="GET triggering is disabled. Use 'run_local_scan.bat' or authenticated POST.")
-    
-    # Previous Logic (Preserved for reference but unreachable):
-    # if settings.ENV == "production": ...
-    # if host not in ["localhost", "127.0.0.1"]: ...
-        
-    source = source.lower()
-    default_queries = {
-        "shodan": "product:Telegram",
-        "fofa": 'body="api.telegram.org"',
-        "github": "filename:.env api.telegram.org",
-        "censys": "services.port: 443",
-        "hybrid": "api.telegram.org"
-    }
-
-    if source not in default_queries:
-        raise HTTPException(status_code=400, detail=f"Unknown source. Options: {list(default_queries.keys())}")
-    
-    query = default_queries[source]
-    task_name = f"scanner.scan_{source}"
-    
-    try:
-        task = celery_app.send_task(task_name, args=[query])
-        return {
-            "status": "triggered (DEV MODE)", 
-            "task_id": str(task.id), 
-            "source": source, 
-            "default_query": query,
-            "note": "Production POST endpoint is disabled."
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
