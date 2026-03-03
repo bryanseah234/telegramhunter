@@ -800,6 +800,19 @@ async def main():
     # Initialize Redis inside the event loop
     redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
+    # ------------------------------------------------------------------
+    # Account Scheduler — time-window connect/disconnect for user accounts
+    # Bot clients are NOT affected; only user accounts (phone-number sessions).
+    # ------------------------------------------------------------------
+    from app.services.account_scheduler import AccountScheduler
+    from app.services.user_agent_srv import user_agent
+
+    account_scheduler = AccountScheduler(
+        on_activate=user_agent.scheduler_connect_all,
+        on_deactivate=user_agent.scheduler_disconnect_all,
+    )
+    await account_scheduler.start()
+
     # Handle signals for graceful shutdown (Unix only, Windows ignored)
     if os.name != 'nt':
         loop = asyncio.get_running_loop()
@@ -822,6 +835,9 @@ async def main():
     # Wait for all bots to finish (they all stop on stop_event)
     await asyncio.gather(*tasks, return_exceptions=True)
     
+    # Graceful shutdown: stop account scheduler
+    await account_scheduler.stop()
+
     # Close Redis
     await redis_client.close()
     logger.info("Bye!")
