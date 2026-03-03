@@ -7,6 +7,9 @@ import logging
 
 logger = logging.getLogger("user_agent")
 
+# MTProto conflict backoff (seconds)
+_MTPROTO_CONFLICT_BACKOFF = 120
+
 # Determine absolute path to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,6 +33,9 @@ class UserAgentService:
         self.current_index = 0
         self.current_session_name = "unknown"
         self._refresher_task = None
+
+        # Account scheduling — when False, start() becomes a no-op
+        self._scheduled_active: bool = True
 
     def _discover_sessions(self):
         """Scans BASE_DIR and telegram_accounts DB for valid .session files."""
@@ -102,6 +108,11 @@ class UserAgentService:
         Starts the user client. 
         Rotates through available sessions to find a usable one.
         """
+        # Respect account scheduler — refuse connections outside active window
+        if not self._scheduled_active:
+            logger.info("    ⏸️ [UserAgent] Account scheduler inactive — skipping connection.")
+            return False
+
         if not self.sessions:
             self._discover_sessions()
             
@@ -186,6 +197,21 @@ class UserAgentService:
                 logger.info(f"    ✅ [UserAgent] Connected with session: {session_name}")
                 return True
 
+            except SecurityError as e:
+                if "Too many messages had to be ignored" in str(e):
+                    logger.warning(
+                        f"    🔴 [UserAgent] MTProto conflict detected for '{session_name}': {e}. "
+                        f"Another Telethon instance is likely using the same account. "
+                        f"Backing off for {_MTPROTO_CONFLICT_BACKOFF}s..."
+                    )
+                    try:
+                        await self.client.disconnect()
+                    except Exception:
+                        pass
+                    self._cleanup_temp_session(f"{TEMP_SESSION_PATH}.session")
+                    await asyncio.sleep(_MTPROTO_CONFLICT_BACKOFF)
+                    continue
+                raise
             except Exception as e:
                 logger.warning(f"    ⚠️ [UserAgent] Failed to connect '{session_name}': {e}")
                 self._cleanup_temp_session(f"{TEMP_SESSION_PATH}.session")
@@ -783,5 +809,28 @@ class UserAgentService:
                     
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] _ensure_monitor_bots_membership fatal error: {e}")
+
+    # ------------------------------------------------------------------
+    # Account Scheduler callbacks
+    # ------------------------------------------------------------------
+
+    async def scheduler_connect_all(self) -> None:
+        """Called by AccountScheduler when entering the active window.
+        Marks user accounts as schedulable and reconnects the current session."""
+        self._scheduled_active = True
+        logger.info("    ▶️ [UserAgent] Scheduler activated — user accounts may now connect.")
+        # Attempt an eager connection so subsequent calls don't have cold-start delay
+        try:
+            await self.start()
+        except Exception as e:
+            logger.warning(f"    ⚠️ [UserAgent] Eager connect after activation failed: {e}")
+
+    async def scheduler_disconnect_all(self) -> None:
+        """Called by AccountScheduler when leaving the active window.
+        Disconnects all user account clients and prevents new connections."""
+        self._scheduled_active = False
+        logger.info("    ⏸️ [UserAgent] Scheduler deactivated — disconnecting user accounts.")
+        await self.stop()
+
 
 user_agent = UserAgentService()
