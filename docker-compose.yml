@@ -121,10 +121,6 @@ services:
     depends_on:
       - redis
       - api
-    environment:
-      - ACCOUNT_SCHEDULE_ENABLED=${ACCOUNT_SCHEDULE_ENABLED:-true}
-      - ACCOUNT_ACTIVE_START=${ACCOUNT_ACTIVE_START:-12:00}
-      - ACCOUNT_ACTIVE_END=${ACCOUNT_ACTIVE_END:-24:00}
     logging:
       driver: "json-file"
       options:

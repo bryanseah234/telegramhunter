@@ -7,8 +7,9 @@ import logging
 
 logger = logging.getLogger("user_agent")
 
-# MTProto conflict backoff (seconds)
-_MTPROTO_CONFLICT_BACKOFF = 120
+# MTProto conflict backoff (seconds) — kept short since connections are brief
+_MTPROTO_CONFLICT_BACKOFF = 10
+_MTPROTO_MAX_RETRIES = 3
 
 # Determine absolute path to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,9 +34,6 @@ class UserAgentService:
         self.current_index = 0
         self.current_session_name = "unknown"
         self._refresher_task = None
-
-        # Account scheduling — when False, start() becomes a no-op
-        self._scheduled_active: bool = True
 
     def _discover_sessions(self):
         """Scans BASE_DIR and telegram_accounts DB for valid .session files."""
@@ -107,12 +105,8 @@ class UserAgentService:
         """
         Starts the user client. 
         Rotates through available sessions to find a usable one.
+        On-demand pattern: caller MUST call _disconnect() when done.
         """
-        # Respect account scheduler — refuse connections outside active window
-        if not self._scheduled_active:
-            logger.info("    ⏸️ [UserAgent] Account scheduler inactive — skipping connection.")
-            return False
-
         if not self.sessions:
             self._discover_sessions()
             
@@ -220,13 +214,32 @@ class UserAgentService:
         logger.error("    ❌ [UserAgent] All sessions failed or on cooldown.")
         return False
 
-    async def stop(self):
-        async with self.lock:
-            if self.client:
+    async def _disconnect(self):
+        """Disconnect the user client after an on-demand operation.
+        Called in the finally block of every public method to ensure
+        we never hold a persistent connection (avoids MTProto conflicts
+        with other projects using the same phone numbers)."""
+        try:
+            if self.client and self.client.is_connected():
+                logger.debug(f"    🔌 [UserAgent] Disconnecting session '{self.current_session_name}'.")
                 session_filename = getattr(self.client.session, 'filename', None)
                 await self.client.disconnect()
                 if session_filename:
                     self._cleanup_temp_session(session_filename)
+        except Exception as e:
+            logger.warning(f"    ⚠️ [UserAgent] Error during disconnect: {e}")
+
+    async def stop(self):
+        """Graceful shutdown — disconnect and cancel background tasks."""
+        async with self.lock:
+            await self._disconnect()
+            if self._refresher_task and not self._refresher_task.done():
+                self._refresher_task.cancel()
+                try:
+                    await self._refresher_task
+                except asyncio.CancelledError:
+                    pass
+                self._refresher_task = None
 
     def _cleanup_temp_session(self, filename: str):
         """Removes the temporary session files from /tmp/"""
@@ -246,7 +259,7 @@ class UserAgentService:
             if not await self.start():
                 return False
             
-        try:
+        try:  # noqa: SIM105
             # Ensure identifiers are correct
             # Group ID might need modification depending on type (chat vs channel)
             # -100 prefix is typically for channels/supergroups. Telethon handles standard IDs often.
@@ -303,6 +316,8 @@ class UserAgentService:
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] Error: {e}")
             return False
+        finally:
+            await self._disconnect()
 
     async def _handle_flood_error(self, e):
         """Logs and sets persistent cooldown for FloodWaitError (Per Session)."""
@@ -365,7 +380,7 @@ class UserAgentService:
             logger.warning(f"    ⚠️ [UserAgent] Find topic failed: {e}")
             return None
         finally:
-            pass
+            await self._disconnect()
 
     async def cleanup_bots(self, group_id: int | str, whitelist_ids: list[int | str] = None, only_non_admins: bool = True) -> int:
         """
@@ -446,6 +461,8 @@ class UserAgentService:
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] Cleanup failed: {e}")
             return 0
+        finally:
+            await self._disconnect()
 
     async def clear_removed_users(self, group_id: int | str) -> int:
         """
@@ -487,7 +504,7 @@ class UserAgentService:
             logger.error(f"    ❌ [UserAgent] clear_removed_users failed: {e}")
             return 0
         finally:
-            pass
+            await self._disconnect()
 
     async def delete_old_messages(self, group_id: int | str, age_hours: int, topic_id: int | None = None) -> int:
         """
@@ -535,7 +552,7 @@ class UserAgentService:
             logger.error(f"    ❌ [UserAgent] delete_old_messages failed: {e}")
             return 0
         finally:
-            pass
+            await self._disconnect()
 
     async def send_message(self, target: int | str, message: str) -> bool:
         """
@@ -558,6 +575,8 @@ class UserAgentService:
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] Send failed: {e}")
             return False
+        finally:
+            await self._disconnect()
 
     async def get_last_message_id(self, group_id: int | str, topic_id: int) -> int | None:
         """
@@ -595,7 +614,7 @@ class UserAgentService:
             logger.error(f"    ❌ [UserAgent] Failed to get last message: {e}")
             return None
         finally:
-            pass
+            await self._disconnect()
 
     async def get_history(self, group_id: int | str, limit: int) -> list[dict]:
         """
@@ -651,6 +670,8 @@ class UserAgentService:
                 })
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] Failed to fetch history: {e}")
+        finally:
+            await self._disconnect()
             
         return msgs
 
@@ -705,6 +726,8 @@ class UserAgentService:
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] check_membership failed: {e}")
             return None
+        finally:
+            await self._disconnect()
 
     async def promote_to_admin(self, group_id: int | str, user_identifier: str | int, title: str = "Bot") -> bool:
         """
@@ -759,6 +782,8 @@ class UserAgentService:
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] Promote failed for {user_identifier}: {e}")
             return False
+        finally:
+            await self._disconnect()
 
     async def _ensure_monitor_bots_membership(self):
         """Checks and ensures all broadcaster bots are in the monitor group."""
@@ -809,28 +834,6 @@ class UserAgentService:
                     
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] _ensure_monitor_bots_membership fatal error: {e}")
-
-    # ------------------------------------------------------------------
-    # Account Scheduler callbacks
-    # ------------------------------------------------------------------
-
-    async def scheduler_connect_all(self) -> None:
-        """Called by AccountScheduler when entering the active window.
-        Marks user accounts as schedulable and reconnects the current session."""
-        self._scheduled_active = True
-        logger.info("    ▶️ [UserAgent] Scheduler activated — user accounts may now connect.")
-        # Attempt an eager connection so subsequent calls don't have cold-start delay
-        try:
-            await self.start()
-        except Exception as e:
-            logger.warning(f"    ⚠️ [UserAgent] Eager connect after activation failed: {e}")
-
-    async def scheduler_disconnect_all(self) -> None:
-        """Called by AccountScheduler when leaving the active window.
-        Disconnects all user account clients and prevents new connections."""
-        self._scheduled_active = False
-        logger.info("    ⏸️ [UserAgent] Scheduler deactivated — disconnecting user accounts.")
-        await self.stop()
 
 
 user_agent = UserAgentService()

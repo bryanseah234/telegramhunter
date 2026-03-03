@@ -30,11 +30,6 @@ class Settings(BaseSettings):
 
     # User Agent Session (Base64 encoded for Railway)
     USER_SESSION_STRING: Optional[str] = None
-
-    # Account Schedule (MTProto conflict avoidance)
-    ACCOUNT_SCHEDULE_ENABLED: bool = True
-    ACCOUNT_ACTIVE_START: str = "12:00"
-    ACCOUNT_ACTIVE_END: str = "24:00"
     
     # OSINT KeysAPI Keys
     SHODAN_KEY: Optional[str] = None
