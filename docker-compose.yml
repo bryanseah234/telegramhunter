@@ -20,9 +20,9 @@ services:
     restart: always
     init: true
     ports:
-      - "8011:8000"
+      - "8011:8001"
     env_file: .env
-    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 2
+    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8001 --workers 2
     depends_on:
       - redis
     environment:
