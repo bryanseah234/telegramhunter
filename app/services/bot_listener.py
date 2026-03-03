@@ -3,8 +3,10 @@ import asyncio
 import os
 import sys
 import signal
+import uuid
 import redis.asyncio as redis
 from telegram import Update
+from telegram.error import Conflict
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -46,6 +48,8 @@ logger = logging.getLogger("bot_listener")
 # Global Redis Client (initialized in main)
 redis_client: redis.Redis = None
 PAUSE_KEY = "system:paused"
+LOCK_TTL_SECONDS = 120
+INSTANCE_ID = f"{os.getenv('HOSTNAME', 'local')}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
 # Admin IDs
 ANONYMOUS_ADMIN_ID = 1087968824
@@ -60,6 +64,68 @@ stop_event = asyncio.Event()
 _bot_usernames: dict[str, str] = {}
 # Set of bot tokens currently considered "locked" (session save failed)
 _locked_bots: set[str] = set()
+
+
+def _bot_id_from_token(token: str) -> str:
+    """Extracts Telegram bot ID prefix from token safely."""
+    try:
+        return token.strip().split(":", 1)[0]
+    except Exception:
+        return "unknown"
+
+
+def _poll_lock_key(token: str) -> str:
+    """Redis key used to enforce single active poller per bot ID."""
+    return f"bot_listener:poll_lock:{_bot_id_from_token(token)}"
+
+
+async def _acquire_poll_lock(token: str) -> str | None:
+    """Acquire distributed lock for a bot poller. Returns lock key when acquired."""
+    if not redis_client:
+        return None
+
+    key = _poll_lock_key(token)
+    acquired = await redis_client.set(key, INSTANCE_ID, ex=LOCK_TTL_SECONDS, nx=True)
+    if acquired:
+        return key
+
+    owner = await redis_client.get(key)
+    logger.warning(
+        f"⚠️ Poll lock already held for bot_id={_bot_id_from_token(token)} by {owner}. "
+        "Skipping this poller instance to avoid getUpdates conflicts."
+    )
+    return None
+
+
+async def _release_poll_lock(lock_key: str | None):
+    """Release lock only if still owned by this process."""
+    if not lock_key or not redis_client:
+        return
+    try:
+        owner = await redis_client.get(lock_key)
+        if owner == INSTANCE_ID:
+            await redis_client.delete(lock_key)
+    except Exception as e:
+        logger.warning(f"Failed to release poll lock {lock_key}: {e}")
+
+
+async def _renew_poll_lock(lock_key: str | None):
+    """Periodically refresh lock TTL while polling is active."""
+    if not lock_key or not redis_client:
+        return
+
+    try:
+        while not stop_event.is_set():
+            await asyncio.sleep(max(15, LOCK_TTL_SECONDS // 3))
+            owner = await redis_client.get(lock_key)
+            if owner != INSTANCE_ID:
+                logger.warning(f"Lost ownership of poll lock {lock_key}.")
+                return
+            await redis_client.expire(lock_key, LOCK_TTL_SECONDS)
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        logger.warning(f"Poll lock renew failed for {lock_key}: {e}")
 
 def _get_whitelisted_usernames():
     raw = settings.WHITELISTED_BOT_IDS or ""
@@ -642,32 +708,50 @@ def _build_application(token: str) -> Application:
 
 async def _run_bot(token: str, is_primary: bool = False):
     """Runs a single bot's polling loop. Primary bot also runs the Watchdog."""
-    application = _build_application(token)
-    
-    async with application:
-        # Resolve bot username via getMe
-        bot_info = await application.bot.get_me()
-        bot_username = bot_info.username or f"bot_{bot_info.id}"
-        _bot_usernames[token] = bot_username
-        
-        logger.info(f"🤖 Bot @{bot_username} starting polling...")
-        
-        await application.updater.start_polling(drop_pending_updates=True)
-        
-        # Only primary bot runs the Watchdog
-        watchdog_task = None
-        if is_primary:
-            watchdog_task = asyncio.create_task(watchdog_loop(application.bot))
-            logger.info(f"🐶 Watchdog attached to primary bot @{bot_username}")
-    
-        logger.info(f"🚀 Bot @{bot_username} Started")
+    lock_key = await _acquire_poll_lock(token)
+    if redis_client and not lock_key:
+        # Another instance is already polling this bot ID.
+        return
 
-        # Wait until stop_event is set (by /restart or signal)
-        while not stop_event.is_set():
-            await asyncio.sleep(1)
-        
-        logger.info(f"Stopping bot @{bot_username}...")
-        
+    application = _build_application(token)
+    lock_renew_task = None
+    watchdog_task = None
+    
+    try:
+        async with application:
+            # Resolve bot username via getMe
+            bot_info = await application.bot.get_me()
+            bot_username = bot_info.username or f"bot_{bot_info.id}"
+            _bot_usernames[token] = bot_username
+
+            logger.info(f"🤖 Bot @{bot_username} starting polling...")
+
+            if lock_key:
+                lock_renew_task = asyncio.create_task(_renew_poll_lock(lock_key))
+
+            try:
+                await application.updater.start_polling(drop_pending_updates=True)
+            except Conflict as e:
+                logger.error(
+                    f"⚠️ Polling conflict for @{bot_username}: {e}. "
+                    "Another getUpdates consumer is active for this token."
+                )
+                return
+
+            # Only primary bot runs the Watchdog
+            if is_primary:
+                watchdog_task = asyncio.create_task(watchdog_loop(application.bot))
+                logger.info(f"🐶 Watchdog attached to primary bot @{bot_username}")
+
+            logger.info(f"🚀 Bot @{bot_username} Started")
+
+            # Wait until stop_event is set (by /restart or signal)
+            while not stop_event.is_set():
+                await asyncio.sleep(1)
+
+            logger.info(f"Stopping bot @{bot_username}...")
+
+    finally:
         # Cleanup Watchdog
         if watchdog_task:
             watchdog_task.cancel()
@@ -675,16 +759,38 @@ async def _run_bot(token: str, is_primary: bool = False):
                 await watchdog_task
             except asyncio.CancelledError:
                 pass
-        
-        # Context manager exit handles application.stop() and application.shutdown()
-    
-    logger.info(f"Bot @{bot_username} stopped.")
+
+        # Cleanup lock renew loop
+        if lock_renew_task:
+            lock_renew_task.cancel()
+            try:
+                await lock_renew_task
+            except asyncio.CancelledError:
+                pass
+
+        await _release_poll_lock(lock_key)
+
+    logger.info(f"Bot poller for token_id={_bot_id_from_token(token)} stopped.")
 
 
 async def main():
     global redis_client
     
-    tokens = settings.bot_tokens
+    raw_tokens = settings.bot_tokens
+    # Deduplicate by bot ID prefix to avoid spawning multiple pollers for the same bot.
+    seen_ids = set()
+    tokens = []
+    for token in raw_tokens:
+        token = token.strip()
+        if not token:
+            continue
+        bot_id = _bot_id_from_token(token)
+        if bot_id in seen_ids:
+            logger.warning(f"Duplicate monitor bot token detected for bot_id={bot_id}; skipping duplicate entry.")
+            continue
+        seen_ids.add(bot_id)
+        tokens.append(token)
+
     if not tokens:
         logger.error("MONITOR_BOT_TOKEN not set!")
         return
