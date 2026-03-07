@@ -8,6 +8,8 @@ from app.core.config import settings
 class BroadcasterService:
     def __init__(self):
         self.bot_tokens = settings.bot_tokens
+        self.bot_token = self.bot_tokens[0] if self.bot_tokens else None
+        self._bot = None
         self._bots = {} # token -> Bot instance
         
         # Simple round-robin for broadcaster
@@ -30,7 +32,8 @@ class BroadcasterService:
             )
             self._bots[token] = Bot(token=token, request=request)
             
-        return self._bots[token]
+        self._bot = self._bots[token]
+        return self._bot
 
     async def _retry_on_flood(self, func, *args, **kwargs):
         """

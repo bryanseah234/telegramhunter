@@ -35,4 +35,21 @@ class RedisService:
         idx = self.client.incr(f"rotation_index:{key}")
         return idx % max_val
 
+    def acquire_lock(self, key: str, ttl_seconds: int) -> bool:
+        if ttl_seconds <= 0:
+            ttl_seconds = 60
+        return bool(self.client.set(f"lock:{key}", "1", nx=True, ex=ttl_seconds))
+
+    def release_lock(self, key: str):
+        self.client.delete(f"lock:{key}")
+
+    def incr_key(self, key: str, ttl_seconds: int | None = None) -> int:
+        new_val = self.client.incr(f"counter:{key}")
+        if ttl_seconds:
+            self.client.expire(f"counter:{key}", ttl_seconds)
+        return int(new_val)
+
+    def reset_key(self, key: str):
+        self.client.delete(f"counter:{key}")
+
 redis_srv = RedisService()

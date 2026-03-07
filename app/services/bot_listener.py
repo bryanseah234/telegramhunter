@@ -511,7 +511,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         timestamp = int(time.time())
         filename = f"account_{phone_clean}_{timestamp}"
         
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         # Save sessions directly to the project root as requested
         final_path = os.path.join(base_dir, filename + ".session")
         
@@ -547,15 +547,21 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Copy to final destination
         saved_successfully = False
         try:
-            if os.path.exists(final_path):
-                os.remove(final_path)
-            shutil.copy2(temp_session_path + ".session", final_path)
+            if os.path.isdir(final_path):
+                shutil.rmtree(final_path)
+            tmp_final_path = final_path + ".tmp"
+            if os.path.exists(tmp_final_path):
+                os.remove(tmp_final_path)
+            shutil.copy2(temp_session_path + ".session", tmp_final_path)
+            os.replace(tmp_final_path, final_path)
             saved_successfully = True
         except PermissionError:
             logger.warning(f"File {final_path} is locked. Attempting sqlite3 injection...")
             try:
                 import sqlite3
                 src_conn = sqlite3.connect(temp_session_path + ".session")
+                if os.path.isdir(final_path):
+                    shutil.rmtree(final_path)
                 dst_conn = sqlite3.connect(final_path, timeout=30.0)
                 
                 src_cur = src_conn.cursor()

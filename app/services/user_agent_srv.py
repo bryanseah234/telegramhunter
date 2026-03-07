@@ -34,6 +34,8 @@ class UserAgentService:
         self.current_index = 0
         self.current_session_name = "unknown"
         self._refresher_task = None
+        self._ensure_task = None
+        self._session_lock_key = None
 
     def _discover_sessions(self):
         """Scans BASE_DIR and telegram_accounts DB for valid .session files."""
@@ -114,12 +116,10 @@ class UserAgentService:
         if self._refresher_task is None:
             self._refresher_task = asyncio.create_task(self._session_refresher_loop())
 
-        # Ensure all broadcaster bots are in the monitor group (Throttled)
-        if self._refresher_task is None or self._refresher_task.done():
+        if self._ensure_task is None or self._ensure_task.done():
             from app.core.redis_srv import redis_srv
             if not redis_srv.is_on_cooldown("user_agent:ensure_membership"):
-                self._refresher_task = asyncio.create_task(self._ensure_monitor_bots_membership())
-                # Set a long cooldown (e.g., 6 hours) to prevent spam
+                self._ensure_task = asyncio.create_task(self._ensure_monitor_bots_membership())
                 redis_srv.set_cooldown("user_agent:ensure_membership", 6 * 3600)
 
         # Try up to N times (where N = number of sessions) to find a usable one
@@ -143,6 +143,12 @@ class UserAgentService:
                  logger.info(f"    ⏳ [UserAgent] Session '{session_name}' on cooldown ({ttl}s). Rotating...")
                  continue
 
+            lock_key = f"user_agent:{session_name}"
+            if not redis_srv.acquire_lock(lock_key, 600):
+                logger.info(f"    🔒 [UserAgent] Session '{session_name}' locked by another worker. Rotating...")
+                continue
+            self._session_lock_key = lock_key
+
             # 3. Check if already connected is THIS session
             if self.client and self.client.is_connected():
                 # If we are already connected, check if it's the SAME session we just picked?
@@ -160,6 +166,9 @@ class UserAgentService:
                 await self.client.disconnect()
                 if session_filename:
                     self._cleanup_temp_session(session_filename)
+                if self._session_lock_key:
+                    redis_srv.release_lock(self._session_lock_key)
+                    self._session_lock_key = None
 
             # 4. Initialize & Connect
             # Copy to tmp (Bypass Read-Only)
@@ -185,9 +194,14 @@ class UserAgentService:
                     logger.warning(f"    ⚠️ [UserAgent] Session '{session_name}' invalid/expired. Skipping.")
                     await self.client.disconnect()
                     self._cleanup_temp_session(f"{TEMP_SESSION_PATH}.session")
+                    redis_srv.incr_key(f"user_agent_fail:{session_name}", 3600)
+                    if self._session_lock_key:
+                        redis_srv.release_lock(self._session_lock_key)
+                        self._session_lock_key = None
                     continue
                     
                 self.current_session_name = session_name
+                redis_srv.reset_key(f"user_agent_fail:{session_name}")
                 logger.info(f"    ✅ [UserAgent] Connected with session: {session_name}")
                 return True
 
@@ -203,12 +217,23 @@ class UserAgentService:
                     except Exception:
                         pass
                     self._cleanup_temp_session(f"{TEMP_SESSION_PATH}.session")
+                    redis_srv.incr_key(f"user_agent_fail:{session_name}", 3600)
+                    redis_srv.set_cooldown(cooldown_key, _MTPROTO_CONFLICT_BACKOFF + 5)
+                    if self._session_lock_key:
+                        redis_srv.release_lock(self._session_lock_key)
+                        self._session_lock_key = None
                     await asyncio.sleep(_MTPROTO_CONFLICT_BACKOFF)
                     continue
                 raise
             except Exception as e:
                 logger.warning(f"    ⚠️ [UserAgent] Failed to connect '{session_name}': {e}")
                 self._cleanup_temp_session(f"{TEMP_SESSION_PATH}.session")
+                fail_count = redis_srv.incr_key(f"user_agent_fail:{session_name}", 3600)
+                if fail_count >= _MTPROTO_MAX_RETRIES:
+                    redis_srv.set_cooldown(cooldown_key, 120)
+                if self._session_lock_key:
+                    redis_srv.release_lock(self._session_lock_key)
+                    self._session_lock_key = None
                 continue
         
         logger.error("    ❌ [UserAgent] All sessions failed or on cooldown.")
@@ -226,6 +251,10 @@ class UserAgentService:
                 await self.client.disconnect()
                 if session_filename:
                     self._cleanup_temp_session(session_filename)
+            if self._session_lock_key:
+                from app.core.redis_srv import redis_srv
+                redis_srv.release_lock(self._session_lock_key)
+                self._session_lock_key = None
         except Exception as e:
             logger.warning(f"    ⚠️ [UserAgent] Error during disconnect: {e}")
 

@@ -214,6 +214,9 @@ def _run_sync(coro):
         
     return loop.run_until_complete(coro)
 
+def _save_credentials(results, source_name: str):
+    return _run_sync(_save_credentials_async(results, source_name))
+
 async def _send_log_async(message: str):
     from app.services.broadcaster_srv import BroadcasterService
     broadcaster = BroadcasterService()
