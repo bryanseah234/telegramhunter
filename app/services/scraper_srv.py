@@ -302,10 +302,6 @@ class ScraperService:
         from app.services.bot_manager_srv import bot_manager
         msgs = []
         try:
-            # logger.info(f"🔐 [Scraper] Getting shared client for bot...")
-            client = await bot_manager.get_client(bot_token)
-            
-            # 0. Check Redis Cache for known restrictions
             from app.core.redis_srv import redis_srv
             
             # Key format: bot_restricted:{chat_id}
@@ -313,8 +309,14 @@ class ScraperService:
             if redis_srv.is_on_cooldown(f"bot_restricted:{chat_id}"):
                 logger.info(f"    ⏩ [Scraper] Skipping Telethon (Cached Restriction) for Chat {chat_id}. Using UserAgent...")
                 from app.services.user_agent_srv import user_agent
-                return await user_agent.get_history(chat_id, limit)
+                result = await user_agent.get_history(chat_id, limit)
+                if asyncio.isfuture(result):
+                    result = await result
+                return result
 
+            # logger.info(f"🔐 [Scraper] Getting shared client for bot...")
+            client = await bot_manager.get_client(bot_token)
+            
             # Pre-check via Bot API to Prevent ApiBotRestrictedError / bans proactively
             async with httpx.AsyncClient(timeout=5.0) as http_client:
                 check_res = await http_client.get(f"https://api.telegram.org/bot{bot_token}/getChat", params={"chat_id": chat_id})
@@ -322,7 +324,10 @@ class ScraperService:
                     logger.warning(f"    🛡️ [Scraper] Bot API reports no access (HTTP {check_res.status_code}). Falling back to UserAgent...")
                     redis_srv.set_cooldown(f"bot_restricted:{chat_id}", 21600)
                     from app.services.user_agent_srv import user_agent
-                    return await user_agent.get_history(chat_id, limit)
+                    result = await user_agent.get_history(chat_id, limit)
+                    if asyncio.isfuture(result):
+                        result = await result
+                    return result
 
             logger.info(f"📖 [Scraper] Fetching history via Telethon (Limit: {limit})...")
             
@@ -381,17 +386,21 @@ class ScraperService:
         except asyncio.TimeoutError:
              logger.error("    ⏰ [Scraper] Telethon history fetch timed out (asyncio.TimeoutError).")
         except Exception as e:
-             err_str = str(e)
-             if "API access for bot users is restricted" in err_str or "ChatAdminRequired" in err_str:
-                 logger.warning(f"    🛡️ [Scraper] Bot Restricted ({err_str}). Falling back to UserAgent...")
-                 try:
-                     redis_srv.set_cooldown(f"bot_restricted:{chat_id}", 21600)
-                 except: pass # Non-critical if Redis fails
-                 
-                 from app.services.user_agent_srv import user_agent
-                 return await user_agent.get_history(chat_id, limit)
-             
-             logger.error(f"❌ [Scraper] Telethon history error: {e}")
+            err_str = str(e)
+            if "API access for bot users is restricted" in err_str or "ChatAdminRequired" in err_str:
+                logger.warning(f"    🛡️ [Scraper] Bot Restricted ({err_str}). Falling back to UserAgent...")
+                try:
+                    redis_srv.set_cooldown(f"bot_restricted:{chat_id}", 21600)
+                except:
+                    pass
+                
+                from app.services.user_agent_srv import user_agent
+                result = await user_agent.get_history(chat_id, limit)
+                if asyncio.isfuture(result):
+                    result = await result
+                return result
+            
+            logger.error(f"❌ [Scraper] Telethon history error: {e}")
         return msgs
 
     def is_monitor_bot(self, token: str) -> bool:

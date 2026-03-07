@@ -15,6 +15,9 @@ from supabase import create_client
 
 def test_rw():
     print("--- Testing Supabase Read/Write ---")
+    if os.getenv("ALLOW_SUPABASE_WRITE") != "1":
+        print("⚠️ Skipping write test (set ALLOW_SUPABASE_WRITE=1 to enable).")
+        return
     if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
         print("❌ Supabase config missing.")
         return
