@@ -512,8 +512,10 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         filename = f"account_{phone_clean}_{timestamp}"
         
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        sessions_dir = os.path.join(base_dir, "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
         # Save sessions directly to the project root as requested
-        final_path = os.path.join(base_dir, filename + ".session")
+        final_path = os.path.join(sessions_dir, filename + ".session")
         
         # Delete bot messages we sent during the flow (Footprint Cleanup)
         for msg_id in context.user_data.get('bot_messages', []):

@@ -25,6 +25,8 @@ def interactive_login():
 
     # Force session file to project root
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sessions_dir = os.path.join(base_dir, "sessions")
+    os.makedirs(sessions_dir, exist_ok=True)
     # Telethon adds .session automatically, so we provide path without extension for client init
     # BUT we want to ensure it lands in base_dir.
     
@@ -35,7 +37,7 @@ def interactive_login():
     # Store session name in a known file for the app to pick up if needed?
     # For now, just create the session file. The UserAgentService can be updated to read from env or config.
     
-    session_file_path = os.path.join(base_dir, session_name)
+    session_file_path = os.path.join(sessions_dir, session_name)
     
     # Check for directory conflict
     if os.path.isdir(session_file_path + ".session"):

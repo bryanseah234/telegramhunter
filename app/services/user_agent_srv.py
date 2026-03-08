@@ -4,6 +4,8 @@ from telethon import TelegramClient, functions, types, errors
 from app.core.config import settings
 import time
 import logging
+import socket
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("user_agent")
 
@@ -13,6 +15,7 @@ _MTPROTO_MAX_RETRIES = 3
 
 # Determine absolute path to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
 
 # Support multiple accounts via Env Var (default: user_session)
 SESSION_NAME = os.getenv("USER_SESSION_NAME", "user_session")
@@ -36,6 +39,8 @@ class UserAgentService:
         self._refresher_task = None
         self._ensure_task = None
         self._session_lock_key = None
+        self._instance_id = f"{socket.gethostname()}:{os.getpid()}"
+        self._current_phone = None
 
     def _discover_sessions(self):
         """Scans BASE_DIR and telegram_accounts DB for valid .session files."""
@@ -44,27 +49,26 @@ class UserAgentService:
         # 1. Check Env Var Override first (Single Session Mode)
         env_session = os.getenv("USER_SESSION_NAME")
         if env_session:
-            path = os.path.join(BASE_DIR, f"{env_session}.session")
+            path = os.path.join(SESSIONS_DIR, f"{env_session}.session")
             if os.path.exists(path):
                 new_sessions.add(path)
                 self.sessions = sorted(list(new_sessions))
                 return
 
-        # 2. Scan Directory (Project Root)
-        search_dirs = [BASE_DIR, os.path.join(BASE_DIR, "sessions")] # Still check sessions/ for temp legacy
-        for sdir in search_dirs:
-            if not os.path.exists(sdir): continue
-            try:
-                for f in os.listdir(sdir):
-                    if f.endswith(".session"):
-                        # Exclude known non-user sessions
-                        if f in ["anon.session", "journal.session"]: continue
-                        if f.startswith("bot_"): continue 
-                        
-                        full_path = os.path.abspath(os.path.join(sdir, f))
-                        new_sessions.add(full_path)
-            except Exception as e:
-                logger.error(f"    ❌ [UserAgent] Directory scan failed for {sdir}: {e}")
+        # 2. Scan Directory (sessions/)
+        if not os.path.exists(SESSIONS_DIR):
+            os.makedirs(SESSIONS_DIR, exist_ok=True)
+        try:
+            for f in os.listdir(SESSIONS_DIR):
+                if f.endswith(".session"):
+                    if f in ["anon.session", "journal.session"]:
+                        continue
+                    if f.startswith("bot_"):
+                        continue
+                    full_path = os.path.abspath(os.path.join(SESSIONS_DIR, f))
+                    new_sessions.add(full_path)
+        except Exception as e:
+            logger.error(f"    ❌ [UserAgent] Directory scan failed for {SESSIONS_DIR}: {e}")
 
         # 3. Discover via Database (Requirement-aligned tracking)
         try:
@@ -86,7 +90,7 @@ class UserAgentService:
 
         # Fallback to default if nothing found (legacy support)
         if not new_sessions:
-            default_path = os.path.abspath(os.path.join(BASE_DIR, "user_session.session"))
+            default_path = os.path.abspath(os.path.join(SESSIONS_DIR, "user_session.session"))
             new_sessions.add(default_path)
             
         final_list = sorted(list(new_sessions))
@@ -148,6 +152,12 @@ class UserAgentService:
                 logger.info(f"    🔒 [UserAgent] Session '{session_name}' locked by another worker. Rotating...")
                 continue
             self._session_lock_key = lock_key
+            self._current_phone = None
+            if not await self._acquire_db_lease(session_path):
+                if self._session_lock_key:
+                    redis_srv.release_lock(self._session_lock_key)
+                    self._session_lock_key = None
+                continue
 
             # 3. Check if already connected is THIS session
             if self.client and self.client.is_connected():
@@ -169,6 +179,7 @@ class UserAgentService:
                 if self._session_lock_key:
                     redis_srv.release_lock(self._session_lock_key)
                     self._session_lock_key = None
+                await self._release_db_lease()
 
             # 4. Initialize & Connect
             # Copy to tmp (Bypass Read-Only)
@@ -198,6 +209,7 @@ class UserAgentService:
                     if self._session_lock_key:
                         redis_srv.release_lock(self._session_lock_key)
                         self._session_lock_key = None
+                    await self._release_db_lease()
                     continue
                     
                 self.current_session_name = session_name
@@ -222,6 +234,7 @@ class UserAgentService:
                     if self._session_lock_key:
                         redis_srv.release_lock(self._session_lock_key)
                         self._session_lock_key = None
+                    await self._release_db_lease()
                     await asyncio.sleep(_MTPROTO_CONFLICT_BACKOFF)
                     continue
                 raise
@@ -234,6 +247,7 @@ class UserAgentService:
                 if self._session_lock_key:
                     redis_srv.release_lock(self._session_lock_key)
                     self._session_lock_key = None
+                await self._release_db_lease()
                 continue
         
         logger.error("    ❌ [UserAgent] All sessions failed or on cooldown.")
@@ -255,8 +269,48 @@ class UserAgentService:
                 from app.core.redis_srv import redis_srv
                 redis_srv.release_lock(self._session_lock_key)
                 self._session_lock_key = None
+            await self._release_db_lease()
         except Exception as e:
             logger.warning(f"    ⚠️ [UserAgent] Error during disconnect: {e}")
+
+    async def _acquire_db_lease(self, session_path: str) -> bool:
+        try:
+            from app.core.database import db
+            abs_path = os.path.abspath(session_path)
+            res = db.table("telegram_accounts").select("phone").eq("session_path", abs_path).limit(1).execute()
+            if not res.data:
+                return True
+            phone = res.data[0].get("phone")
+            if not phone:
+                return True
+            lease_until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+            updated = db.table("telegram_accounts")\
+                .update({"locked_by": self._instance_id, "locked_until": lease_until})\
+                .eq("phone", phone)\
+                .or_("locked_until.is.null,locked_until.lt.now()")\
+                .execute()
+            if updated.data:
+                self._current_phone = phone
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"    ⚠️ [UserAgent] DB lease failed: {e}")
+            return True
+
+    async def _release_db_lease(self):
+        if not self._current_phone:
+            return
+        try:
+            from app.core.database import db
+            db.table("telegram_accounts")\
+                .update({"locked_by": None, "locked_until": None})\
+                .eq("phone", self._current_phone)\
+                .eq("locked_by", self._instance_id)\
+                .execute()
+        except Exception as e:
+            logger.warning(f"    ⚠️ [UserAgent] DB lease release failed: {e}")
+        finally:
+            self._current_phone = None
 
     async def stop(self):
         """Graceful shutdown — disconnect and cancel background tasks."""
