@@ -53,3 +53,5 @@ CREATE TABLE IF NOT EXISTS telegram_accounts (
 -- Index for phone
 CREATE INDEX IF NOT EXISTS idx_accounts_phone ON telegram_accounts(phone);
 CREATE INDEX IF NOT EXISTS idx_accounts_status ON telegram_accounts(status);
+ALTER TABLE telegram_accounts ADD COLUMN IF NOT EXISTS locked_by TEXT;
+ALTER TABLE telegram_accounts ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
