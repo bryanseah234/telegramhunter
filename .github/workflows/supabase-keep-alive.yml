@@ -14,4 +14,4 @@ jobs:
           curl -s -o /dev/null -w "%{http_code}\n" \
           -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
           -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}" \
-          "https://${{ secrets.SUPABASE_URL }}/rest/v1/exfiltrated_messages?select=*&limit=1"
+          "${{ secrets.SUPABASE_URL }}/rest/v1/exfiltrated_messages?select=*&limit=1"
