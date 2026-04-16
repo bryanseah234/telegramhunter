@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     MONITOR_BOT_TOKEN: str
     MONITOR_GROUP_ID: int | str
     WHITELISTED_BOT_IDS: str = "" # Comma-separated IDs (or usernames)
+    ANONYMOUS_ADMIN_ID: int = 1087968824  # Telegram anonymous group admin bot ID
 
     # Telegram Client (For Scraping)
     TELEGRAM_API_ID: int

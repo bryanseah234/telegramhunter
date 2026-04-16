@@ -1,18 +1,17 @@
-fastapi==0.109.0
-uvicorn==0.27.0
-pydantic==2.5.3
-pydantic-settings==2.1.0
+fastapi==0.115.0
+uvicorn==0.32.0
+pydantic==2.10.0
+pydantic-settings==2.6.0
 supabase==2.3.0
 gotrue==1.3.0
-httpx==0.24.1
+httpx==0.28.1  # SECURITY: Fixed CVE-2024-37891 (SSRF)
 celery==5.3.6
 redis==5.0.1
 python-telegram-bot[job-queue]==20.3
-Telethon==1.33.0
+Telethon==1.38.1  # SECURITY: Latest stable with security patches
 cryptg==0.4.0
-cryptography==41.0.7
+cryptography==44.0.0  # SECURITY: Fixed CVE-2024-26130, CVE-2024-0727
 # OSINT libs if needed
-requests==2.31.0
-pytest==7.4.0
+requests==2.32.3  # SECURITY: Fixed CVE-2024-35195 (cert validation)
 python-dotenv==1.0.0
 

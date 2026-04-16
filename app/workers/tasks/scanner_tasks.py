@@ -3,6 +3,7 @@ from app.workers.tasks.flow_tasks import enrich_credential, async_execute # Impo
 import asyncio # Ensure asyncio is imported
 import random
 from app.core.config import settings
+from app.core.constants import MAX_ERRORS_BUFFER
 from app.services.scanners import ShodanService, GithubService, UrlScanService, FofaService
 from app.services.scanners import GitlabService, BitbucketService, GithubGistService, GrepAppService, PublicWwwService, PastebinService, SerperService
 
@@ -281,8 +282,7 @@ async def _scan_shodan_async(query: str = None, country_code: str = None):
         except Exception as e:
             logger.error(f"    ❌ [Shodan] Query failed: {str(e)}")
             errors.append(str(e))
-            
-    result_msg = f"Shodan scan finished. Saved {total_saved} new credentials."
+            errors = errors[-MAX_ERRORS_BUFFER:]
     if errors:
         result_msg += f" (Errors: {len(errors)})"
         await _send_log_async(f"❌ [Shodan] Completed with errors: {errors[0]}...")
@@ -339,6 +339,7 @@ async def _scan_urlscan_async(query: str = None, country_code: str = None):
         except Exception as e:
             logger.error(f"    ❌ [URLScan] Query failed: {e}")
             errors.append(str(e))
+            errors = errors[-MAX_ERRORS_BUFFER:]
     
     result_msg = f"URLScan scan finished. Saved {total_saved} new credentials."
     if errors:
@@ -403,6 +404,7 @@ async def _scan_github_async(query: str = None):
         except Exception as e:
             logger.error(f"    ❌ [GitHub] Dork failed: {str(e)}")
             errors.append(str(e))
+            errors = errors[-MAX_ERRORS_BUFFER:]
         
         await asyncio.sleep(5) 
             
@@ -461,6 +463,7 @@ async def _scan_fofa_async(task_self, query: str = None, country_code: str = Non
         except Exception as e:
             logger.error(f"    ❌ [FOFA] Query failed: {str(e)}")
             errors.append(str(e))
+            errors = errors[-MAX_ERRORS_BUFFER:]
             if task_self.request.retries < task_self.max_retries:
                  # We can't use self.retry inside async without care? 
                  # Celery retry raises an exception.
