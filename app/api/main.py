@@ -1,42 +1,33 @@
 from fastapi import FastAPI
+from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.api.routers import monitor, scan
 import logging
 import sys
+import asyncio
 
 # ==============================================
 # LOGGING CONFIGURATION
 # ==============================================
-# Configure root logger for all app.* modules
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     stream=sys.stdout,
-    force=True  # Override any existing config
+    force=True
 )
-
-# Set specific loggers
 logging.getLogger("app").setLevel(logging.INFO)
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING)  # Reduce access log noise
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    docs_url=None if settings.ENV == "production" else "/docs",
-    redoc_url=None if settings.ENV == "production" else "/redoc",
-    openapi_url=None if settings.ENV == "production" else "/openapi.json"
-)
 
-from app.services.broadcaster_srv import BroadcasterService
-import asyncio
-
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Startup ──────────────────────────────
     logger.info("🚀 API starting up...")
-    # Non-blocking: don't let Telegram timeout slow down API startup
     try:
+        from app.services.broadcaster_srv import BroadcasterService
         broadcaster = BroadcasterService()
         await asyncio.wait_for(
             broadcaster.send_log(f"🟢 **API Service** Started ({settings.ENV})"),
@@ -48,17 +39,28 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"⚠️ Startup notification failed: {e}")
 
-@app.on_event("shutdown")
-async def shutdown_event():
+    yield  # ── Application runs ──────────────
+
+    # ── Shutdown ─────────────────────────────
     logger.info("🛑 API shutting down...")
     try:
+        from app.services.broadcaster_srv import BroadcasterService
         broadcaster = BroadcasterService()
         await asyncio.wait_for(
-            broadcaster.send_log(f"🔴 **API Service** Stopping..."),
+            broadcaster.send_log("🔴 **API Service** Stopping..."),
             timeout=3.0
         )
     except Exception:
-        pass  # Don't block shutdown
+        pass
+
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    lifespan=lifespan,
+    docs_url=None if settings.ENV == "production" else "/docs",
+    redoc_url=None if settings.ENV == "production" else "/redoc",
+    openapi_url=None if settings.ENV == "production" else "/openapi.json"
+)  # Don't block shutdown
 
 app.include_router(monitor.router)
 app.include_router(scan.router)

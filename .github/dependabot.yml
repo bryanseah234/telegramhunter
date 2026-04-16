@@ -1,127 +1,31 @@
 version: 2
 updates:
-  # .NET SDK (global.json file)
-  - package-ecosystem: "dotnet-sdk"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Bun (bun.lockb, package.json files)
-  - package-ecosystem: "bun"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Bundler (Gemfile, Gemfile.lock files)
-  - package-ecosystem: "bundler"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Cargo (Cargo.toml, Cargo.lock files)
-  - package-ecosystem: "cargo"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Composer (composer.json, composer.lock files)
-  - package-ecosystem: "composer"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Conda (environment.yml file)
-  - package-ecosystem: "conda"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Dev containers (.devcontainer.json file)
-  - package-ecosystem: "devcontainers"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Docker (Dockerfile)
-  - package-ecosystem: "docker"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Docker Compose (docker-compose.yml file)
-  - package-ecosystem: "docker-compose"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # GitHub Actions workflows (.github/workflows/*.yml files)
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Go modules (go.mod file)
-  - package-ecosystem: "gomod"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Gradle (build.gradle, build.gradle.kts files)
-  - package-ecosystem: "gradle"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Helm (Chart.yaml, values.yaml files)
-  - package-ecosystem: "helm"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # Maven (pom.xml file)
-  - package-ecosystem: "maven"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # npm (package.json, package-lock.json files)
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # NuGet (.nuspec, .csproj, etc. files)
-  - package-ecosystem: "nuget"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "15:00"
-
-  # pip (requirements.txt, Pipfile, setup.py files)
+  # Python dependencies
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "daily"
-      time: "15:00"
+      interval: "weekly"
+      time: "09:00"
+    open-pull-requests-limit: 5
 
-  # Terraform (.tf files)
-  - package-ecosystem: "terraform"
+  # npm (Next.js frontend)
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      time: "09:00"
+    open-pull-requests-limit: 5
+
+  # Docker
+  - package-ecosystem: "docker"
     directory: "/"
     schedule:
-      interval: "daily"
-      time: "15:00"
+      interval: "weekly"
+      time: "09:00"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      time: "09:00"
