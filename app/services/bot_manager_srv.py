@@ -29,16 +29,23 @@ class BotClientManager:
                 if client.is_connected():
                     return client
                 else:
-                    logger.warning(f"Existing client for bot disconnected or invalid.")
-                    await client.disconnect()
+                    logger.warning(f"Existing client for bot disconnected. Reconnecting...")
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    del self._clients[bot_token]
                 
-            # Create new client if needed
+            # Create new client
             import os
             pid = os.getpid()
             logger.info(f"🚀 [BotManager] [PID:{pid}] Creating fresh connection for bot...")
-            # We still use MemorySession for now, but we keep the client alive in memory
             client = TelegramClient(MemorySession(), self.api_id, self.api_hash)
-            await client.start(bot_token=bot_token)
+            try:
+                await asyncio.wait_for(client.start(bot_token=bot_token), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.error(f"[BotManager] Timeout connecting bot client after 30s")
+                raise
             
             self._clients[bot_token] = client
             return client

