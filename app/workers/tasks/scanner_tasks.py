@@ -203,17 +203,7 @@ async def _save_credentials_async(results, source_name: str):
 
 def _run_sync(coro):
     """Helper to run async code in sync Celery task"""
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-    return loop.run_until_complete(coro)
+    return asyncio.run(coro)
 
 def _save_credentials(results, source_name: str):
     return _run_sync(_save_credentials_async(results, source_name))

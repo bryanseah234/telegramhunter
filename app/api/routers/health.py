@@ -51,9 +51,10 @@ async def detailed_health():
     
     # Check Telegram Bot API
     try:
-        import requests
+        import httpx
         url = f"https://api.telegram.org/bot{settings.bot_tokens[0]}/getMe"
-        response = requests.get(url, timeout=5)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(url)
         if response.status_code == 200:
             health_status["checks"]["telegram_bot"] = {"status": "healthy"}
         else:

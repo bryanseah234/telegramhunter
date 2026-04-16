@@ -2,8 +2,11 @@ from telegram import Bot
 from telegram.request import HTTPXRequest  
 from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 import asyncio
+import logging
 import time
 from app.core.config import settings
+
+logger = logging.getLogger("broadcaster")
 
 class BroadcasterService:
     def __init__(self):
@@ -45,20 +48,19 @@ class BroadcasterService:
                 return await func(*args, **kwargs)
             except RetryAfter as e:
                 wait_time = e.retry_after + 1  # Add buffer
-                print(f"⚠️ Flood control exceeded. Retrying in {wait_time}s...")
+                logger.warning(f"⚠️ Flood control exceeded. Retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
             except TimedOut:
-                print(f"⚠️ Request Timed Out. Retrying in 5s...")
+                logger.warning(f"⚠️ Request Timed Out. Retrying in 5s...")
                 await asyncio.sleep(5)
             except NetworkError as e:
-                print(f"⚠️ Network Error ({e.message}). Retrying in 5s...")
+                logger.warning(f"⚠️ Network Error ({e.message}). Retrying in 5s...")
                 await asyncio.sleep(5)
             except TelegramError as e:
                 # If it's a generic buffer error (sometimes happens with 429 without RetryAfter type)
                 if "Flood control exceeded" in str(e) or "Too Many Requests" in str(e):
-                     # Parse time or default
-                     print(f"⚠️ Flood control exceeded (Generic). Retrying in 10s... ({e})")
-                     await asyncio.sleep(10)
+                    logger.warning(f"⚠️ Flood control exceeded (Generic). Retrying in 10s... ({e})")
+                    await asyncio.sleep(10)
                 else:
                     raise e
         # Final attempt
@@ -76,7 +78,7 @@ class BroadcasterService:
             if existing_id:
                 return existing_id
         except Exception as e:
-            print(f"⚠️ Failed to check existing topics via UserAgent: {e}")
+            logger.warning(f"⚠️ Failed to check existing topics via UserAgent: {e}")
 
         # Check for "General" topic collision or if user tries to create topic 1
         if topic_name in ["General", "general", "main"] or group_id == 1:
@@ -85,7 +87,7 @@ class BroadcasterService:
 
         # 2. Create if not found
         try:
-            print(f"    [Broadcaster] Creating topic '{topic_name}' in {group_id}...")
+            logger.info(f"    [Broadcaster] Creating topic '{topic_name}' in {group_id}...")
             # Enforce strict timeout specifically for creation which can hang
             topic = await asyncio.wait_for(
                 self._retry_on_flood(
@@ -94,20 +96,20 @@ class BroadcasterService:
                 timeout=15.0
             )
             thread_id = topic.message_thread_id
-            print(f"    ✅ [Broadcaster] Created topic {thread_id}")
+            logger.info(f"    ✅ [Broadcaster] Created topic {thread_id}")
             
             # 3. Lay the ground: Send Topic Name as first message
             try:
                 await self.send_topic_header(group_id, thread_id, topic_name)
             except Exception as e:
-                print(f"⚠️ Failed to send header for new topic: {e}")
+                logger.warning(f"⚠️ Failed to send header for new topic: {e}")
                 
             return thread_id
         except asyncio.TimeoutError:
-             print(f"❌ [Broadcaster] Topic creation timed out for '{topic_name}'")
-             raise TimedOut("Topic creation timed out inside ensure_topic")
+            logger.error(f"❌ [Broadcaster] Topic creation timed out for '{topic_name}'")
+            raise TimedOut("Topic creation timed out inside ensure_topic")
         except TelegramError as e:
-            print(f"Error creating topic: {e}")
+            logger.error(f"Error creating topic: {e}")
             raise e
 
     async def send_message(self, group_id: int | str, thread_id: int, msg_obj: dict):
@@ -152,25 +154,25 @@ class BroadcasterService:
                 await self._retry_on_flood(
                     self.bot.send_message,
                     chat_id=settings.MONITOR_GROUP_ID,
-                    message_thread_id=None, # Explicitly target General Topic
+                    message_thread_id=None,  # Explicitly target General Topic
                     text=f"🤖 [System Log]\n{message}"
                 )
                 return  # Success — stop trying
             except TelegramError as e:
                 err_str = str(e)
                 if "Forbidden" in err_str or "not a member" in err_str:
-                    print(f"⚠️ Bot not in monitor group, rotating to next bot... ({e})")
+                    logger.warning(f"⚠️ Bot not in monitor group, rotating to next bot... ({e})")
                     last_err = e
                     continue  # Try next bot in rotation
                 # Non-recoverable Telegram error
-                print(f"Failed to send log: {e}")
+                logger.error(f"Failed to send log: {e}")
                 return
             except Exception as e:
-                print(f"Failed to send log: {e}")
+                logger.error(f"Failed to send log: {e}")
                 return
         # All bots failed
         if last_err:
-            print(f"Failed to send log (all {len(self.bot_tokens)} bots kicked from group): {last_err}")
+            logger.error(f"Failed to send log (all {len(self.bot_tokens)} bots kicked from group): {last_err}")
 
     async def send_topic_header(self, group_id: int | str, thread_id: int, text: str):
         """
@@ -184,6 +186,6 @@ class BroadcasterService:
                 text=text
             )
         except Exception as e:
-            print(f"Failed to send topic header: {e}")
+            logger.error(f"Failed to send topic header: {e}")
 
 

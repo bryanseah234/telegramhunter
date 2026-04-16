@@ -324,10 +324,7 @@ class ScraperService:
             if redis_srv.is_on_cooldown(f"bot_restricted:{chat_id}"):
                 logger.info(f"    ⏩ [Scraper] Skipping Telethon (Cached Restriction) for Chat {chat_id}. Using UserAgent...")
                 from app.services.user_agent_srv import user_agent
-                result = await user_agent.get_history(chat_id, limit)
-                if asyncio.isfuture(result):
-                    result = await result
-                return result
+                return await user_agent.get_history(chat_id, limit) or []
 
             # logger.info(f"🔐 [Scraper] Getting shared client for bot...")
             client = await bot_manager.get_client(bot_token)
@@ -339,10 +336,7 @@ class ScraperService:
                     logger.warning(f"    🛡️ [Scraper] Bot API reports no access (HTTP {check_res.status_code}). Falling back to UserAgent...")
                     redis_srv.set_cooldown(f"bot_restricted:{chat_id}", 21600)
                     from app.services.user_agent_srv import user_agent
-                    result = await user_agent.get_history(chat_id, limit)
-                    if asyncio.isfuture(result):
-                        result = await result
-                    return result
+                    return await user_agent.get_history(chat_id, limit) or []
 
             logger.info(f"📖 [Scraper] Fetching history via Telethon (Limit: {limit})...")
             
@@ -413,14 +407,11 @@ class ScraperService:
                 logger.warning(f"    🛡️ [Scraper] Bot Restricted ({err_str}). Falling back to UserAgent...")
                 try:
                     redis_srv.set_cooldown(f"bot_restricted:{chat_id}", 21600)
-                except:
+                except Exception:
                     pass
                 
                 from app.services.user_agent_srv import user_agent
-                result = await user_agent.get_history(chat_id, limit)
-                if asyncio.isfuture(result):
-                    result = await result
-                return result
+                return await user_agent.get_history(chat_id, limit) or []
             
             logger.error(f"❌ [Scraper] Telethon history error: {e}")
         return msgs

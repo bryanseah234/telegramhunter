@@ -1,6 +1,7 @@
 import os
 import asyncio
 from telethon import TelegramClient, functions, types, errors
+from telethon.errors import SecurityError, FloodWaitError, AuthKeyUnregisteredError
 from app.core.config import settings
 import time
 import logging
