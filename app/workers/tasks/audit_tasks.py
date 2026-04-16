@@ -38,6 +38,7 @@ async def _audit_active_topics_async():
     await broadcaster.send_log("🛡️ **Audit**: Starting Topic Integrity Check...")
     
     # 1. Fetch all ACTIVE credentials
+    # Supabase client parameterizes all .eq() / .in_() / .update() calls — no raw SQL interpolation
     try:
         response = db.table("discovered_credentials")\
             .select("id, meta, chat_id, status")\

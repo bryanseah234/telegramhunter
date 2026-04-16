@@ -1,19 +1,34 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, TypedDict
 import asyncio
 from telethon import TelegramClient, errors
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
+from telethon.errors import (
+    FloodWaitError,
+    AuthKeyUnregisteredError,
+    UserDeactivatedBanError,
+    SessionPasswordNeededError,
+)
 from app.core.config import settings
 import logging
 import httpx
 
 logger = logging.getLogger("scraper")
 
+
+class ScrapedMessage(TypedDict):
+    telegram_msg_id: int
+    sender_name: str
+    content: str
+    media_type: str
+    file_meta: dict
+    chat_id: int
+
 class ScraperService:
     def __init__(self):
         self.api_id = settings.TELEGRAM_API_ID
         self.api_hash = settings.TELEGRAM_API_HASH
 
-    async def scrape_history(self, bot_token: str, chat_id: int, limit: int = 3000) -> List[Dict]:
+    async def scrape_history(self, bot_token: str, chat_id: int, limit: int = 3000) -> List[ScrapedMessage]:
         """
         Attempts to scrape chat history.
         Strategy 1: Telethon (GetHistory) - Best for deep history. Often restricted.
@@ -385,6 +400,13 @@ class ScraperService:
             
         except asyncio.TimeoutError:
              logger.error("    ⏰ [Scraper] Telethon history fetch timed out (asyncio.TimeoutError).")
+        except FloodWaitError as e:
+            logger.warning(f"    🛑 [Scraper] FloodWait in history fetch: sleeping {e.seconds}s...")
+            await asyncio.sleep(e.seconds)
+        except AuthKeyUnregisteredError:
+            logger.error("    ❌ [Scraper] Session auth key revoked — session needs re-login.")
+        except UserDeactivatedBanError:
+            logger.error("    ❌ [Scraper] Account banned by Telegram.")
         except Exception as e:
             err_str = str(e)
             if "API access for bot users is restricted" in err_str or "ChatAdminRequired" in err_str:

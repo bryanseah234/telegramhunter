@@ -1,3 +1,8 @@
+"""
+Primary scanner services: ShodanService, FofaService, UrlScanService, GithubService, GitlabService.
+Also exports shared utilities: TOKEN_PATTERN, _is_valid_token, _perform_active_deep_scan.
+Complementary services (GithubGistService, GrepAppService, etc.) live in scanners_extension.py.
+"""
 import httpx
 import asyncio
 from typing import List, Dict, Any

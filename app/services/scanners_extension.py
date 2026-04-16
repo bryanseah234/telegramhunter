@@ -1,3 +1,8 @@
+"""
+Extension scanner services: GithubGistService, GrepAppService, PublicWwwService,
+BitbucketService, PastebinService, GoogleSearchService.
+Imports shared utilities (TOKEN_PATTERN, _is_valid_token, _perform_active_deep_scan) from scanners.py.
+"""
 import httpx
 import asyncio
 from typing import List, Dict, Any
