@@ -1,5 +1,9 @@
 name: telegramhunter
 
+# Port defaults — override in .env if you have conflicts:
+#   API_PORT=8011   (host port → container 8001)
+#   REDIS_PORT=6379 (host port → container 6379)
+
 services:
   redis:
     image: redis:7-alpine
@@ -7,9 +11,14 @@ services:
     restart: always
     init: true
     ports:
-      - "6579:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     logging:
       driver: "json-file"
       options:
@@ -22,15 +31,17 @@ services:
     restart: always
     init: true
     ports:
-      - "8011:8001"
+      - "${API_PORT:-8011}:8001"
     env_file: .env
     command: uvicorn app.api.main:app --host 0.0.0.0 --port 8001 --workers 2
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     environment:
-      - ENV=development  # Enable dev mode for manual scan triggers
+      - ENV=${ENV:-development}
     volumes:
-      - .:/app
+      - sessions:/app/sessions
+      - imports:/app/imports
     logging:
       driver: "json-file"
       options:
@@ -43,17 +54,18 @@ services:
     restart: always
     init: true
     env_file: .env
-    # Core worker handles fast tasks (discovery, broadcast, system)
     command: celery -A app.workers.celery_app worker -Q celery --loglevel=info --concurrency=4
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    volumes:
+      - sessions:/app/sessions
+      - imports:/app/imports
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    volumes:
-      - .:/app
 
   worker-scanners:
     build: .
@@ -61,17 +73,18 @@ services:
     restart: always
     init: true
     env_file: .env
-    # Dedicated worker for OSINT gathering (github, shodan, urlscan)
     command: celery -A app.workers.celery_app worker -Q scanners --loglevel=info --concurrency=2
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    volumes:
+      - sessions:/app/sessions
+      - imports:/app/imports
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    volumes:
-      - .:/app
 
   worker-scrape:
     build: .
@@ -79,17 +92,18 @@ services:
     restart: always
     init: true
     env_file: .env
-    # Dedicated worker for heavy chat history exfiltration
     command: celery -A app.workers.celery_app worker -Q scrape --loglevel=info --concurrency=2
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    volumes:
+      - sessions:/app/sessions
+      - imports:/app/imports
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    volumes:
-      - .:/app
 
   beat:
     build: .
@@ -97,20 +111,19 @@ services:
     restart: always
     init: true
     env_file: .env
-    # Running Celery Beat Scheduler
     command: celery -A app.workers.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
     depends_on:
-      - redis
-      - worker-core
-      - worker-scanners
-      - worker-scrape
+      redis:
+        condition: service_healthy
+      worker-core:
+        condition: service_started
+    volumes:
+      - sessions:/app/sessions
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    volumes:
-      - .:/app
 
   bot:
     build: .
@@ -118,19 +131,24 @@ services:
     restart: always
     init: true
     env_file: .env
-    # Running the Bot Listener
     command: python -m app.services.bot_listener
     depends_on:
-      - redis
-      - api
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    volumes:
+      - sessions:/app/sessions
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    volumes:
-      - .:/app
 
 volumes:
   redis_data:
     name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_redis_data
+  sessions:
+    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_sessions
+  imports:
+    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_imports

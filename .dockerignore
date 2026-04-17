@@ -1,0 +1,37 @@
+# Never send these to Docker build context
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Secrets & sessions
+.env
+*.session
+*.session-journal
+sessions/
+
+# Git
+.git/
+.github/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Kiro
+.kiro/

@@ -15,6 +15,7 @@ WORKDIR /app
 # Dependencies - minimal install
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    dos2unix \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -33,8 +34,8 @@ COPY . .
 RUN mkdir -p /app/imports/processed && \
     chown -R celery:celery /app
 
-# Make entrypoint executable
-RUN chmod +x /app/docker-entrypoint.sh
+# Make entrypoint executable and fix line endings (Windows CRLF → LF)
+RUN dos2unix /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 # Switch to non-root user
 USER celery
