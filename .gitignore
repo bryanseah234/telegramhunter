@@ -1,14 +1,53 @@
+# Python
 __pycache__/
+*.py[cod]
+*.pyo
 .venv/
 venv/
+env/
+.Python
+
+# Environment — never commit secrets
 .env
+
+# Telegram session files
 *.session
 *.session-journal
-captured_messages/
+sessions/
+
+# Celery
 celerybeat-schedule
+celerybeat-schedule.db
 celerybeat.pid
-.pytest_cache/
+
+# Logs
 *.log
 logs/
+
+# Imports
 imports/processed/
+import_tokens.csv
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Node (frontend)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Docker
+*.pid

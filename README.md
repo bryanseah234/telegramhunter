@@ -74,49 +74,67 @@ Run `database/init.sql` in your Supabase SQL Editor.
 
 ### 3. Run with Docker Compose
 
-This command starts the **API**, **Worker**, **Scheduler**, and **Redis** in the background.
+Use the launcher scripts — they automatically find free ports if the defaults (`API: 8011`, `Redis: 6379`) are taken.
 
+**Linux / Mac:**
 ```bash
-docker-compose up -d --build
+chmod +x start.sh
+./start.sh -d --build
+```
+
+**Windows:**
+```bat
+start --build
+```
+
+The launcher auto-detects port conflicts and picks the next free port — no manual config needed.
+
+You can also pin specific ports in `.env`:
+```env
+API_PORT=9000
+REDIS_PORT=6380
 ```
 
 ### 4. Verify Running Services
 
 ```bash
-docker-compose ps
+docker compose ps
 ```
 
-You should see 4 services running:
+You should see 7 services running:
 
 | Service | Description | Port |
 |---------|-------------|------|
-| `api` | FastAPI backend | 8000 |
-| `worker` | Celery worker (4 concurrent) | - |
+| `api` | FastAPI backend | 8011 (auto) |
+| `worker-core` | Celery core worker (4 concurrent) | - |
+| `worker-scanners` | Celery scanner worker (2 concurrent) | - |
+| `worker-scrape` | Celery scrape worker (2 concurrent) | - |
 | `beat` | Celery scheduler | - |
-| `redis` | Message broker | 6379 |
+| `bot` | Telegram bot listener | - |
+| `redis` | Message broker | 6379 (auto) |
 
 ### 5. Access the Application
 
-- **API Dashboard**: <http://localhost:8000/docs>
-- **Health Check**: <http://localhost:8000/health/detailed>
-- **Metrics**: <http://localhost:8000/health/metrics>
+- **API Dashboard**: <http://localhost:8011/docs>
+- **Health Check**: <http://localhost:8011/health/detailed>
+- **Metrics**: <http://localhost:8011/health/metrics>
 
-### 6. View Logs
+### 6. Common Commands
 
-```bash
-# Worker logs (shows scanning activity)
-docker-compose logs -f worker
-
-# All services
-docker-compose logs -f
-
-# Stop everything
-docker-compose down
-```
+| Command | Linux/Mac | Windows |
+|---------|-----------|---------|
+| Start | `./start.sh` | `start` |
+| Start + rebuild | `./start.sh --build` | `start --build` |
+| Stop | `./start.sh stop` | `start stop` |
+| Restart | `./start.sh restart` | `start restart` |
+| View logs | `./start.sh logs` | `start logs` |
+| Status | `./start.sh status` | `start status` |
+| Pull + rebuild | `./start.sh update` | `start update` |
+| Wipe & reset | `./start.sh reset` | `start reset` |
 
 ## 🔑 Free OSINT API Key Setup Guide
 
-You can significantly increase your hit rate by adding free API keys from various intelligence search engines to your `.env` file. These engines crawl the web differently from GitHub and often catch tokens missed by others.
+You can significantly increase your hit rate by adding free API keys from various intelligence search engines to your `.env` file.
 
 **1. Serper.dev (Replaces Google Search)**
 *Highly recommended for automated web search and paste site dorking.*
@@ -124,145 +142,42 @@ You can significantly increase your hit rate by adding free API keys from variou
 - Go to [Serper.dev](https://serper.dev/) and sign up for a free account.
 - You get **2,500 free queries** on signup.
 - Copy your API Key from the dashboard and add it to `.env` as `SERPER_API_KEY`.
-- *(Our scanner uses this to automatically sweep Pastebin, Hastebin, and other paste clones every 12 hours).*
 
 **2. GitLab Search API**
 *Finds tokens leaked in raw GitLab repo blobs.*
 
 - Log into GitLab and go to **Edit profile > Access Tokens** (`https://gitlab.com/-/profile/personal_access_tokens`).
-- Click "Add New Token".
-- Tick the `read_api` box and click Create. Copy the token (`GITLAB_TOKEN`).
+- Click "Add New Token", tick `read_api`, copy the token (`GITLAB_TOKEN`).
 
 **3. PublicWWW**
 *Source code search engine that finds tokens embedded in raw HTML/JS.*
 
-- Go to [PublicWWW Registration](https://publicwww.com/register.html).
-- Sign up for a free account.
-- Your API key will be right on your Dashboard (`PUBLICWWW_KEY`).
+- Go to [PublicWWW Registration](https://publicwww.com/register.html) and sign up.
+- Your API key will be on your Dashboard (`PUBLICWWW_KEY`).
 
-**Note:** The `grep.app` scanner requires **no API keys** and runs completely free out of the box!
+**Note:** The `grep.app` scanner requires **no API keys** and runs completely free.
 
-## 🔄 Auto-Update System
-
-Telegram Hunter includes an **automatic update system** that checks for new releases and updates your deployment automatically. Once configured, it's fully self-healing!
-
-### 🚀 One-Time Setup (5 minutes)
-
-After cloning the repo, run these commands **once** to enable automatic updates:
-
-**Linux/Mac:**
+## 🔄 Updates
 
 ```bash
-# 1. Make the update script executable
-chmod +x scripts/auto-update.sh
+# Linux/Mac
+./start.sh update
 
-# 2. Test it works
-./scripts/auto-update.sh --check-only
-
-# 3. Add to crontab (checks every 30 minutes, only updates if changes detected)
-(crontab -l 2>/dev/null; echo "*/30 * * * * cd $(pwd) && ./scripts/auto-update.sh >> logs/auto-update.log 2>&1") | crontab -
-
-# Verify cron was added
-crontab -l
+# Windows
+start update
 ```
 
-**Windows (Task Scheduler via WSL):**
+This pulls the latest code, rebuilds images, and restarts the stack. Your data in Supabase is untouched.
 
+To schedule automatic updates via cron (Linux/Mac):
 ```bash
-# In WSL, add to crontab same as Linux
-chmod +x scripts/auto-update.sh
-(crontab -l 2>/dev/null; echo "0 */6 * * * cd $(pwd) && ./scripts/auto-update.sh >> logs/auto-update.log 2>&1") | crontab -
+# Check for updates every 6 hours
+(crontab -l 2>/dev/null; echo "0 */6 * * * cd $(pwd) && ./start.sh update >> logs/update.log 2>&1") | crontab -
 ```
-
-> **That's it!** After this one-time setup, your deployment will automatically:
->
-> - Check for updates every 6 hours
-> - Pull new code when available
-> - Rebuild and restart Docker containers
-> - Alert you if new `.env` variables are needed
-> - Log all activity to `logs/auto-update.log`
-
-### ✅ What Happens Automatically
-
-| Event | Action |
-|-------|--------|
-| New release pushed | Auto-detected within 6 hours |
-| Code changes | Pulled and containers rebuilt |
-| New dependencies | Installed during Docker rebuild |
-| New `.env` variables | Logged as warning (manual action needed) |
-| Containers healthy | Verified after restart |
-
-### 🛠 Manual Update Commands
-
-You can also trigger updates manually:
-
-```bash
-# Check if update is available (no changes made)
-./scripts/auto-update.sh --check-only
-
-# Run update now
-./scripts/auto-update.sh
-
-# Force rebuild even if already up-to-date
-./scripts/auto-update.sh --force
-```
-
-### 📋 View Update History
-
-```bash
-# View recent update logs
-tail -100 logs/auto-update.log
-
-# Check current version
-git log -1 --oneline
-```
-
-### ⚙️ Customize Update Frequency
-
-Edit your crontab to change the schedule:
-
-```bash
-crontab -e
-```
-
-Common schedules:
-
-- `0 */6 * * *` - Every 6 hours (default)
-- `0 */12 * * *` - Every 12 hours
-- `0 4 * * *` - Once daily at 4 AM
-- `0 4 * * 0` - Once weekly on Sunday at 4 AM
-
-### 🔧 Traditional Manual Update
-
-If you prefer not to use auto-updates:
-
-```bash
-cd telegramhunter
-
-# 1. Pull latest changes
-git pull origin main
-
-# 2. Rebuild and restart containers
-docker compose up -d --build
-
-# 3. Verify all services are running
-docker compose ps
-```
-
-### Check for .env Changes
-
-After updating, check if `.env.example` has new variables:
-
-```bash
-# Compare your .env with the example
-diff .env .env.example
-```
-
-If new variables were added, copy them to your `.env` file.
 
 ### Automatic Token Import
 
-On every container startup, the system automatically imports tokens from `import_tokens.csv` (if the file exists). This is useful for:
+On every container startup, the system automatically imports tokens from CSV files placed in the `imports/` directory. This is useful for:
 
 1. **Manual FOFA scraping** via Chrome extension → export to CSV
 2. **Bulk token imports** from other sources
