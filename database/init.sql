@@ -76,3 +76,20 @@ CREATE TABLE IF NOT EXISTS telegram_accounts (
 
 CREATE INDEX IF NOT EXISTS idx_accounts_phone  ON telegram_accounts(phone);
 CREATE INDEX IF NOT EXISTS idx_accounts_status ON telegram_accounts(status);
+
+
+-- ============================================================
+-- VIEW: discovered_credentials_public
+-- Safe projection for anon/frontend queries. Excludes Bot Token, Hash, Bot ID/Username, Chat ID/Name/Type.
+-- ============================================================
+CREATE OR REPLACE VIEW discovered_credentials_public AS
+SELECT
+    id,
+    created_at,
+    source,
+    status,
+    meta
+FROM discovered_credentials;
+
+-- Grant SELECT on view to anon
+GRANT SELECT ON discovered_credentials_public TO anon;

