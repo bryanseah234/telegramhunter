@@ -31,20 +31,15 @@ DROP POLICY IF EXISTS "Allow Backend Delete" ON exfiltrated_messages;
 -- STEP 2: DISCOVERED_CREDENTIALS TABLE
 -- ============================================
 -- This table contains sensitive bot tokens
--- Allow SELECT (for joins from exfiltrated_messages frontend query)
--- Note: Frontend should only query safe fields (id, created_at, source, meta)
+-- RLS UPDATE for T008: Disable direct anon SELECT to secure sensitive columns
+-- Use discovered_credentials_public VIEW for frontend reads (id, created_at, source, status, meta only)
 -- Backend uses service role key which bypasses RLS anyway
 
 -- Enable RLS
 ALTER TABLE discovered_credentials ENABLE ROW LEVEL SECURITY;
 
--- Policy: Allow SELECT for anon (needed for frontend joins)
--- IMPORTANT: Frontend queries should NOT select bot_token column!
-CREATE POLICY "Allow Public Reads"
-ON discovered_credentials
-FOR SELECT
-TO anon
-USING (true);
+-- Policy: DENY SELECT for anon (use discovered_credentials_public instead)
+DROP POLICY IF EXISTS "Allow Public Reads" ON discovered_credentials;
 
 -- Policy: Allow INSERT for anon (backend can save new credentials)
 CREATE POLICY "Allow Backend Insert"
@@ -128,11 +123,13 @@ ORDER BY tablename, policyname;
 -- ============================================
 -- After running these policies:
 -- ✅ Frontend (NEXT_PUBLIC_SUPABASE_KEY) can READ exfiltrated_messages
--- ❌ Frontend (NEXT_PUBLIC_SUPABASE_KEY) CANNOT SELECT discovered_credentials
--- ✅ Backend (SUPABASE_KEY server-side) can INSERT/UPDATE/DELETE both tables
--- 
--- SECURITY MODEL:
--- - Frontend anon key: In browser, can only read messages
+-- ✅ Frontend (NEXT_PUBLIC_SUPABASE_KEY) can READ discovered_credentials_public VIEW (safe columns only)
+-- ❌ Frontend (NEXT_PUBLIC_SUPABASE_KEY) CANNOT SELECT discovered_credentials TABLE directly
+-- ✅ Backend (SUPABASE_KEY server-side) can INSERT/UPDATE/DELETE both tables (bypasses RLS)
+--
+-- SECURITY MODEL (T008):
+-- - Frontend anon key: In browser, can only read messages and the safe credential view
 -- - Backend anon key: Server-side only (.env), can write to both tables
+-- - discovered_credentials_public VIEW exposes only: id, created_at, source, status, meta
 -- - The backend anon key is never exposed to the browser
 -- - Both use 'anon' role but in different contexts (client vs server)

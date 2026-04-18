@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     # Security
     ENCRYPTION_KEY: str  # Fernet Key
+    MONITOR_API_KEY: Optional[str] = None  # Optional API key for monitor/health endpoints (T009)
 
     # Telegram Monitoring (The Bot(s) WE control - supports multi-bot rotation)
     # Comma-separated bot tokens, e.g. "token1,token2,token3"
