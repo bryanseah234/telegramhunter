@@ -1,394 +1,420 @@
 # Telegram Hunter
 
-**Telegram Hunter** is an automated, self-hosted OSINT system for discovering, validating, and monitoring exposed Telegram bot tokens. Built as a production-ready microservices architecture using **FastAPI**, **Celery**, **Redis**, and **Supabase**.
-
-## 🚀 Features
-
-### Core Functionality
-
-- **Multi-Source Scanning**: GitHub, Shodan, URLScan, FOFA with country filtering
-- **Token Enrichment**: Auto-discovers chats linked to each token
-- **Deep Scraping**: Logs in as the bot (via Telethon) and scrapes chat history
-- **Real-time Alerts**: Broadcasts findings to your private Telegram group
-- **Encryption**: All tokens encrypted at rest (Fernet)
-- **Frontend Dashboard**: Telegram-style UI to browse discovered data
-
-### Production-Ready Enhancements ✨
-
-- **Structured Logging**: Context-aware logging with JSON format for production
-- **Retry Logic**: Exponential backoff for API calls and database operations
-- **Circuit Breakers**: Automatic protection against cascading failures
-- **Metrics Collection**: Track performance, success rates, execution times
-- **Health Checks**: `/health/` endpoints for monitoring and observability
-- **Audit Logging**: Security event tracking for compliance
-- **Code Quality**: Automated linting (Ruff), type checking (MyPy), pre-commit hooks
-
-## 🛠 Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| API | FastAPI |
-| Workers | Celery + Redis |
-| Database | Supabase (PostgreSQL) |
-| Scraping | Telethon (MTProto) |
-| Frontend | Next.js + Tailwind CSS |
-| Monitoring | Health checks, Metrics, Circuit breakers |
-| Quality | Ruff, MyPy, Pytest, Pre-commit |
-| Deployment | Docker Compose |
-
-## 📋 Prerequisites
-
-1. **Docker & Docker Compose** installed
-2. **Supabase Project** (run `database/init.sql` in SQL Editor)
-3. **Telegram API Keys** from [my.telegram.org](https://my.telegram.org)
-4. **Monitoring Bot Token** from [@BotFather](https://t.me/BotFather)
-5. **API Keys** (optional): Shodan, URLScan, GitHub, FOFA
-
-## 🐳 Docker Deployment
-
-The recommended way to run Telegram Hunter is using Docker Compose. This works on **Windows (WSL2)**, **Mac**, and **Linux**.
-
-### Prerequisites
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
-- **Windows Users**: Ensure [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) is enabled and integrated with Docker Desktop
-
-### 1. Clone & Configure
-
-```bash
-git clone https://github.com/bryanseah234/telegramhunter.git
-cd telegramhunter
-cp .env.example .env
-# Edit .env and add your keys (Supabase, Telegram, etc.)
-```
-
-**Generate Encryption Key:**
-
-```bash
-python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-### 2. Initialize Database
-
-Run `database/init.sql` in your Supabase SQL Editor.
-
-### 3. Run with Docker Compose
-
-Use the launcher scripts — they automatically find free ports if the defaults (`API: 8011`, `Redis: 6379`) are taken.
-
-**Linux / Mac:**
-```bash
-chmod +x start.sh
-./start.sh -d --build
-```
-
-**Windows:**
-```bat
-start --build
-```
-
-The launcher auto-detects port conflicts and picks the next free port — no manual config needed.
-
-You can also pin specific ports in `.env`:
-```env
-API_PORT=9000
-REDIS_PORT=6380
-```
-
-### 4. Verify Running Services
-
-```bash
-docker compose ps
-```
-
-You should see 7 services running:
-
-| Service | Description | Port |
-|---------|-------------|------|
-| `api` | FastAPI backend | 8011 (auto) |
-| `worker-core` | Celery core worker (4 concurrent) | - |
-| `worker-scanners` | Celery scanner worker (2 concurrent) | - |
-| `worker-scrape` | Celery scrape worker (2 concurrent) | - |
-| `beat` | Celery scheduler | - |
-| `bot` | Telegram bot listener | - |
-| `redis` | Message broker | 6379 (auto) |
-
-### 5. Access the Application
-
-- **API Dashboard**: <http://localhost:8011/docs>
-- **Health Check**: <http://localhost:8011/health/detailed>
-- **Metrics**: <http://localhost:8011/health/metrics>
-
-### 6. Common Commands
-
-| Command | Linux/Mac | Windows |
-|---------|-----------|---------|
-| Start | `./start.sh` | `start` |
-| Start + rebuild | `./start.sh --build` | `start --build` |
-| Stop | `./start.sh stop` | `start stop` |
-| Restart | `./start.sh restart` | `start restart` |
-| View logs | `./start.sh logs` | `start logs` |
-| Status | `./start.sh status` | `start status` |
-| Pull + rebuild | `./start.sh update` | `start update` |
-| Wipe & reset | `./start.sh reset` | `start reset` |
-
-## 🔑 Free OSINT API Key Setup Guide
-
-You can significantly increase your hit rate by adding free API keys from various intelligence search engines to your `.env` file.
-
-**1. Serper.dev (Replaces Google Search)**
-*Highly recommended for automated web search and paste site dorking.*
-
-- Go to [Serper.dev](https://serper.dev/) and sign up for a free account.
-- You get **2,500 free queries** on signup.
-- Copy your API Key from the dashboard and add it to `.env` as `SERPER_API_KEY`.
-
-**2. GitLab Search API**
-*Finds tokens leaked in raw GitLab repo blobs.*
-
-- Log into GitLab and go to **Edit profile > Access Tokens** (`https://gitlab.com/-/profile/personal_access_tokens`).
-- Click "Add New Token", tick `read_api`, copy the token (`GITLAB_TOKEN`).
-
-**3. PublicWWW**
-*Source code search engine that finds tokens embedded in raw HTML/JS.*
-
-- Go to [PublicWWW Registration](https://publicwww.com/register.html) and sign up.
-- Your API key will be on your Dashboard (`PUBLICWWW_KEY`).
-
-**Note:** The `grep.app` scanner requires **no API keys** and runs completely free.
-
-## 🔄 Updates
-
-```bash
-# Linux/Mac
-./start.sh update
-
-# Windows
-start update
-```
-
-This pulls the latest code, rebuilds images, and restarts the stack. Your data in Supabase is untouched.
-
-To schedule automatic updates via cron (Linux/Mac):
-```bash
-# Check for updates every 6 hours
-(crontab -l 2>/dev/null; echo "0 */6 * * * cd $(pwd) && ./start.sh update >> logs/update.log 2>&1") | crontab -
-```
-
-### Automatic Token Import
-
-On every container startup, the system automatically imports tokens from CSV files placed in the `imports/` directory. This is useful for:
-
-1. **Manual FOFA scraping** via Chrome extension → export to CSV
-2. **Bulk token imports** from other sources
-
-**To use:**
-
-1. Add tokens to `import_tokens.csv` in the project root:
-
-   ```csv
-   token,chat_id
-   123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,-1001234567890
-   987654321:BBxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,
-   ```
-
-   > Note: `chat_id` is optional. If omitted, the system will try to discover it automatically.
-
-2. Restart containers:
-
-   ```bash
-   docker-compose up -d --build
-   ```
-
-3. Check logs to verify import:
-
-   ```bash
-   docker-compose logs worker | head -50
-   ```
-
-## ⚙️ Scan Schedule (Aggressive Mode)
-
-The system runs scans automatically on this schedule (UTC):
-
-| Task | Frequency | Schedule |
-|------|-----------|----------|
-| **GitHub Scan** | Every 4 hours | 00:00, 04:00, 08:00... |
-| **Shodan Scan** | Every 4 hours | 00:20, 04:20, 08:20... |
-| **URLScan Scan** | Every 4 hours | 00:40, 04:40, 08:40... |
-| **FOFA Scan** | Every 4 hours | 01:00, 05:00, 09:00... |
-| **Re-scrape Active** | Every 1 hour | Every hour at :00 |
-| **Broadcast** | Every 1 hour | Every hour at :30 |
-| **Heartbeat** | Every 30 min | Every :00 and :30 |
-
-### Manual Scan Triggers
-
-```bash
-# Trigger GitHub scan
-curl http://localhost:8000/scan/trigger-dev/github
-
-# Trigger Shodan scan with country filter
-curl "http://localhost:8000/scan/trigger-dev/shodan?country_code=US"
-
-# Trigger with random country from target list
-curl "http://localhost:8000/scan/trigger-dev/shodan?country_code=RANDOM"
-
-# Trigger FOFA scan
-curl http://localhost:8000/scan/trigger-dev/fofa
-```
-
-## 🔒 Security
-
-- **Encrypted Storage**: All tokens encrypted with Fernet
-- **RLS Policies**: Row-level security on Supabase tables
-- **Audit Logging**: Tracks token decryption, credential access
-- **Config Validation**: Startup checks for invalid configuration
-
-## 🖥 Manual Operations
-
-### Import Tokens from CSV
-
-```bash
-# Format: token,chat_id (one per line)
-python tests/manual_scrape.py -i import_tokens.csv
-```
-
-### Check Stats
-
-```bash
-curl http://localhost:8000/monitor/stats
-```
-
-## 📁 Project Structure
-
-```
-telegramhunter/
-├── app/
-│   ├── api/               # API routes + health endpoints
-│   ├── core/              # Config, database, logging, retry, metrics
-│   ├── services/          # Scanner, scraper, broadcaster
-│   ├── utils/             # Helper utilities
-│   └── workers/           # Celery tasks
-├── frontend/              # Next.js dashboard
-├── database/              # SQL schemas
-├── scripts/               # Validation, setup, helpers
-├── tests/
-│   ├── unit/              # Unit tests
-│   └── integration/       # Integration tests
-├── chrome_extension/      # Browser extension for token collection
-├── docker-compose.yml
-├── pyproject.toml         # Ruff, MyPy, Pytest config
-├── .pre-commit-config.yaml
-└── README.md
-```
-
-## ⚙️ Configuration
-
-### Target Countries
-
-Configure in `app/core/config.py`:
-
-```python
-TARGET_COUNTRIES = ["RU", "IR", "IN", "ID", "BR", "UA", "VN", "US", "NG", "EG", "KZ", "CN", "DE"]
-```
-
-### Worker Settings
-
-Current aggressive configuration in `app/workers/celery_app.py`:
-
-| Setting | Value |
-|---------|-------|
-| Worker Concurrency | 4 |
-| Memory per Worker | 800MB |
-| Task Timeout | 20 minutes |
-| Broker Connections | 10 |
-
-## 🧪 Development
-
-### Setup Development Environment
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-
-# Run validation
-python scripts/validate_startup.py
-
-# Setup pre-commit hooks
-pip install pre-commit
-pre-commit install
-```
-
-### Code Quality
-
-```bash
-# Lint and format
-ruff check app/ --fix
-ruff format app/
-
-# Type checking
-mypy app/
-
-# Run tests
-pytest tests/ -v
-
-# Coverage
-pytest tests/ --cov=app --cov-report=html
-
-# Pre-commit (runs automatically on commit)
-pre-commit run --all-files
-```
-
-### Testing
-
-```bash
-# Unit tests only
-pytest tests/unit/ -v
-
-# Integration tests
-pytest tests/integration/ -v -m integration
-
-# Specific test
-pytest tests/unit/test_helpers.py::TestTokenValidation -v
-```
-
-## 📊 Monitoring
-
-### Metrics Tracked
-
-- Task execution times (min, max, avg)
-- Success/failure rates
-- External API response times
-- Circuit breaker states
-
-### Circuit Breakers
-
-Automatically protect against:
-
-- Shodan API failures
-- URLScan API failures
-- GitHub API failures
-- FOFA API failures
-
-When a service fails repeatedly, the circuit breaker opens and prevents further calls until recovery timeout.
-
-## 🛡 Disclaimer
-
-This tool is for **educational and defensive research purposes only**. Only use on systems you own or have explicit permission to test.
-
-## 📝 License
-
-MIT License - See LICENSE file for details
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Install pre-commit hooks: `pre-commit install`
-4. Make your changes
-5. Run tests: `pytest tests/ -v`
-6. Submit a pull request
+A self-hosted OSINT pipeline that discovers exposed Telegram bot tokens across public data sources, validates them, harvests accessible chat history, and broadcasts findings to a private Telegram supergroup. Delivered as a Docker Compose stack.
+
+- **Runtime**: Python 3.11, FastAPI, Celery, Redis, Telethon
+- **Database**: Supabase (managed Postgres) with Row Level Security
+- **Frontend** (optional): Next.js 16 + React 19
+- **Deployment**: Docker Compose (7 services)
 
 ---
 
-**Built with ❤️ for security researchers and OSINT enthusiasts**
+## Prerequisites
+
+| Tool | Minimum Version | Notes |
+| --- | --- | --- |
+| Docker Engine | 24.x | Tested on 29.x |
+| Docker Compose | v2 (bundled) | `docker compose` (not `docker-compose`) |
+| Python | 3.11+ | Local dev / tests only |
+| Node.js | 18+ | Frontend only |
+| Supabase project | — | Free tier sufficient |
+| Telegram account | — | Required for `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` |
+
+---
+
+## Environment Configuration
+
+Copy `.env.template` to `.env` and fill in every value before starting the stack.
+
+```bash
+cp .env.template .env
+```
+
+### Required Variables
+
+| Variable | Type | Description |
+| --- | --- | --- |
+| `SUPABASE_URL` | URL | Supabase project URL (`https://<ref>.supabase.co`) |
+| `SUPABASE_KEY` | string | Supabase anon (public) key — used by the frontend |
+| `SUPABASE_SERVICE_ROLE_KEY` | string | Supabase service-role key — backend only, never expose to clients |
+| `REDIS_URL` | URL | Redis connection string (`redis://redis:6379/0` for Docker) |
+| `ENCRYPTION_KEY` | 44 chars | Fernet key — generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `MONITOR_BOT_TOKEN` | string | Comma-separated Telegram bot tokens used to post findings (e.g. `123:AAA,456:BBB`) |
+| `MONITOR_GROUP_ID` | integer | Telegram supergroup chat ID where findings are posted; bot(s) must be admin |
+| `TELEGRAM_API_ID` | integer | From [my.telegram.org](https://my.telegram.org) |
+| `TELEGRAM_API_HASH` | string | 32-character hex from [my.telegram.org](https://my.telegram.org) |
+
+### Optional — Operations
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PROJECT_NAME` | `Telegram Hunter` | FastAPI application title |
+| `ENV` | `development` | Set to `production` to enable hardening (disables `/docs`, `/scan/trigger`) |
+| `DEBUG` | `True` | Log verbosity; set `False` in production |
+| `MONITOR_API_KEY` | *(unset)* | If set, all `/monitor/*` and `/health/detailed` endpoints require `X-Monitor-Key` header |
+| `WHITELISTED_BOT_IDS` | `""` | Comma-separated bot usernames or IDs kept in the monitor group |
+| `ANONYMOUS_ADMIN_ID` | `1087968824` | Telegram anonymous group admin bot ID |
+| `USER_SESSION_STRING` | *(unset)* | Telethon session string for user-agent invite flow |
+| `BROADCAST_INTERVAL_MINUTES` | `60` | How often pending messages are broadcast |
+| `RESCRAPE_INTERVAL_HOURS` | `1` | How often active chats are re-scraped |
+| `SCAN_INTERVAL_HOURS` | `4` | Primary scanner cadence |
+| `AUDIT_INTERVAL_HOURS` | `2` | Topic-integrity audit cadence |
+| `API_PORT` | `8011` | Host-side port for the API service |
+| `REDIS_PORT` | `6379` | Host-side port for Redis |
+| `COMPOSE_PROJECT_NAME` | `telegramhunter` | Docker Compose namespace |
+
+### Optional — Scanner API Keys
+
+All scanner keys degrade gracefully when absent — the corresponding scanner is silently skipped.
+
+| Variable | Scanner |
+| --- | --- |
+| `SHODAN_KEY` | Shodan |
+| `FOFA_EMAIL` + `FOFA_KEY` | FOFA |
+| `URLSCAN_KEY` | URLScan.io |
+| `GITHUB_TOKEN` | GitHub Code Search + Gists |
+| `GITLAB_TOKEN` | GitLab |
+| `BITBUCKET_USER` + `BITBUCKET_APP_PASSWORD` | Bitbucket |
+| `PUBLICWWW_KEY` | PublicWWW |
+| `SERPER_API_KEY` | Serper (Google SERPs) |
+| `CENSYS_ID` + `CENSYS_SECRET` | Censys |
+| `HYBRID_ANALYSIS_KEY` | Hybrid Analysis |
+| `GOOGLE_SEARCH_KEY` + `GOOGLE_CSE_ID` | Google Custom Search |
+
+---
+
+## Database Setup
+
+Apply the schema to your Supabase project:
+
+1. Open the Supabase SQL editor for your project.
+2. Run `database/init.sql` — creates all tables, indexes, and the `discovered_credentials_public` view.
+3. Run `database/rls_policies.sql` — applies Row Level Security policies.
+
+Both files are idempotent and safe to re-run.
+
+---
+
+## Installation & Setup
+
+### 1. Clone the repository
+
+```bash
+git clone <repository-url>
+cd telegramhunter
+```
+
+### 2. Configure environment
+
+```bash
+cp .env.template .env
+# Edit .env — fill in all required variables
+```
+
+### 3. Generate an encryption key
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Paste the output as ENCRYPTION_KEY in .env
+```
+
+### 4. Apply database schema
+
+See [Database Setup](#database-setup) above.
+
+### 5. Start the stack
+
+```bash
+docker compose up -d --build
+```
+
+This starts 7 services: `redis`, `api`, `worker-core`, `worker-scanners`, `worker-scrape`, `beat`, `bot`.
+
+### 6. Verify startup
+
+```bash
+curl http://localhost:8011/
+curl http://localhost:8011/health/
+```
+
+Both should return HTTP 200.
+
+---
+
+## Interactive Launcher (Alternative)
+
+**Linux / macOS:**
+
+```bash
+./start.sh
+```
+
+**Windows:**
+
+```bat
+start.bat
+```
+
+The launcher auto-selects free ports and provides a menu for common operations.
+
+---
+
+## Usage
+
+### Monitor API
+
+All endpoints return JSON.
+
+**Liveness check:**
+
+```bash
+curl http://localhost:8011/health/
+```
+
+**System statistics** (requires `X-Monitor-Key` if `MONITOR_API_KEY` is set):
+
+```bash
+curl -H "X-Monitor-Key: <your-key>" http://localhost:8011/monitor/stats
+```
+
+**Recent credentials:**
+
+```bash
+curl -H "X-Monitor-Key: <your-key>" "http://localhost:8011/monitor/credentials?limit=10"
+```
+
+**Recent exfiltrated messages:**
+
+```bash
+curl -H "X-Monitor-Key: <your-key>" "http://localhost:8011/monitor/messages?limit=20"
+```
+
+**Circuit breaker status:**
+
+```bash
+curl -H "X-Monitor-Key: <your-key>" http://localhost:8011/health/circuit-breakers
+```
+
+**Force-reset a circuit breaker:**
+
+```bash
+curl -X POST -H "X-Monitor-Key: <your-key>" http://localhost:8011/health/circuit-breakers/shodan/reset
+```
+
+**Manually trigger a scanner** (development only; returns 403 in production):
+
+```bash
+curl -X POST http://localhost:8011/scan/trigger \
+  -H "Content-Type: application/json" \
+  -d '{"source": "shodan", "query": "telegram bot"}'
+```
+
+Valid `source` values: `shodan`, `fofa`, `github`, `censys`, `hybrid`.
+
+### Telegram Admin Commands
+
+Send these commands in the monitor supergroup from a whitelisted admin account:
+
+| Command | Effect |
+| --- | --- |
+| `/status` | System health and pending counts |
+| `/pause` | Pause scanners and broadcaster |
+| `/resume` | Resume all operations |
+| `/bots` | Show bot pool status and lock state |
+| `/starthunter` | Start interactive Telegram account login |
+| `/help` | Full command reference |
+
+### Docker Compose Operations
+
+```bash
+# Start all services (build if needed)
+docker compose up -d --build
+
+# Tail logs — all services
+docker compose logs -f
+
+# Tail logs — specific service
+docker compose logs -f worker-scrape
+
+# Stop services (preserve volumes)
+docker compose down
+
+# Stop and wipe all volumes (full reset — Redis, sessions)
+docker compose down -v
+
+# Rebuild after code changes
+docker compose build && docker compose up -d
+```
+
+---
+
+## Testing
+
+### Install test dependencies
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+### Run the test suite
+
+```bash
+# All tests (68 total)
+pytest
+
+# Unit tests only
+pytest tests/unit/
+
+# Filter by keyword
+pytest -k encryption
+
+# With coverage report
+pytest --cov=app --cov-report=html
+```
+
+### Integration tests (real database writes)
+
+Integration tests that write to Supabase are gated behind an environment variable:
+
+```bash
+ALLOW_SUPABASE_WRITE=1 pytest tests/test_supabase_rw.py
+```
+
+### Test markers
+
+```text
+@pytest.mark.unit         Unit tests (no external dependencies)
+@pytest.mark.integration  Integration tests (may require live services)
+@pytest.mark.slow         Long-running tests
+```
+
+---
+
+## Development
+
+### Code quality tools
+
+```bash
+# Lint and auto-fix
+ruff check app/ --fix
+
+# Format
+ruff format app/
+
+# Type check
+mypy app/
+```
+
+### Pre-commit hooks
+
+```bash
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files
+```
+
+### Run the API locally (no Docker)
+
+```bash
+export $(grep -v '^#' .env | xargs)
+uvicorn app.api.main:app --reload --port 8001
+```
+
+### Run the frontend locally
+
+```bash
+cd frontend
+npm install
+npm run dev        # Development server
+npm run build      # Production build
+```
+
+---
+
+## Project Structure
+
+```text
+telegramhunter/
+├── app/
+│   ├── api/
+│   │   ├── main.py                  FastAPI app, lifespan hooks
+│   │   └── routers/
+│   │       ├── health.py            /health/*, /circuit-breakers
+│   │       ├── monitor.py           /monitor/*
+│   │       └── scan.py              /scan/trigger (dev only)
+│   ├── core/
+│   │   ├── config.py                Pydantic Settings, env validation
+│   │   ├── database.py              Supabase client singleton
+│   │   ├── security.py              Fernet encrypt/decrypt
+│   │   ├── redis_srv.py             Locks, cooldowns, counters
+│   │   ├── retry.py                 @retry decorator (sync/async)
+│   │   ├── circuit_breaker.py       Per-service circuit breakers
+│   │   ├── metrics.py               In-memory metrics collector
+│   │   └── audit.py                 Security audit event logger
+│   ├── schemas/
+│   │   └── models.py                Pydantic request/response models
+│   ├── services/
+│   │   ├── scanners.py              6 primary scanner classes
+│   │   ├── scanners_extension.py    6 additional scanner classes
+│   │   ├── scraper_srv.py           Telethon chat history scraper
+│   │   ├── broadcaster_srv.py       Telegram message sender, topic manager
+│   │   ├── bot_manager_srv.py       Telethon client pool
+│   │   ├── bot_listener.py          Admin command handler
+│   │   └── user_agent_srv.py        User session manager
+│   ├── utils/
+│   │   └── helpers.py               Token/chat ID validation & extraction
+│   └── workers/
+│       ├── celery_app.py            Celery config, beat schedule (20 tasks)
+│       └── tasks/
+│           ├── flow_tasks.py        enrich, exfiltrate, broadcast, rescrape
+│           ├── scanner_tasks.py     Per-scanner task runners
+│           └── audit_tasks.py       audit_*, self_heal, enforce_whitelist
+├── database/
+│   ├── init.sql                     Schema DDL (idempotent)
+│   └── rls_policies.sql             Row Level Security policies
+├── frontend/                        Next.js 16 + React 19 (optional)
+├── tests/
+│   ├── conftest.py                  Fixtures, env injection
+│   ├── unit/                        Isolated unit tests
+│   └── integration/                 Integration tests
+├── scripts/
+│   ├── validate_deployment.py       Post-deploy health checks
+│   └── validate_startup.py          Pre-start environment checks
+├── .env.template                    Environment variable template
+├── docker-compose.yml               7-service stack definition
+├── Dockerfile                       Python 3.11-slim build spec
+├── docker-entrypoint.sh             Container entrypoint
+├── pyproject.toml                   Ruff, MyPy, Pytest configuration
+├── requirements.txt                 Production dependencies
+└── requirements-dev.txt             Test and lint dependencies
+```
+
+---
+
+## Architecture Overview
+
+The pipeline operates across five sequential phases, each handled by dedicated Celery workers:
+
+1. **Discovery** — 11 scanners query public sources on staggered schedules; extracted token strings are format-validated and tested against the Telegram Bot API.
+2. **Persistence** — Live tokens are Fernet-encrypted and inserted into `discovered_credentials` with status `pending`.
+3. **Enrichment** — A Telethon client enumerates all chats accessible to the bot; a forum topic is created in the monitor supergroup; status advances to `active`.
+4. **Exfiltration** — Chat history is scraped using up to four fallback strategies and upserted into `exfiltrated_messages`.
+5. **Broadcasting** — Pending messages are claimed atomically and posted to their credential's forum topic at a rate-limited 2 s/message cadence.
+
+Self-healing tasks run hourly and every 6 hours to reconcile database state against live Telegram state, re-create missing topics, and retry failed enrichments.
+
+---
+
+## Security Notes
+
+- **`SUPABASE_SERVICE_ROLE_KEY`** bypasses all Row Level Security. Never expose it to browser clients or commit it to version control.
+- **`ENCRYPTION_KEY`** is the sole protection for stored bot tokens. Losing it makes all stored credentials unrecoverable.
+- **`MONITOR_API_KEY`** should be set in production to protect monitoring endpoints.
+- Set `ENV=production` in production deployments to disable OpenAPI docs and the manual scan endpoint.
+- The stack does not terminate TLS. Place it behind a reverse proxy (nginx, Caddy) for external exposure.
+
+---
+
+## License
+
+See [LICENSE](LICENSE).
