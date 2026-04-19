@@ -112,6 +112,11 @@ class MetricsCollector:
         """Record failed operation"""
         self._metrics[metric_name].record_failure(duration)
         logger.warning(f"Metric [{metric_name}] failure after {duration:.2f}s")
+
+    def inc(self, metric_name: str, amount: int = 1):
+        """Increment a counter-style metric (no duration)."""
+        self._metrics[metric_name].count += amount
+        logger.debug(f"Metric [{metric_name}] inc by {amount}")
     
     def get_metric(self, metric_name: str) -> Optional[MetricData]:
         """Get specific metric data"""
