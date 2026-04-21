@@ -228,10 +228,8 @@ class ScraperService:
                     if data.get("ok"):
                         bot_username = data["result"].get("username", "unknown")
                         bot_id = str(data["result"].get("id", "0"))
-            except:
-                pass
-
-            # 2. Create Topic (using Hunter Bot) with correct naming convention
+            except Exception:
+                pass  # getMe failed — use defaults for topic name
             target_thread_id = 0
             if settings.bot_tokens:
                 topic_name = f"@{bot_username} / {bot_id}"

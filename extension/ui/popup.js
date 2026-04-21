@@ -8,6 +8,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const inputSbUrl        = document.getElementById("input-supabase-url");
     const inputSbKey        = document.getElementById("input-supabase-key");
     const inputExtSecret    = document.getElementById("input-extension-secret");
+    const inputApiUrl       = document.getElementById("input-api-url");
 
     // Config is stored in chrome.storage.sync so it follows your Chrome login
     // across machines — paste once, works everywhere you're signed into Chrome.
@@ -16,6 +17,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (cfg.supabaseUrl)      inputSbUrl.value     = cfg.supabaseUrl;
         if (cfg.supabaseKey)      inputSbKey.value     = cfg.supabaseKey;
         if (cfg.extensionSecret)  inputExtSecret.value = cfg.extensionSecret;
+        if (cfg.apiUrl)           inputApiUrl.value    = cfg.apiUrl;
     });
 
     function saveSupabaseConfig() {
@@ -23,7 +25,8 @@ document.addEventListener("DOMContentLoaded", () => {
             supabase_config: {
                 supabaseUrl:     (inputSbUrl.value     || "").trim(),
                 supabaseKey:     (inputSbKey.value     || "").trim(),
-                extensionSecret: (inputExtSecret.value || "").trim()
+                extensionSecret: (inputExtSecret.value || "").trim(),
+                apiUrl:          (inputApiUrl.value    || "").trim(),
             }
         });
     }
@@ -31,6 +34,7 @@ document.addEventListener("DOMContentLoaded", () => {
     inputSbUrl.onchange      = saveSupabaseConfig;
     inputSbKey.onchange      = saveSupabaseConfig;
     inputExtSecret.onchange  = saveSupabaseConfig;
+    inputApiUrl.onchange     = saveSupabaseConfig;
 
     // Get initial state
     chrome.runtime.sendMessage({ action: "GET_STATE" }, (response) => {

@@ -16,7 +16,8 @@
     "https://api.telegram.org/*",
     "https://*.supabase.co/*",
     "http://localhost/*",
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"

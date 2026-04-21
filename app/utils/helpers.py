@@ -44,8 +44,8 @@ def is_valid_telegram_token(token_str: str) -> bool:
         if len(bot_id) > 1 and bot_id.startswith("0"):
             return False
         
-        # Secret must be 33 to 35 characters
-        if len(secret) < 33 or len(secret) > 35:
+        # Secret must be exactly 35 characters (standardized — matches scanners.py)
+        if len(secret) != 35:
             return False
         
         # Secret must only contain allowed chars (base64-ish)

