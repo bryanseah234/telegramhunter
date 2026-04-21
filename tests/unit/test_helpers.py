@@ -17,7 +17,7 @@ class TestTokenValidation:
     def test_valid_token(self):
         """Test valid token format"""
         assert is_valid_telegram_token("123456789:AAHhbW3Pzj9V5JhU5KzJ9V5JhU5KzJ9V5Jh")
-        assert is_valid_telegram_token("987654321:AAabcdefghijklmnopqrstuvwxyz12345")
+        assert is_valid_telegram_token("987654321:AAabcdefghijklmnopqrstuvwxyz1234567")
     
     def test_invalid_token_no_colon(self):
         """Test rejection of token without colon"""
@@ -95,10 +95,10 @@ class TestTokenAndChatExtraction:
         """Test extraction of multiple tokens"""
         text = """
         Token 1: 111111111:AAHhbW3Pzj9V5JhU5KzJ9V5JhU5KzJ9V5Jh
-        Token 2: 222222222:AAabcdefghijklmnopqrstuvwxyz12345
+        Token 2: 222222222:AAabcdefghijklmnopqrstuvwxyz1234567
         """
         results = extract_tokens_and_chat_ids(text)
-        
+
         assert len(results) == 2
 
 

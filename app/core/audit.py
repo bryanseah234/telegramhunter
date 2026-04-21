@@ -93,12 +93,20 @@ class AuditLogger:
     def _persist_to_db(audit_entry: dict):
         """
         Persist audit log to database.
-        Note: Requires an 'audit_logs' table to be created.
+        Writes to the audit_logs table for compliance tracking.
+        Failures are logged but never raised — audit must not break the main flow.
         """
-        # This is a placeholder - would require creating audit_logs table
-        # For now, we just log it
-        logger.debug(f"Would persist to DB: {audit_entry}")
-        # db.table("audit_logs").insert(audit_entry).execute()
+        try:
+            from app.core.database import db
+            db.table("audit_logs").insert({
+                "event_type":    audit_entry["event_type"],
+                "credential_id": audit_entry.get("credential_id"),
+                "user_agent":    audit_entry.get("user", "system"),
+                "success":       audit_entry.get("success", True),
+                "details":       audit_entry.get("details", {}),
+            }).execute()
+        except Exception as e:
+            logger.error(f"Audit DB persist failed for {audit_entry.get('event_type')}: {e}")
 
 
 # Convenience functions for common audit events

@@ -152,11 +152,12 @@ class CircuitBreakerError(Exception):
 
 
 # Global circuit breakers for external services
+# Thresholds match PRD §6.2: failure_threshold=5, recovery_timeout=60s (BUG-016)
 _circuit_breakers = {
-    "shodan": CircuitBreaker("shodan", failure_threshold=3, recovery_timeout=300),
-    "urlscan": CircuitBreaker("urlscan", failure_threshold=3, recovery_timeout=300),
-    "github": CircuitBreaker("github", failure_threshold=3, recovery_timeout=300),
-    "fofa": CircuitBreaker("fofa", failure_threshold=3, recovery_timeout=300),
+    "shodan": CircuitBreaker("shodan", failure_threshold=5, recovery_timeout=60),
+    "urlscan": CircuitBreaker("urlscan", failure_threshold=5, recovery_timeout=60),
+    "github": CircuitBreaker("github", failure_threshold=5, recovery_timeout=60),
+    "fofa": CircuitBreaker("fofa", failure_threshold=5, recovery_timeout=60),
 }
 
 
@@ -173,8 +174,8 @@ def get_circuit_breaker(service_name: str) -> CircuitBreaker:
     if service_name not in _circuit_breakers:
         _circuit_breakers[service_name] = CircuitBreaker(
             service_name,
-            failure_threshold=3,
-            recovery_timeout=300
+            failure_threshold=5,
+            recovery_timeout=60
         )
     return _circuit_breakers[service_name]
 

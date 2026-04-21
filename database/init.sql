@@ -93,3 +93,22 @@ FROM discovered_credentials;
 
 -- Grant SELECT on view to anon
 GRANT SELECT ON discovered_credentials_public TO anon;
+
+
+-- ============================================================
+-- TABLE: audit_logs (MISSING-002)
+-- Persists high-importance security audit events.
+-- Written by AuditLogger._persist_to_db() for compliance.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    timestamp     TIMESTAMPTZ DEFAULT NOW(),
+    event_type    TEXT        NOT NULL,
+    credential_id UUID        REFERENCES discovered_credentials(id) ON DELETE SET NULL,
+    user_agent    TEXT        DEFAULT 'system',
+    success       BOOLEAN     DEFAULT TRUE,
+    details       JSONB       DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_logs(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp  ON audit_logs(timestamp);

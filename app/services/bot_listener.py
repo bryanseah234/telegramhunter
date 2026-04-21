@@ -49,8 +49,7 @@ logger = logging.getLogger("bot_listener")
 # Global Redis Client (initialized in main)
 redis_client: redis.Redis = None
 PAUSE_KEY = "system:paused"
-LOCK_TTL_SECONDS = 120
-INSTANCE_ID = f"{os.getenv('HOSTNAME', 'local')}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+# LOCK_TTL_SECONDS imported from app.core.constants — do not redefine here (BUG-014)
 
 # Admin IDs — configurable via ANONYMOUS_ADMIN_ID env var (default: Telegram anonymous group admin)
 ANONYMOUS_ADMIN_ID = settings.ANONYMOUS_ADMIN_ID
@@ -235,7 +234,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if redis_client:
         try:
             is_paused = await redis_client.get(PAUSE_KEY)
-        except:
+        except Exception:
             pass
             
     system_status = "⏸️ **PAUSED**" if is_paused else "▶️ **RUNNING**"
@@ -406,7 +405,7 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if os.path.exists(temp_session_path + ".session"):
         try:
             os.remove(temp_session_path + ".session")
-        except:
+        except Exception:
             pass
 
     try:
@@ -522,7 +521,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for msg_id in context.user_data.get('bot_messages', []):
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-            except:
+            except Exception:
                 pass
 
         # Also delete all messages in the Bot chat (Nuke Messages)
@@ -660,7 +659,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Clean up temp
         try:
             os.remove(temp_session_path + ".session")
-        except:
+        except Exception:
             pass
 
         success_msg = f"✅ Successfully logged in as {me.first_name} (@{me.username or 'No Username'}).\nSession saved to {filename}.session"

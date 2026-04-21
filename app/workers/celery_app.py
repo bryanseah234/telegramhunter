@@ -1,8 +1,11 @@
+import asyncio
 import logging
 import os
 import sys
 
 from celery import Celery
+from celery.signals import worker_ready, worker_shutdown
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -20,40 +23,64 @@ logger = logging.getLogger(__name__)
 
 app = Celery("telegram_hunter", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
 
-import asyncio
+# ==============================================
+# PERSISTENT EVENT LOOP (BUG-008)
+# One loop per worker process — avoids asyncio.run() creating a new loop per task,
+# which broke asyncio.Lock objects and defeated Telethon connection pooling.
+# ==============================================
+_worker_loop: asyncio.AbstractEventLoop | None = None
 
-from celery.signals import worker_ready, worker_shutdown
 
-from app.services.broadcaster_srv import BroadcasterService
+def get_worker_loop() -> asyncio.AbstractEventLoop:
+    """
+    Returns the persistent event loop for this worker process.
+    Creates one if it doesn't exist or was closed.
+    All Celery tasks must use this loop via loop.run_until_complete()
+    instead of asyncio.run().
+    """
+    global _worker_loop
+    if _worker_loop is None or _worker_loop.is_closed():
+        _worker_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_worker_loop)
+        logger.info(f"[Worker] Created persistent event loop (pid={os.getpid()})")
+    return _worker_loop
 
 
-def _send_signal_log(msg):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# ==============================================
+# WORKER LIFECYCLE SIGNALS
+# ==============================================
+
+def _send_signal_log(msg: str):
+    """Send a startup/shutdown notification to Telegram using the persistent loop."""
+    loop = get_worker_loop()
     try:
-        # 5 second timeout to prevent blocking
+        from app.services.broadcaster_srv import BroadcasterService
         broadcaster = BroadcasterService()
         loop.run_until_complete(asyncio.wait_for(broadcaster.send_log(msg), timeout=5.0))
     except TimeoutError:
-        print(f"⚠️ Signal notification timed out: {msg[:30]}...")
+        logger.warning(f"Signal notification timed out: {msg[:30]}...")
     except Exception as e:
-        print(f"⚠️ Signal notification failed: {e}")
-    finally:
-        loop.close()
+        logger.warning(f"Signal notification failed: {e}")
 
 
 @worker_ready.connect
 def on_worker_ready(**kwargs):
+    get_worker_loop()  # Ensure loop is initialized before any task runs
     _send_signal_log("🟢 **Worker Service** Started (Celery)")
 
 
 @worker_shutdown.connect
 def on_worker_shutdown(**kwargs):
     _send_signal_log("🔴 **Worker Service** Stopping...")
+    global _worker_loop
+    if _worker_loop and not _worker_loop.is_closed():
+        _worker_loop.close()
+        logger.info("[Worker] Persistent event loop closed.")
 
 
-from celery.schedules import crontab
-
+# ==============================================
+# CELERY CONFIGURATION
+# ==============================================
 app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -70,28 +97,26 @@ app.conf.update(
     worker_prefetch_multiplier=1,
     task_acks_late=True,
     task_soft_time_limit=1200,  # 20 minutes soft limit
-    task_time_limit=1300,  # Hard limit > soft limit
-    broker_pool_limit=10,  # More connections for concurrency
+    task_time_limit=1300,       # Hard limit > soft limit
+    broker_pool_limit=10,
     # Auto-discover tasks in these modules
     imports=[
         "app.workers.tasks.flow_tasks",
         "app.workers.tasks.scanner_tasks",
         "app.workers.tasks.audit_tasks",
+        "app.workers.tasks.import_tasks",   # MISSING-001: CSV import pipeline
     ],
     # ============================================
     # QUEUE SEGREGATION
     # ============================================
     task_routes={
-        # Slow Exfiltration -> 'scrape' queue
         "flow.exfiltrate_chat": {"queue": "scrape"},
         "flow.rescrape_active": {"queue": "scrape"},
-        # Scanners -> 'scanners' queue
         "scanner.*": {"queue": "scanners"},
-        # Everything else (discover_chats, broadcast, heal) goes to default 'celery' queue
     },
     beat_schedule={
         # ============================================
-        # AGGRESSIVE BROADCAST & RESCRAPE
+        # BROADCAST & RESCRAPE
         # ============================================
         "broadcast-hourly": {
             "task": "flow.broadcast_pending",
@@ -112,8 +137,7 @@ app.conf.update(
             "schedule": crontab(minute=30, hour="*/6"),
         },
         # ============================================
-        # AGGRESSIVE STAGGERED SCANS
-        # Default: Every 4 hours
+        # STAGGERED SCANS
         # ============================================
         "scan-github-4hours": {
             "task": "scanner.scan_github",
@@ -129,7 +153,6 @@ app.conf.update(
         },
         "scan-fofa-4hours": {
             "task": "scanner.scan_fofa",
-            # Fofa offset by +1 hour from base interval to stagger
             "schedule": crontab(minute=0, hour=f"1-23/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"),
         },
         "scan-gitlab-6hours": {
@@ -156,12 +179,10 @@ app.conf.update(
             "task": "scanner.scan_google",
             "schedule": crontab(minute=50, hour="*/12"),
         },
-        # Bitbucket removed — global search API deprecated, always returns empty
         "scan-bitbucket-8hours": {
             "task": "scanner.scan_bitbucket",
             "schedule": crontab(minute=30, hour="*/8"),
         },
-        # Dedicated C2/RAT infrastructure scan — runs every 6 hours
         "scan-shodan-c2-6hours": {
             "task": "scanner.scan_shodan_c2",
             "schedule": crontab(minute=10, hour="*/6"),
@@ -169,7 +190,7 @@ app.conf.update(
         # Netlas — once daily (budget: 45+90=135 req/day across 2 accounts)
         "scan-netlas-daily": {
             "task": "scanner.scan_netlas",
-            "schedule": crontab(minute=0, hour=3),  # 3am UTC daily
+            "schedule": crontab(minute=0, hour=3),
         },
         # ============================================
         # RETRY COLD TOKENS
@@ -191,11 +212,18 @@ app.conf.update(
         },
         "system-enforce-whitelist-6hours": {
             "task": "system.enforce_whitelist",
-            "schedule": crontab(minute=0, hour="1-23/6"),  # Offset from self-heal
+            "schedule": crontab(minute=0, hour="1-23/6"),
         },
         "cleanup-general-topic-hourly": {
             "task": "system.cleanup_general_topic",
-            "schedule": crontab(minute=30),  # Every hour at :30
+            "schedule": crontab(minute=30),
+        },
+        # ============================================
+        # CSV IMPORT PIPELINE (MISSING-001)
+        # ============================================
+        "import-csv-5min": {
+            "task": "system.import_csv",
+            "schedule": crontab(minute="*/5"),
         },
     },
 )

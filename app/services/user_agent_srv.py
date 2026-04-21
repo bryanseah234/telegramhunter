@@ -366,7 +366,7 @@ class UserAgentService:
                 logger.error(f"    ❌ [UserAgent] Entity resolution failed: {e}")
                 return False
 
-            print(f"    🚀 [UserAgent] Inviting {bot_username} to group...")
+            logger.info(f"    🚀 [UserAgent] Inviting {bot_username} to group...")
             
             # Try AddChatUserRequest (for basic groups) or InviteToChannelRequest (for supergroups/channels)
             from telethon.tl.functions.channels import InviteToChannelRequest
@@ -539,7 +539,7 @@ class UserAgentService:
                     except Exception as e_kick:
                         logger.error(f"        ❌ Failed to kick: {e_kick}")
 
-            print(f"    ✨ [UserAgent] Cleanup Complete. Removed {removed_count} bots.")
+            logger.info(f"    ✨ [UserAgent] Cleanup Complete. Removed {removed_count} bots.")
             return removed_count
 
         except Exception as e:
