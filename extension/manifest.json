@@ -5,15 +5,18 @@
   "description": "Automated Fofa Scraper with Country Rotation",
   "permissions": [
     "activeTab",
+    "alarms",
     "scripting",
     "storage",
-    "tabs",
-    "downloads"
+    "tabs"
   ],
   "host_permissions": [
     "https://fofa.info/*",
     "https://en.fofa.info/*",
-    "https://api.telegram.org/*"
+    "https://api.telegram.org/*",
+    "https://*.supabase.co/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "background.js"

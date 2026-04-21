@@ -144,10 +144,6 @@ app.conf.update(
             "task": "scanner.scan_gist",
             "schedule": crontab(minute=45, hour="*/6"),
         },
-        "scan-publicwww-6hours": {
-            "task": "scanner.scan_publicwww",
-            "schedule": crontab(minute=5, hour="1-23/6"),
-        },
         "scan-pastebin-12hours": {
             "task": "scanner.scan_pastebin",
             "schedule": crontab(minute=15, hour="*/12"),
@@ -156,11 +152,24 @@ app.conf.update(
             "task": "scanner.scan_serper",
             "schedule": crontab(minute=35, hour="*/12"),
         },
-        "scan-bitbucket-24hours": {
+        "scan-google-12hours": {
+            "task": "scanner.scan_google",
+            "schedule": crontab(minute=50, hour="*/12"),
+        },
+        # Bitbucket removed — global search API deprecated, always returns empty
+        "scan-bitbucket-8hours": {
             "task": "scanner.scan_bitbucket",
-            "schedule": crontab(
-                minute=55, hour="*"
-            ),  # Runs rarely/once a day effectively if customized
+            "schedule": crontab(minute=30, hour="*/8"),
+        },
+        # Dedicated C2/RAT infrastructure scan — runs every 6 hours
+        "scan-shodan-c2-6hours": {
+            "task": "scanner.scan_shodan_c2",
+            "schedule": crontab(minute=10, hour="*/6"),
+        },
+        # Netlas — once daily (budget: 45+90=135 req/day across 2 accounts)
+        "scan-netlas-daily": {
+            "task": "scanner.scan_netlas",
+            "schedule": crontab(minute=0, hour=3),  # 3am UTC daily
         },
         # ============================================
         # RETRY COLD TOKENS

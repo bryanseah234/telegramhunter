@@ -13,7 +13,7 @@
     <div class="status-box">
       <div id="status">Ready</div>
       <div>Countries: <span id="count-country">0</span></div>
-      <div>Found: <span id="count-found">0</span> <span style="font-size: 0.8em"> (<span id="count-valid"
+      <div>Found: <span id="count-found">0</span> <span style="font-size: 0.8em">(<span id="count-valid"
             style="color: #4caf50">0</span> valid)</span></div>
     </div>
   </div>
@@ -22,7 +22,7 @@
     <button id="btn-start">🚀 Start</button>
     <button id="btn-stop" class="hidden">🛑 Stop</button>
     <button id="btn-resume" class="hidden">▶️ Resume</button>
-    <button id="btn-download" disabled>💾 Save CSV</button>
+    <button id="btn-upload" disabled>⬆️ Upload to Supabase</button>
   </div>
 
   <div class="settings">
@@ -34,8 +34,20 @@
     <div style="height: 10px;"></div>
     <label>Query:</label>
     <input type="text" id="input-query" value='body="api.telegram.org"'>
+    <div style="height: 10px;"></div>
+    <hr style="border-color: #333; margin: 4px 0;">
+    <label style="color: #aaa; font-size: 0.85em;">Supabase (stored locally, never in code)</label>
+    <div style="height: 4px;"></div>
+    <label>Project URL:</label>
+    <input type="text" id="input-supabase-url" placeholder="https://xxxx.supabase.co">
+    <div style="height: 6px;"></div>
+    <label>Anon Key:</label>
+    <input type="password" id="input-supabase-key" placeholder="eyJ...">
+    <div style="height: 6px;"></div>
+    <label>Write Secret (x-extension-secret):</label>
+    <input type="password" id="input-extension-secret" placeholder="your app.extension_write_secret value">
   </div>
-  </div>
+
   <script src="popup.js"></script>
 </body>
 

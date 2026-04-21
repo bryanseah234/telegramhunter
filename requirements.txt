@@ -1,14 +1,15 @@
-fastapi==0.115.0
-uvicorn==0.32.0
+fastapi==0.136.0           # SECURITY: starlette>=1.0.0 (fixes CVE-2024-47874, CVE-2025-54121)
+uvicorn==0.44.0
 pydantic>=2.10.0,<3.0.0
 pydantic-settings>=2.6.0,<3.0.0
-supabase==2.28.3          # Updated: compatible with httpx>=0.26
+supabase==2.28.3
 httpx==0.28.1             # SECURITY: Fixed CVE-2024-37891 (SSRF)
-celery==5.3.6
-redis==5.0.1
-python-telegram-bot[job-queue]==22.7  # Updated: compatible with httpx>=0.27
-Telethon==1.38.1          # SECURITY: Latest stable with security patches
+celery==5.6.3
+redis==7.4.0
+python-telegram-bot[job-queue]==22.7
+Telethon==1.43.2
 cryptg==0.4.0
-cryptography==44.0.0      # SECURITY: Fixed CVE-2024-26130, CVE-2024-0727
-requests==2.32.3          # SECURITY: Fixed CVE-2024-35195 (cert validation)
+cryptography==46.0.7      # SECURITY: Fixed CVE-2024-12797, CVE-2026-26007, CVE-2026-34073
+requests==2.33.1          # SECURITY: Fixed CVE-2024-47081, CVE-2026-25645
 python-dotenv==1.0.0
+netlas

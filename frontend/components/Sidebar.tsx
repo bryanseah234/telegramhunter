@@ -59,9 +59,10 @@ export default function Sidebar({
                     return;
                 }
 
-                // Step 2: Fetch those credentials
+                // Step 2: Fetch those credentials via the safe public view
+                // (anon key cannot SELECT the raw table — bot_token etc. are protected)
                 const { data: creds, error } = await supabase
-                    .from("discovered_credentials")
+                    .from("discovered_credentials_public")
                     .select("id, created_at, source, meta")
                     .in("id", credIds);
 
@@ -100,9 +101,9 @@ export default function Sidebar({
                     const exists = credentialsRef.current.some(c => c.id === credId);
 
                     if (!exists) {
-                        // Fetch the credential details
+                        // Fetch via the safe public view — anon key cannot SELECT raw table
                         const { data: credData } = await supabase
-                            .from("discovered_credentials")
+                            .from("discovered_credentials_public")
                             .select("*")
                             .eq("id", credId)
                             .single();

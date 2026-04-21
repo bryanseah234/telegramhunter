@@ -1,99 +1,110 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const btnStart = document.getElementById('btn-start');
-    const btnStop = document.getElementById('btn-stop');
-    const btnResume = document.getElementById('btn-resume');
-    const btnDownload = document.getElementById('btn-download');
-    const inputQuery = document.getElementById('input-query');
-    const selectDomain = document.getElementById('select-domain');
+document.addEventListener("DOMContentLoaded", () => {
+    const btnStart       = document.getElementById("btn-start");
+    const btnStop        = document.getElementById("btn-stop");
+    const btnResume      = document.getElementById("btn-resume");
+    const btnUpload      = document.getElementById("btn-upload");
+    const inputQuery     = document.getElementById("input-query");
+    const selectDomain   = document.getElementById("select-domain");
+    const inputSbUrl        = document.getElementById("input-supabase-url");
+    const inputSbKey        = document.getElementById("input-supabase-key");
+    const inputExtSecret    = document.getElementById("input-extension-secret");
 
-    // Load State
+    // Config is stored in chrome.storage.sync so it follows your Chrome login
+    // across machines — paste once, works everywhere you're signed into Chrome.
+    chrome.storage.sync.get(["supabase_config"], (result) => {
+        const cfg = result.supabase_config || {};
+        if (cfg.supabaseUrl)      inputSbUrl.value     = cfg.supabaseUrl;
+        if (cfg.supabaseKey)      inputSbKey.value     = cfg.supabaseKey;
+        if (cfg.extensionSecret)  inputExtSecret.value = cfg.extensionSecret;
+    });
+
+    function saveSupabaseConfig() {
+        chrome.storage.sync.set({
+            supabase_config: {
+                supabaseUrl:     (inputSbUrl.value     || "").trim(),
+                supabaseKey:     (inputSbKey.value     || "").trim(),
+                extensionSecret: (inputExtSecret.value || "").trim()
+            }
+        });
+    }
+
+    inputSbUrl.onchange      = saveSupabaseConfig;
+    inputSbKey.onchange      = saveSupabaseConfig;
+    inputExtSecret.onchange  = saveSupabaseConfig;
+
+    // Get initial state
     chrome.runtime.sendMessage({ action: "GET_STATE" }, (response) => {
-        if (chrome.runtime.lastError) {
-            console.log("Background not ready:", chrome.runtime.lastError.message);
-            return;
-        }
+        if (chrome.runtime.lastError) return;
         updateUI(response);
     });
 
-    // Listen to updates
+    // Live updates
     chrome.runtime.onMessage.addListener((msg) => {
         if (msg.action === "STATE_UPDATE") updateUI(msg.state);
     });
 
     btnStart.onclick = () => {
-        const query = inputQuery.value;
-        const domain = selectDomain.value;
-        chrome.runtime.sendMessage({ action: "START_SCAN", query: query, domain: domain });
+        chrome.runtime.sendMessage({
+            action: "START_SCAN",
+            query: inputQuery.value,
+            domain: selectDomain.value
+        });
     };
 
-    btnStop.onclick = () => {
-        chrome.runtime.sendMessage({ action: "STOP_SCAN" });
-    };
+    btnStop.onclick   = () => chrome.runtime.sendMessage({ action: "STOP_SCAN" });
+    btnResume.onclick = () => chrome.runtime.sendMessage({ action: "RESUME_SCAN" });
 
-    btnResume.onclick = () => {
-        chrome.runtime.sendMessage({ action: "RESUME_SCAN" });
-    };
-
-    btnDownload.onclick = () => {
-        chrome.runtime.sendMessage({ action: "DOWNLOAD_RESULTS" }); // handled in bg or logic
+    btnUpload.onclick = () => {
+        saveSupabaseConfig();
+        chrome.runtime.sendMessage({ action: "UPLOAD_RESULTS" });
     };
 
     function updateUI(state) {
         if (!state) return;
 
-        document.getElementById('status').innerText = state.status;
-        document.getElementById('count-country').innerText = state.countriesDone;
-        document.getElementById('count-found').innerText = state.resultsFound;
-        if (document.getElementById('count-valid')) {
-            document.getElementById('count-valid').innerText = state.resultsValid || 0;
-        }
+        document.getElementById("status").innerText        = state.status;
+        document.getElementById("count-country").innerText = state.countriesDone;
+        document.getElementById("count-found").innerText   = state.resultsFound;
+        const validEl = document.getElementById("count-valid");
+        if (validEl) validEl.innerText = state.resultsValid || 0;
 
-        // Restore domain selection if state exists and not running (optional but nice)
-        if (state.domain && !state.isRunning) {
-            selectDomain.value = state.domain;
-        }
+        if (state.domain && !state.isRunning) selectDomain.value = state.domain;
 
-        // Buttons
-        // Buttons Logic
         if (state.isRunning) {
-            btnStart.classList.add('hidden');
-            btnStop.classList.remove('hidden');
-            inputQuery.disabled = true;
-            selectDomain.disabled = true;
-            btnStart.innerText = "🚀 Start"; // Reset text
+            btnStart.classList.add("hidden");
+            btnStop.classList.remove("hidden");
+            inputQuery.disabled    = true;
+            selectDomain.disabled  = true;
+            btnStart.innerText     = "🚀 Start";
         } else {
-            // STOPPED or READY
-            btnStop.classList.add('hidden');
-            inputQuery.disabled = false;
+            btnStop.classList.add("hidden");
+            inputQuery.disabled   = false;
             selectDomain.disabled = false;
 
             if (state.resultsFound > 0) {
-                // FINISHED / STOPPED with Data
-                btnStart.classList.remove('hidden');
-                btnStart.innerText = "🔄 New Scan (Clears Data)";
-                btnStart.style.backgroundColor = "#ff9800"; // Warning color
-
-                // Highlight Download
-                btnDownload.style.border = "2px solid #4CAF50";
+                btnStart.classList.remove("hidden");
+                btnStart.innerText            = "🔄 New Scan (Clears Data)";
+                btnStart.style.backgroundColor = "#ff9800";
+                btnUpload.style.border         = "2px solid #4CAF50";
             } else {
-                // READY (No Data)
-                btnStart.classList.remove('hidden');
-                btnStart.innerText = "🚀 Start";
-                btnStart.style.backgroundColor = ""; // Default
-                btnDownload.style.border = "";
+                btnStart.classList.remove("hidden");
+                btnStart.innerText            = "🚀 Start";
+                btnStart.style.backgroundColor = "";
+                btnUpload.style.border         = "";
             }
         }
 
         if (state.isPaused) {
-            btnStop.classList.add('hidden');
-            btnResume.classList.remove('hidden');
-            document.getElementById('status').innerText = "PAUSED (Captcha?)";
-            document.getElementById('status').style.color = "red";
+            btnStop.classList.add("hidden");
+            btnResume.classList.remove("hidden");
+            document.getElementById("status").innerText    = "PAUSED (Captcha?)";
+            document.getElementById("status").style.color  = "red";
         } else {
-            btnResume.classList.add('hidden');
-            document.getElementById('status').style.color = "#fb0";
+            btnResume.classList.add("hidden");
+            document.getElementById("status").style.color  = "#fb0";
         }
 
-        btnDownload.disabled = (state.resultsFound === 0);
+        // Enable upload only when there are valid results
+        btnUpload.disabled = !(state.resultsValid > 0);
     }
 });

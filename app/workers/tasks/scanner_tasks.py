@@ -9,18 +9,17 @@ from app.core.constants import MAX_ERRORS_BUFFER
 from app.core.database import db
 from app.core.security import security
 from app.services.scanners import (
-    BitbucketService,
     FofaService,
     GithubGistService,
     GithubService,
     GitlabService,
     GrepAppService,
     PastebinService,
-    PublicWwwService,
     SerperService,
     ShodanService,
     UrlScanService,
 )
+from app.services.scanners_extension import GoogleSearchService, BitbucketService, NetlasService
 from app.workers.celery_app import app
 from app.workers.tasks.flow_tasks import (  # Import for triggering and DB
     async_execute,
@@ -41,9 +40,10 @@ gitlab_srv = GitlabService()
 bitbucket_srv = BitbucketService()
 gist_srv = GithubGistService()
 grepapp_srv = GrepAppService()
-publicwww_srv = PublicWwwService()
 pastebin_srv = PastebinService()
 serper_srv = SerperService()
+google_srv = GoogleSearchService()
+netlas_srv = NetlasService()
 
 
 def _calculate_hash(token: str) -> str:
@@ -199,7 +199,7 @@ async def _save_credentials_async(results, source_name: str):
                 elif not existing_id:
                     # INSERT new record
                     new_data = {
-                        "token": security.encrypt(token),
+                        "bot_token": security.encrypt(token),
                         "token_hash": token_hash,
                         "chat_id": chat_id,
                         "chat_name": chat_name,
@@ -282,7 +282,30 @@ async def _scan_shodan_async(query: str = None, country_code: str = None):
     ]
 
     default_queries = [f'http.html:"{q}"' for q in COMMON_QUERIES]
-    default_queries.extend(['http.title:"Telegram Bot"', 'http.title:"Telegram Login"'])
+    default_queries.extend([
+        'http.title:"Telegram Bot"',
+        'http.title:"Telegram Login"',
+        # ── C2 / RAT / Malware bots using Telegram as command channel ──────
+        # These are live infected hosts — very high token yield
+        'http.headers:"X-Telegram-Bot-Api"',
+        'http.body:"api.telegram.org/bot" http.body:"/start" http.body:"malware"',
+        'http.body:"api.telegram.org/bot" http.body:"/start" http.body:"rat"',
+        'http.body:"api.telegram.org/bot" http.body:"/start" http.body:"stealer"',
+        'http.body:"api.telegram.org/bot" http.body:"/start" http.body:"keylogger"',
+        'http.body:"api.telegram.org/bot" http.body:"/start" http.body:"c2"',
+        'http.body:"api.telegram.org/bot" http.body:"/start" http.body:"remote access"',
+        'http.body:"api.telegram.org/bot" http.body:"/start" http.body:"exploit"',
+        'http.body:"api.telegram.org/bot" http.body:"/start" http.body:"inject"',
+        'http.body:"api.telegram.org/bot" http.body:"/start" http.body:"persistence"',
+        'http.body:"api.telegram.org/bot" http.body:"/start payload="',
+        'http.body:"api.telegram.org/bot" http.body:"/start token="',
+        'http.body:"api.telegram.org/bot" http.body:"/start cmd="',
+        'http.body:"api.telegram.org/bot" http.body:"/start c2="',
+        'http.body:"api.telegram.org/bot" http.body:"/start /bin/bash"',
+        'http.body:"api.telegram.org/bot" http.body:"/start /powershell"',
+        'http.body:"api.telegram.org/bot" http.body:"/start download"',
+        'http.body:"api.telegram.org/bot" http.body:"/start /exec"',
+    ])
 
     queries = [query] if query else default_queries
 
@@ -406,22 +429,35 @@ def scan_github(query: str = None):
 
 async def _scan_github_async(query: str = None):
     default_dorks = [
+        # .env files with real token patterns (most productive)
         'filename:.env "TELEGRAM_BOT_TOKEN"',
         'filename:.env "TG_BOT_TOKEN"',
+        'filename:.env "BOT_TOKEN"',
+        'filename:.env "TELEGRAM_TOKEN"',
         'filename:.env "api.telegram.org"',
+        # Config files
         'filename:config.json "bot_token"',
+        'filename:config.py "bot_token"',
         'filename:settings.py "TELEGRAM_TOKEN"',
         'filename:config.yaml "telegram_token"',
         'filename:config.toml "telegram_token"',
         'filename:docker-compose.yml "TELEGRAM_BOT_TOKEN"',
+        'filename:.env.local "TELEGRAM"',
+        'filename:.env.production "TELEGRAM"',
+        # Direct token pattern in source — most likely to be real
+        '"api.telegram.org/bot" extension:py',
+        '"api.telegram.org/bot" extension:js',
+        '"api.telegram.org/bot" extension:php',
+        '"api.telegram.org/bot" extension:go',
+        '"api.telegram.org/bot" extension:rb',
+        # Library-specific patterns
         'language:python "ApplicationBuilder" "token"',
         'language:javascript "new TelegramBot" "token"',
         'language:php "TelegramBot" "api_key"',
         'language:go "NewBotAPI"',
-        '"https://api.telegram.org/bot" -filename:README.md -filename:dataset',
-        '"123456789:" NOT 123456789',
-        '"TELEGRAM_KEY"',
-        '"BOT_TOKEN"',
+        'language:python "Bot(" extension:py',
+        # Exclude docs/examples to reduce noise
+        '"https://api.telegram.org/bot" -filename:README.md -filename:*.md -filename:dataset',
     ]
 
     if query:
@@ -877,4 +913,260 @@ async def _retry_cold_async():
 
     result_msg = f"RetryCold finished. Retried {retried} tokens."
     await _send_log_async(f"🏁 [RetryCold] Finished. Retried {retried} tokens.")
+    return result_msg
+
+
+@app.task(name="scanner.scan_google", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def scan_google(query: str = None):
+    return _run_sync(_scan_google_async(query))
+
+
+async def _scan_google_async(query: str = None):
+    import redis
+
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        return "System Paused"
+
+    dorks = [
+        'site:pastebin.com "api.telegram.org/bot"',
+        'site:github.com "TELEGRAM_BOT_TOKEN" filetype:env',
+        'site:gitlab.com "api.telegram.org/bot"',
+        'site:hastebin.com "api.telegram.org/bot"',
+        'site:rentry.co "api.telegram.org/bot"',
+        '"api.telegram.org/bot" filetype:py',
+        '"api.telegram.org/bot" filetype:js',
+        '"api.telegram.org/bot" filetype:env',
+    ]
+    if query:
+        dorks = [query]
+
+    logger.info(f"🔍 [Google] Starting scan with {len(dorks)} dorks...")
+    await _send_log_async(f"🔍 [Google] Starting scan with {len(dorks)} dorks...")
+
+    total_saved = 0
+    errors = []
+
+    for dork in dorks:
+        try:
+            results = await google_srv.search(dork)
+            logger.info(f"    ✅ [Google] Dork returned {len(results)} results.")
+            saved = await _save_credentials_async(results, "google_dork")
+            total_saved += saved
+        except Exception as e:
+            logger.error(f"    ❌ [Google] Dork failed: {e}")
+            errors.append(str(e))
+            errors = errors[-MAX_ERRORS_BUFFER:]
+        await asyncio.sleep(2)
+
+    result_msg = f"Google scan finished. Saved {total_saved} new credentials."
+    if errors:
+        result_msg += f" (Errors: {len(errors)})"
+    await _send_log_async(f"🏁 [Google] Finished. Saved {total_saved} new credentials.")
+    return result_msg
+
+
+@app.task(name="scanner.scan_shodan_c2", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def scan_shodan_c2():
+    """
+    Dedicated Shodan scan targeting Telegram-based C2/RAT infrastructure.
+    These are live infected hosts using Telegram as a command-and-control channel —
+    highest token yield because the token is actively in use on a running server.
+    """
+    return _run_sync(_scan_shodan_c2_async())
+
+
+async def _scan_shodan_c2_async():
+    import redis
+
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        return "System Paused"
+
+    # Each query is a focused slice of the compound C2 query.
+    # Shodan doesn't support deeply nested OR/AND in a single query reliably,
+    # so we split into targeted sub-queries and deduplicate results.
+    C2_QUERIES = [
+        # Header-based detection — most precise, server is actively serving bot API
+        'http.headers:"X-Telegram-Bot-Api"',
+        # Malware category keywords paired with Telegram bot pattern
+        'http.body:"api.telegram.org/bot" http.body:"malware" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"rat" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"remote access" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"spyware" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"stealer" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"keylogger" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"c2 server" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"command and control" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"exploit" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"bypass" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"inject" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"persistence" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"privilege escalation" http.status:200',
+        # /start command with payload patterns — bot is receiving C2 commands
+        'http.body:"api.telegram.org/bot" http.body:"/start payload=" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start token=" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start cmd=" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start c2=" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start key=" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start id=" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start /bin/bash" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start /powershell" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start download" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start /exec" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start /run" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start /invoke" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start /script" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start http://" http.status:200',
+        'http.body:"api.telegram.org/bot" http.body:"/start https://" http.status:200',
+    ]
+
+    logger.info(f"🎯 [Shodan-C2] Starting C2 scan with {len(C2_QUERIES)} targeted queries...")
+    await _send_log_async(f"🎯 [Shodan-C2] Starting Telegram C2 infrastructure scan ({len(C2_QUERIES)} queries)...")
+
+    total_saved = 0
+    errors = []
+
+    for q in C2_QUERIES:
+        if not q:
+            continue
+        try:
+            logger.info(f"    🔎 [Shodan-C2] Query: {q[:80]}...")
+            results = await shodan.search(q)
+            logger.info(f"    ✅ [Shodan-C2] Returned {len(results)} results")
+            saved = await _save_credentials_async(results, "shodan_c2")
+            total_saved += saved
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"    ❌ [Shodan-C2] Query failed: {e}")
+            errors.append(str(e))
+            errors = errors[-MAX_ERRORS_BUFFER:]
+
+    result_msg = f"Shodan C2 scan finished. Saved {total_saved} new credentials."
+    if errors:
+        result_msg += f" (Errors: {len(errors)})"
+    await _send_log_async(f"🏁 [Shodan-C2] Finished. Saved {total_saved} credentials from C2 infrastructure.")
+    return result_msg
+
+
+# ── Shared query bank ─────────────────────────────────────────────────────────
+# All Netlas queries live here. Ordered by expected yield (highest first).
+# Each query costs 1 search coin. With 100 req/day across both accounts,
+# we run the top N queries that fit within the remaining daily budget.
+NETLAS_QUERIES = [
+    # ── Direct token in HTTP body (highest yield) ─────────────────────────
+    'http.body:"api.telegram.org/bot" http.status_code:200',
+    'http.body:"TELEGRAM_BOT_TOKEN" http.status_code:200',
+    'http.body:"bot_token" http.body:"api.telegram.org" http.status_code:200',
+    'http.body:"TG_BOT_TOKEN" http.status_code:200',
+    # ── Telegram header fingerprint ───────────────────────────────────────
+    'http.headers:"X-Telegram-Bot-Api"',
+    # ── C2 / RAT / Malware bots ───────────────────────────────────────────
+    'http.body:"api.telegram.org/bot" http.body:"malware" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"rat" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"stealer" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"keylogger" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"c2" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"remote access" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"exploit" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"inject" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"persistence" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"privilege escalation" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"spyware" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"bypass" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"command and control" http.status_code:200',
+    # ── /start command C2 patterns ────────────────────────────────────────
+    'http.body:"api.telegram.org/bot" http.body:"/start payload=" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"/start token=" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"/start cmd=" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"/start c2=" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"/start key=" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"/start /bin/bash" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"/start /powershell" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"/start download" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"/start /exec" http.status_code:200',
+    'http.body:"api.telegram.org/bot" http.body:"/start https://" http.status_code:200',
+    # ── Config file patterns exposed on web ───────────────────────────────
+    'http.body:"TELEGRAM_BOT_TOKEN" http.body:"REDIS_URL" http.status_code:200',
+    'http.body:"TELEGRAM_BOT_TOKEN" http.body:"DATABASE_URL" http.status_code:200',
+    'http.body:"bot_token" http.body:"webhook" http.status_code:200',
+    # ── Telegram t.me patterns ────────────────────────────────────────────
+    'http.body:"https://t.me" http.body:"/start" http.body:"api.telegram.org" http.status_code:200',
+    'http.body:"http://t.me/bot" http.status_code:200',
+]
+
+
+@app.task(name="scanner.scan_netlas", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def scan_netlas(query: str = None):
+    """
+    Netlas scan — runs once daily, respects per-account request limits.
+    Rotates between account 1 (45 req/day) and account 2 (90 req/day).
+    Queries are ordered by yield; stops when daily budget is exhausted.
+    """
+    return _run_sync(_scan_netlas_async(query))
+
+
+async def _scan_netlas_async(query: str = None):
+    import redis as redis_lib
+
+    redis_client = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
+    if redis_client.get("system:paused"):
+        return "System Paused"
+
+    queries = [query] if query else NETLAS_QUERIES
+
+    # Log current budget before starting
+    usage = await netlas_srv.get_usage_summary()
+    remaining = sum(v["remaining"] for v in usage.values())
+    if remaining == 0:
+        msg = "⏸️ [Netlas] Daily budget exhausted for all accounts — skipping"
+        logger.warning(msg)
+        await _send_log_async(msg)
+        return "Daily limit reached"
+
+    logger.info(f"🔍 [Netlas] Starting scan | Budget remaining: {remaining} requests | Queries: {len(queries)}")
+    await _send_log_async(
+        f"🔍 [Netlas] Starting scan ({remaining} requests remaining today, {len(queries)} queries queued)..."
+    )
+
+    total_saved = 0
+    errors = []
+    queries_run = 0
+
+    for q in queries:
+        # Re-check budget before each query
+        usage = await netlas_srv.get_usage_summary()
+        remaining = sum(v["remaining"] for v in usage.values())
+        if remaining == 0:
+            logger.warning("    [Netlas] Budget exhausted mid-scan — stopping early")
+            await _send_log_async(f"⏸️ [Netlas] Budget exhausted after {queries_run} queries.")
+            break
+
+        try:
+            logger.info(f"    🔎 [Netlas] Query: {q[:70]}...")
+            results = await netlas_srv.search(q, size=20)
+            logger.info(f"    ✅ [Netlas] Returned {len(results)} results")
+            saved = await _save_credentials_async(results, "netlas")
+            total_saved += saved
+            queries_run += 1
+            await asyncio.sleep(1)  # gentle rate limiting
+        except Exception as e:
+            logger.error(f"    ❌ [Netlas] Query failed: {e}")
+            errors.append(str(e))
+            errors = errors[-MAX_ERRORS_BUFFER:]
+
+    # Final usage summary
+    usage = await netlas_srv.get_usage_summary()
+    usage_str = " | ".join(
+        f"Acct#{k.split('_')[1]}: {v['used']}/{v['limit']}"
+        for k, v in usage.items()
+    )
+
+    result_msg = f"Netlas scan finished. Ran {queries_run} queries, saved {total_saved} credentials."
+    if errors:
+        result_msg += f" (Errors: {len(errors)})"
+
+    await _send_log_async(
+        f"🏁 [Netlas] Finished. Saved {total_saved} credentials. Usage today: {usage_str}"
+    )
     return result_msg

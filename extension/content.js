@@ -2,19 +2,28 @@
 const CLICK_SELECTOR = 'i.iconfont.icon-daima';  // Code view icon button
 const POPUP_CONTENT_SELECTOR = '.source-content';  // The div containing HTML source
 const POPUP_DIALOG_SELECTOR = '.el-dialog__body';  // Fallback: the dialog body
+const RESULT_ROW_SELECTOR = '.hsxa-host-table-body .hsxa-host-table-body-item, .host-table-body .host-table-body-item, [class*="result-item"], [class*="host-item"]';
+
+// Token regex reused in multiple places
+const TOKEN_REGEX = /(\d{8,10}:AA[A-Za-z0-9_-]{33})/g;
 
 // --- STATE ---
 let isWorking = false;
+let shouldStop = false;
 
 // --- LISTENERS ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "SCRAPE_PAGE") {
+        shouldStop = false;
         if (isWorking) return;
         startScraping();
     } else if (msg.action === "RESUME_WORK") {
-        // If we were paused, resume. 
-        // For simplicity, just restart scraping checking.
+        shouldStop = false;
         startScraping();
+    } else if (msg.action === "STOP_WORK") {
+        shouldStop = true;
+        isWorking = false;
+        log("Stopped by user.");
     }
 });
 
@@ -30,50 +39,68 @@ async function startScraping() {
         return;
     }
 
-    // 2. Find Items
+    // 2. Fast pass: scan the entire page text for tokens without clicking anything.
+    //    FOFA sometimes shows tokens in URLs, titles, or snippets directly.
+    const fastTokens = extractTokensFromText(document.body.innerText);
+    if (fastTokens.length > 0) {
+        log(`Fast pass: found ${fastTokens.length} token(s) in page text`);
+        for (const token of fastTokens) {
+            if (shouldStop) break;
+            chrome.runtime.sendMessage({ action: "RESULT_FOUND", data: { token, chatId: "" } });
+        }
+    }
+
+    // 3. Click pass: open each result's source popup for deeper extraction.
+    //    Skip this if shouldStop is already set.
     const items = getVisibleItems();
-    if (items.length === 0) {
-        log("No items found. Moving on.");
-        chrome.runtime.sendMessage({ action: "PAGE_COMPLETE" });
+    if (items.length === 0 || shouldStop) {
+        log(shouldStop ? "Aborted." : "No clickable items. Moving on.");
+        if (!shouldStop) chrome.runtime.sendMessage({ action: "PAGE_COMPLETE" });
         isWorking = false;
         return;
     }
 
-    // 3. Process Items
+    log(`Click pass: processing ${items.length} item(s)...`);
+
     for (let i = 0; i < items.length; i++) {
+        if (shouldStop) {
+            log("Aborted mid-page.");
+            isWorking = false;
+            return;
+        }
+
         const el = items[i];
 
-        // Highlight
         el.style.border = "3px solid #f0f";
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-        // Click
         el.click();
 
-        // Wait for popup content (dialog, not iframe)
-        const content = await waitForPopupContent(8000);
+        // Wait for popup — but bail out early if FOFA shows a timeout/error notice
+        const content = await waitForPopupContent(5000);
 
         if (content) {
-            log(`Found content (${content.length} chars)`);
+            log(`Popup content (${content.length} chars)`);
             const data = extractData(content);
             log(`Extracted: token=${data.token ? 'YES' : 'NO'}, chatId=${data.chatId || 'NO'}`);
             if (data.token) {
                 chrome.runtime.sendMessage({ action: "RESULT_FOUND", data: data });
-                el.style.background = "#0f0"; // Green for success
+                el.style.background = "#0f0";
             }
         } else {
-            log("No content found in popup");
+            log("Popup timed out or empty — skipping");
         }
 
-        // Close / Cleanup
         closePopup();
         el.style.border = "";
-        await delay(500);
+
+        if (shouldStop) break;
+        await delay(300);
     }
 
-    // Done
     log("Page complete.");
-    chrome.runtime.sendMessage({ action: "PAGE_COMPLETE" });
+    if (!shouldStop) {
+        chrome.runtime.sendMessage({ action: "PAGE_COMPLETE" });
+    }
     isWorking = false;
 }
 
