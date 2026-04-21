@@ -1,7 +1,8 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
-from app.api.routers import monitor, scan
+from app.api.routers import monitor, scan, ingest
 import logging
 import sys
 import asyncio
@@ -62,8 +63,19 @@ app = FastAPI(
     openapi_url=None if settings.ENV == "production" else "/openapi.json"
 )  # Don't block shutdown
 
+# Allow browser-based clients (including the Chrome extension) to call the API.
+# This API should rely on explicit API keys for sensitive operations.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(monitor.router)
 app.include_router(scan.router)
+app.include_router(ingest.router)
 
 # Health check endpoints
 from app.api.routers import health

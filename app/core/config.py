@@ -40,15 +40,18 @@ class Settings(BaseSettings):
     URLSCAN_KEY: Optional[str] = None
     GITHUB_TOKEN: Optional[str] = None
     GITLAB_TOKEN: Optional[str] = None
-    BITBUCKET_USER: Optional[str] = None
-    BITBUCKET_APP_PASSWORD: Optional[str] = None
-    PUBLICWWW_KEY: Optional[str] = None
+    BITBUCKET_USER: Optional[str] = None        # Atlassian account email (for Basic auth with API token)
+    BITBUCKET_API_TOKEN: Optional[str] = None   # API token (replaces app password — use Bearer auth)
     SERPER_API_KEY: Optional[str] = None
     CENSYS_ID: Optional[str] = None
     CENSYS_SECRET: Optional[str] = None
     HYBRID_ANALYSIS_KEY: Optional[str] = None
     GOOGLE_SEARCH_KEY: Optional[str] = None
     GOOGLE_CSE_ID: Optional[str] = None
+    # Netlas — two accounts, rotated automatically to stay within daily limits
+    # Account 1: 50 req/day, 2500 search coins  Account 2: 100 req/day, 5000 search coins
+    NETLAS_API_KEY_1: Optional[str] = None
+    NETLAS_API_KEY_2: Optional[str] = None
     
     # Target Countries (Tiered by Telegram usage volume)
     # Primary:   Top Telegram DAU per capita (CIS, South/Southeast Asia, MENA, LatAm)

