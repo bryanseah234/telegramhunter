@@ -1,5 +1,5 @@
 // --- CONFIGURATION ---
-const BASE_QUERY_TEMPLATE = 'body="api.telegram.org"'; // Default
+const BASE_QUERY_TEMPLATE = 'body="api.telegram.org/bot"'; // Narrowed to /bot path to reduce documentation page false positives
 const COUNTRY_CODES = [
     "US", "CN", "HK", "RU", "FR", "DE", "NL", "SG", "GB", "JP",
     "KR", "IN", "BR", "CA", "AU", "IT", "ES", "TR", "UA", "VN",
