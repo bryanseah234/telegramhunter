@@ -22,7 +22,7 @@
   - Mark task complete when test is written, run, and failure is documented
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 1.10, 1.11, 1.12, 1.13, 1.14, 1.15_
 
-- [ ] 2. Write preservation property tests (BEFORE implementing fix)
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
   - **Property 2: Preservation** - Caller-Supplied Query Pass-Through and No Existing Entries Removed
   - **IMPORTANT**: Follow observation-first methodology
   - Observe: when `_scan_shodan_async(query="my_custom_query")` is called on unfixed code, the query list is `["my_custom_query"]`
@@ -40,9 +40,9 @@
   - Mark task complete when tests are written, run, and passing on unfixed code
   - _Requirements: 3.1, 3.2, 3.3, 3.4_
 
-- [ ] 3. Fix scanner query coverage across all five scanners
+- [x] 3. Fix scanner query coverage across all five scanners
 
-  - [~] 3.1 Add `_shodan_body_query` helper to `scanner_tasks.py`
+  - [x] 3.1 Add `_shodan_body_query` helper to `scanner_tasks.py`
     - Add new module-level helper function before the query constants
     - Function signature: `def _shodan_body_query(anchor: str, extra: str = "") -> str`
     - Builds query by joining anchor, optional extra, `-http.body:"telegram.org"`, `-http.body:"github.com"`, and `http.status:200`
@@ -52,7 +52,7 @@
     - _Preservation: helper is additive — no existing code paths are altered_
     - _Requirements: 2.5, 2.7, 2.9_
 
-  - [~] 3.2 Add `SHODAN_DEFAULT_QUERIES` module-level constant and update `_scan_shodan_async`
+  - [x] 3.2 Add `SHODAN_DEFAULT_QUERIES` module-level constant and update `_scan_shodan_async`
     - Add `SHODAN_DEFAULT_QUERIES` as a module-level list constant (replaces inline `default_queries` construction)
     - Tier 1 entries: `'http.headers:"X-Telegram-Bot-Api"'`, `_shodan_body_query('http.body:"api.telegram.org/bot"')`, `_shodan_body_query('http.body:"http://t.me/bot"')`, `_shodan_body_query('http.body:"https://t.me"', 'http.body:"/start"')`
     - Tier 2 entries: all 15 `/start` payload variants via `_shodan_body_query` (payload=, token=, cmd=, c2=, key=, id=, /bin/bash, /powershell, download, /exec, /run, /invoke, /script, http://, https://)
@@ -64,7 +64,7 @@
     - _Preservation: all existing http.html: and http.title: entries retained; caller-supplied query pass-through unchanged_
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
 
-  - [~] 3.3 Update `C2_QUERIES` in `_scan_shodan_c2_async` to add missing entries and exclusion filters
+  - [x] 3.3 Update `C2_QUERIES` in `_scan_shodan_c2_async` to add missing entries and exclusion filters
     - Add two missing Tier 2 entries using `_shodan_body_query`: `/start key=` and `/start id=`
     - Apply `_shodan_body_query` to all existing `http.body:` entries to add exclusion filters (entries that already have `http.status:200` but lack exclusion filters)
     - Retain the header-based entry `'http.headers:"X-Telegram-Bot-Api"'` unchanged (no body filter needed)
@@ -73,7 +73,7 @@
     - _Preservation: all 29 existing C2_QUERIES entries retained; no entries removed_
     - _Requirements: 2.6, 2.7_
 
-  - [~] 3.4 Update `NETLAS_QUERIES` to add missing Tier 2 entries and exclusion filters
+  - [x] 3.4 Update `NETLAS_QUERIES` to add missing Tier 2 entries and exclusion filters
     - Add 5 missing Tier 2 entries with Netlas syntax and exclusion filters: `/start id=`, `/start /run`, `/start /invoke`, `/start /script`, `/start http://`
     - Format: `'http.body:"api.telegram.org/bot" http.body:"/start id=" http.status_code:200 NOT http.body:"telegram.org" NOT http.body:"github.com"'`
     - Apply Netlas-syntax exclusion filters (`NOT http.body:"telegram.org" NOT http.body:"github.com"`) to all existing `http.body:` entries in `NETLAS_QUERIES` that lack them
@@ -82,7 +82,7 @@
     - _Preservation: all 34 existing NETLAS_QUERIES entries retained; no entries removed_
     - _Requirements: 2.8, 2.9_
 
-  - [~] 3.5 Add `FOFA_DEFAULT_QUERIES` module-level constant and update `_scan_fofa_async`
+  - [x] 3.5 Add `FOFA_DEFAULT_QUERIES` module-level constant and update `_scan_fofa_async`
     - Add `FOFA_DEFAULT_QUERIES` as a module-level list constant (replaces inline `COMMON_QUERIES` construction)
     - Retain all 5 existing entries, adding `status_code="200"` where missing
     - Add Tier 1 t.me entries: `'body="http://t.me/bot" && status_code="200"'`, `'body="https://t.me" && body="/start" && status_code="200"'`
@@ -94,7 +94,7 @@
     - _Preservation: all 5 original COMMON_QUERIES entries retained; caller-supplied query pass-through unchanged_
     - _Requirements: 2.10, 2.11, 2.12, 2.13_
 
-  - [~] 3.6 Update `BASE_QUERY_TEMPLATE` in `extension/background.js`
+  - [x] 3.6 Update `BASE_QUERY_TEMPLATE` in `extension/background.js`
     - Change `BASE_QUERY_TEMPLATE` from `'body="api.telegram.org"'` to `'body="api.telegram.org/bot"'`
     - This narrows the default anchor to the `/bot` path, reducing documentation page false positives
     - _Bug_Condition: isBugCondition(queryList, extension) — BASE_QUERY_TEMPLATE uses broad anchor without /bot path_
@@ -102,7 +102,7 @@
     - _Preservation: token validation (getMe), deduplication, upload routes, and all other extension logic unchanged_
     - _Requirements: 2.14_
 
-  - [~] 3.7 Verify bug condition exploration test now passes
+  - [x] 3.7 Verify bug condition exploration test now passes
     - **Property 1: Expected Behavior** - Scanner Query Lists Satisfy Decoupled Tier Strategy
     - **IMPORTANT**: Re-run the SAME test from task 1 — do NOT write a new test
     - The test from task 1 encodes the expected behavior for all five scanners
@@ -111,14 +111,14 @@
     - **EXPECTED OUTCOME**: Test PASSES (confirms bug is fixed across all scanners)
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 2.10, 2.11, 2.12, 2.13, 2.14_
 
-  - [~] 3.8 Verify preservation tests still pass
+  - [x] 3.8 Verify preservation tests still pass
     - **Property 2: Preservation** - Caller-Supplied Query Pass-Through and No Existing Entries Removed
     - **IMPORTANT**: Re-run the SAME tests from task 2 — do NOT write new tests
     - Run preservation property tests from step 2
     - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions — caller pass-through intact, no entries removed)
     - Confirm all tests still pass after fix (no regressions)
 
-- [~] 4. Checkpoint — Ensure all tests pass
+- [x] 4. Checkpoint — Ensure all tests pass
   - Run the full test suite: `pytest tests/unit/ tests/integration/ -v`
   - Ensure all tests pass, ask the user if questions arise
   - Confirm that the bug condition exploration test (task 1) now passes
