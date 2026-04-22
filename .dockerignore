@@ -1,37 +1,58 @@
-# Never send these to Docker build context
+# ── Frontend build artifacts ──────────────────────────────────────────────────
 frontend/node_modules/
 frontend/.next/
 frontend/out/
 
-# Python cache
+# ── Python cache & build artifacts ────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*.pyo
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+.hypothesis/
 
-# Secrets & sessions
+# ── Virtual environments (never send to Docker) ────────────────────────────────
+.venv/
+.venv-*/
+venv/
+env/
+
+# ── Secrets & sessions ────────────────────────────────────────────────────────
 .env
 *.session
 *.session-journal
 sessions/
 
-# Git
+# ── Git & CI ──────────────────────────────────────────────────────────────────
 .git/
 .github/
 
-# Logs
+# ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
 logs/
 
-# OS
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# IDE
+# ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 
-# Kiro
+# ── AI / tooling ──────────────────────────────────────────────────────────────
 .kiro/
+.qodo/
+.claude/
+.deepsource.toml
+.sourcery.yml
+.pre-commit-config.yaml
+
+# ── Docs / scratch files at root (not needed in image) ────────────────────────
+bugfix.md
+design.md
+tasks.md
+PRD.md
+README.md
+LICENSE
