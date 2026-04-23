@@ -1,10 +1,10 @@
-FROM python:3.11-slim-bookworm
-
 # ============================================
-# Local Docker Deployment (Aggressive Mode)
+# Stage 1: base — system deps + Python packages
+# All services share this cached layer.
+# Only rebuilds when requirements.txt changes.
 # ============================================
+FROM python:3.11-slim-bookworm AS base
 
-# Environment - PYTHONOPTIMIZE=0 required for Telethon/pycparser
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONOPTIMIZE=0 \
@@ -12,36 +12,38 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Dependencies - minimal install
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     dos2unix \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Requirements - with cache for faster rebuilds
+# Python dependencies — cached separately from app code
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && rm -rf ~/.cache/pip
 
-# Create a non-root user
+# Non-root user
 RUN useradd -m -u 1000 celery
 
-# Application Code
+# ============================================
+# Stage 2: final — app code only
+# Rebuilds fast: only copies source files.
+# ============================================
+FROM base AS final
+
+# Application code
 COPY . .
 
-# Create required directories with proper ownership
+# Required directories + ownership
 RUN mkdir -p /app/imports/processed && \
     chown -R celery:celery /app
 
-# Make entrypoint executable and fix line endings (Windows CRLF → LF)
+# Fix line endings (Windows CRLF → LF) and make entrypoint executable
 RUN dos2unix /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
-# Switch to non-root user
 USER celery
 
-# Set entrypoint (runs CSV import before main command)
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-
-# Default command (overridden by docker-compose)
 CMD ["bash"]
