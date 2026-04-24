@@ -5,8 +5,20 @@ import Sidebar from "@/components/Sidebar";
 import ChatWindow from "@/components/ChatWindow";
 import { LucideTarget, LucideSmartphone } from "lucide-react";
 
+export interface Credential {
+  id: string;
+  created_at: string;
+  source: string;
+  meta?: {
+    chat_title?: string;
+    bot_username?: string;
+    bot_id?: string;
+    [key: string]: unknown;
+  };
+}
+
 export default function Home() {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Credential | null>(null);
   const [isMobile, setIsMobile] = useState(false);
 
   useEffect(() => {
@@ -44,8 +56,8 @@ export default function Home() {
 
   return (
     <main className="flex h-screen w-full overflow-hidden bg-white">
-      <Sidebar selectedId={selectedId} onSelect={setSelectedId} />
-      <ChatWindow credentialId={selectedId || ""} />
+      <Sidebar selected={selected} onSelect={setSelected} />
+      <ChatWindow credential={selected} />
     </main>
   );
 }

@@ -3,30 +3,14 @@
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { LucideTarget } from "lucide-react";
-
-interface Credential {
-    id: string;
-    created_at: string;
-    source: string;
-    meta?: {
-        chat_title?: string;
-        bot_username?: string;
-        bot_id?: string;
-        [key: string]: unknown;
-    };
-}
-
-interface MessageWithCredential {
-    credential_id: string;
-    discovered_credentials: Credential | null;
-}
+import type { Credential } from "@/app/page";
 
 export default function Sidebar({
-    selectedId,
+    selected,
     onSelect,
 }: {
-    selectedId: string | null;
-    onSelect: (id: string) => void;
+    selected: Credential | null;
+    onSelect: (cred: Credential) => void;
 }) {
     const [credentials, setCredentials] = useState<Credential[]>([]);
     // Use ref to access current credentials in realtime callback without causing re-subscription
@@ -132,8 +116,8 @@ export default function Sidebar({
                 {credentials.map((cred) => (
                     <button
                         key={cred.id}
-                        onClick={() => onSelect(cred.id)}
-                        className={`p-4 border-b text-left hover:bg-slate-100 transition-colors ${selectedId === cred.id ? "bg-blue-50 border-l-4 border-l-blue-500" : ""
+                        onClick={() => onSelect(cred)}
+                        className={`p-4 border-b text-left hover:bg-slate-100 transition-colors ${selected?.id === cred.id ? "bg-blue-50 border-l-4 border-l-blue-500" : ""
                             }`}
                     >
                         <div className="flex justify-between w-full mb-1">
