@@ -125,6 +125,24 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_KEY: ${SUPABASE_KEY}
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_frontend
+    restart: always
+    init: true
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   bot:
     build: .
     container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_bot
