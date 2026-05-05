@@ -12,8 +12,8 @@ jobs:
     steps:
       - name: Ping Supabase REST API
         env:
-          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           echo "Pinging Supabase at: $SUPABASE_URL"
 
@@ -60,4 +60,4 @@ jobs:
       - name: Report failure
         if: failure()
         run: |
-          echo "::error::Supabase keepalive ping failed. Check that NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_KEY secrets are set correctly."
+          echo "::error::Supabase keepalive ping failed. Check that SUPABASE_URL and SUPABASE_KEY secrets are set correctly."
