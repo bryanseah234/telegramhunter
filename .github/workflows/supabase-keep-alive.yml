@@ -2,26 +2,62 @@ name: Supabase Keep Alive
 
 on:
   schedule:
-    - cron: "0 8 */5 * *"  # Every 5 days at 08:00 UTC — well within the 7-day pause window
-  workflow_dispatch:        # Allow manual trigger from GitHub Actions UI
+    - cron: "0 8 */3 * *"  # Every 3 days at 08:00 UTC — within 7-day pause window
+  workflow_dispatch:      # Allow manual trigger from GitHub Actions UI
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Ping Supabase REST API
+        env:
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_KEY }}
         run: |
-          HTTP_CODE=$(curl -s -o /tmp/supabase_response.json -w "%{http_code}" \
-            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
-            "${{ secrets.SUPABASE_URL }}/rest/v1/discovered_credentials?select=id&limit=1")
+          echo "Pinging Supabase at: $SUPABASE_URL"
 
-          echo "HTTP status: $HTTP_CODE"
+          # SELECT query to show database is alive
+          HTTP_STATUS=$(curl -s -o /tmp/supabase_response.json -w "%{http_code}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 5 \
+            --retry-connrefused \
+            "$SUPABASE_URL/rest/v1/keepalive_logs?select=id&limit=1" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY")
+
+          echo "HTTP Status (SELECT): $HTTP_STATUS"
           cat /tmp/supabase_response.json
 
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo "❌ Supabase ping failed with HTTP $HTTP_CODE"
+          # INSERT query to create a keepalive record
+          HTTP_STATUS_INSERT=$(curl -s -o /tmp/supabase_insert.json -w "%{http_code}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 5 \
+            --retry-connrefused \
+            "$SUPABASE_URL/rest/v1/keepalive_logs" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"source": "github-actions"}')
+
+          echo "HTTP Status (INSERT): $HTTP_STATUS_INSERT"
+          cat /tmp/supabase_insert.json
+
+          # Check for acceptable status codes
+          if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "406" ]] && \
+             [[ "$HTTP_STATUS_INSERT" == "200" || "$HTTP_STATUS_INSERT" == "201" ]]; then
+            echo "✅ Supabase is alive (SELECT: HTTP $HTTP_STATUS, INSERT: HTTP $HTTP_STATUS_INSERT)"
+          elif [[ "$HTTP_STATUS" == "401" || "$HTTP_STATUS" == "403" ]]; then
+            echo "⚠️  Auth error (HTTP $HTTP_STATUS) — DB is alive but check your secrets"
+            exit 1
+          else
+            echo "❌ Supabase ping failed (SELECT: HTTP $HTTP_STATUS, INSERT: HTTP $HTTP_STATUS_INSERT)"
             exit 1
           fi
 
-          echo "✅ Supabase is alive (HTTP $HTTP_CODE)"
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "::error::Supabase keepalive ping failed. Check that NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_KEY secrets are set correctly."
