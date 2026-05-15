@@ -33,7 +33,7 @@ services:
     ports:
       - "${API_PORT:-8011}:8001"
     env_file: .env
-    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8001 --workers 2
+    command: gunicorn app.api.main:app -k uvicorn.workers.UvicornWorker -w 2 --bind 0.0.0.0:8001 --timeout 120
     depends_on:
       redis:
         condition: service_healthy
@@ -111,7 +111,7 @@ services:
     restart: always
     init: true
     env_file: .env
-    command: celery -A app.workers.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    command: celery -A app.workers.celery_app beat --loglevel=info --schedule /app/celerybeat/celerybeat-schedule
     depends_on:
       redis:
         condition: service_healthy
@@ -119,6 +119,7 @@ services:
         condition: service_started
     volumes:
       - sessions:/app/sessions
+      - celerybeat:/app/celerybeat
     logging:
       driver: "json-file"
       options:
@@ -170,3 +171,5 @@ volumes:
     name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_sessions
   imports:
     name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_imports
+  celerybeat:
+    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_celerybeat

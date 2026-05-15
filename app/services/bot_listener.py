@@ -30,6 +30,9 @@ from app.core.constants import LOCK_TTL_SECONDS, SESSION_FILE_PERMISSIONS, WORKE
 
 from enum import Enum, auto
 
+# Unique ID for this process instance — used in distributed Redis locks
+INSTANCE_ID = str(uuid.uuid4())
+
 # Login flow states
 class LoginState(Enum):
     WAITING_FOR_PHONE = 0
@@ -223,8 +226,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Check DB / Pending Queue
     queue_count = "?"
     try:
-        # db.table is likely synchronous supabase client.
-        res = db.table("exfiltrated_messages").select("id", count="exact").eq("is_broadcasted", False).execute()
+        res = await asyncio.to_thread(
+            lambda: db.table("exfiltrated_messages").select("id", count="exact").eq("is_broadcasted", False).execute()
+        )
         queue_count = res.count
     except Exception as e:
         queue_count = f"❌ Error: {str(e)[:20]}"
@@ -601,12 +605,14 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if saved_successfully:
             # Database Entry (Persistence & Database Update)
             try:
-                db.table("telegram_accounts").upsert({
-                    "phone": context.user_data.get('phone'),
-                    "session_path": os.path.abspath(final_path),
-                    "status": "active",
-                    "updated_at": "now()"
-                }).execute()
+                await asyncio.to_thread(
+                    lambda: db.table("telegram_accounts").upsert({
+                        "phone": context.user_data.get('phone'),
+                        "session_path": os.path.abspath(final_path),
+                        "status": "active",
+                        "updated_at": "now()"
+                    }).execute()
+                )
                 logger.info(f"Updated telegram_accounts for {context.user_data.get('phone')}")
             except Exception as e:
                 logger.error(f"Failed to update database: {e}")
@@ -843,7 +849,7 @@ async def main():
     await asyncio.gather(*tasks, return_exceptions=True)
     
     # Close Redis
-    await redis_client.close()
+    await redis_client.aclose()
     logger.info("Bye!")
 
 if __name__ == "__main__":

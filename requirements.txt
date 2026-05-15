@@ -1,5 +1,6 @@
 fastapi==0.136.0           # SECURITY: starlette>=1.0.0 (fixes CVE-2024-47874, CVE-2025-54121)
 uvicorn==0.44.0
+gunicorn==23.0.0
 pydantic>=2.10.0,<3.0.0
 pydantic-settings>=2.6.0,<3.0.0
 supabase==2.28.3
