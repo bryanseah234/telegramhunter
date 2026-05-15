@@ -699,7 +699,8 @@ class ScraperService:
         is_monitor_bot = self.is_monitor_bot(bot_token)
 
         try:
-            logger.info(f"🔍 [Discovery] Validating token {bot_token[:15]}... via Bot API")
+            bot_id_only = bot_token.split(":")[0]
+            logger.info(f"🔍 [Discovery] Validating bot_id={bot_id_only} via Bot API")
 
             async with httpx.AsyncClient(timeout=15.0) as client:
                 # Step 1: Validate token with getMe

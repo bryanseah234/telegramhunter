@@ -343,65 +343,65 @@ class UserAgentService:
             if not await self.start():
                 return False
             
-        try:  # noqa: SIM105
-            # Ensure identifiers are correct
-            # Group ID might need modification depending on type (chat vs channel)
-            # -100 prefix is typically for channels/supergroups. Telethon handles standard IDs often.
-            
-            # Resolve entities
-            try:
-                bot_entity = await self.client.get_entity(bot_username)
+            try:  # noqa: SIM105
+                # Ensure identifiers are correct
+                # Group ID might need modification depending on type (chat vs channel)
+                # -100 prefix is typically for channels/supergroups. Telethon handles standard IDs often.
                 
-                # Handle both integer IDs and usernames
-                if str(group_id).lstrip('-').isdigit(): 
-                    target = int(group_id)
-                else:
-                    target = group_id # Assume username string
+                # Resolve entities
+                try:
+                    bot_entity = await self.client.get_entity(bot_username)
                     
-                group_entity = await self.client.get_entity(target)
+                    # Handle both integer IDs and usernames
+                    if str(group_id).lstrip('-').isdigit(): 
+                        target = int(group_id)
+                    else:
+                        target = group_id # Assume username string
+                        
+                    group_entity = await self.client.get_entity(target)
+                except errors.FloodWaitError as e:
+                    await self._handle_flood_error(e)
+                    return False
+                except Exception as e:
+                    logger.error(f"    ❌ [UserAgent] Entity resolution failed: {e}")
+                    return False
+
+                logger.info(f"    🚀 [UserAgent] Inviting {bot_username} to group...")
+                
+                # Try AddChatUserRequest (for basic groups) or InviteToChannelRequest (for supergroups/channels)
+                from telethon.tl.functions.channels import InviteToChannelRequest
+                from telethon.tl.functions.messages import AddChatUserRequest
+                
+                try:
+                    # Try as Channel/Supergroup first
+                    await self.client(InviteToChannelRequest(
+                        channel=group_entity,
+                        users=[bot_entity]
+                    ))
+                    logger.info("    ✅ [UserAgent] Invite successful (Channel/Supergroup).")
+                    return True
+                except Exception as e_channel:
+                    # Fallback to basic chat
+                    try:
+                        await self.client(AddChatUserRequest(
+                            chat_id=group_entity.id,
+                            user_id=bot_entity,
+                            fwd_limit=0
+                        ))
+                        logger.info("    ✅ [UserAgent] Invite successful (Basic Chat).")
+                        return True
+                    except Exception as e_chat:
+                        logger.error(f"    ❌ [UserAgent] Invite failed: {e_channel} | {e_chat}")
+                        return False
+                        
             except errors.FloodWaitError as e:
                 await self._handle_flood_error(e)
                 return False
             except Exception as e:
-                logger.error(f"    ❌ [UserAgent] Entity resolution failed: {e}")
+                logger.error(f"    ❌ [UserAgent] Error: {e}")
                 return False
-
-            logger.info(f"    🚀 [UserAgent] Inviting {bot_username} to group...")
-            
-            # Try AddChatUserRequest (for basic groups) or InviteToChannelRequest (for supergroups/channels)
-            from telethon.tl.functions.channels import InviteToChannelRequest
-            from telethon.tl.functions.messages import AddChatUserRequest
-            
-            try:
-                # Try as Channel/Supergroup first
-                await self.client(InviteToChannelRequest(
-                    channel=group_entity,
-                    users=[bot_entity]
-                ))
-                logger.info("    ✅ [UserAgent] Invite successful (Channel/Supergroup).")
-                return True
-            except Exception as e_channel:
-                # Fallback to basic chat
-                try:
-                    await self.client(AddChatUserRequest(
-                        chat_id=group_entity.id,
-                        user_id=bot_entity,
-                        fwd_limit=0
-                    ))
-                    logger.info("    ✅ [UserAgent] Invite successful (Basic Chat).")
-                    return True
-                except Exception as e_chat:
-                    logger.error(f"    ❌ [UserAgent] Invite failed: {e_channel} | {e_chat}")
-                    return False
-                    
-        except errors.FloodWaitError as e:
-            await self._handle_flood_error(e)
-            return False
-        except Exception as e:
-            logger.error(f"    ❌ [UserAgent] Error: {e}")
-            return False
-        finally:
-            await self._disconnect()
+            finally:
+                await self._disconnect()
 
     async def _handle_flood_error(self, e):
         """Logs and sets persistent cooldown for FloodWaitError (Per Session)."""
@@ -429,42 +429,42 @@ class UserAgentService:
             if not await self.start():
                 return None
             
-        try:
-            # Resolve entity
-            if str(group_id).lstrip('-').isdigit(): 
-                target = int(group_id)
-            else:
-                target = group_id
+            try:
+                # Resolve entity
+                if str(group_id).lstrip('-').isdigit(): 
+                    target = int(group_id)
+                else:
+                    target = group_id
+                    
+                entity = await self.client.get_entity(target)
                 
-            entity = await self.client.get_entity(target)
-            
-            # Use GetForumTopicsRequest with query for efficiency
-            from telethon.tl.functions.channels import GetForumTopicsRequest
-            
-            # Search by name
-            res = await self.client(GetForumTopicsRequest(
-                channel=entity,
-                q=topic_name,
-                offset_date=0,
-                offset_id=0,
-                offset_topic=0,
-                limit=10 
-            ))
-            
-            if res.topics:
-                for topic in res.topics:
-                    # Strict match
-                    if topic.title == topic_name:
-                        logger.info(f"    🔍 [UserAgent] Found existing topic: {topic.title} ({topic.id})")
-                        return topic.id
-                        
-            return None
-            
-        except Exception as e:
-            logger.warning(f"    ⚠️ [UserAgent] Find topic failed: {e}")
-            return None
-        finally:
-            await self._disconnect()
+                # Use GetForumTopicsRequest with query for efficiency
+                from telethon.tl.functions.channels import GetForumTopicsRequest
+                
+                # Search by name
+                res = await self.client(GetForumTopicsRequest(
+                    channel=entity,
+                    q=topic_name,
+                    offset_date=0,
+                    offset_id=0,
+                    offset_topic=0,
+                    limit=10 
+                ))
+                
+                if res.topics:
+                    for topic in res.topics:
+                        # Strict match
+                        if topic.title == topic_name:
+                            logger.info(f"    🔍 [UserAgent] Found existing topic: {topic.title} ({topic.id})")
+                            return topic.id
+                            
+                return None
+                
+            except Exception as e:
+                logger.warning(f"    ⚠️ [UserAgent] Find topic failed: {e}")
+                return None
+            finally:
+                await self._disconnect()
 
     async def cleanup_bots(self, group_id: int | str, whitelist_ids: list[int | str] = None, only_non_admins: bool = True) -> int:
         """
@@ -477,76 +477,76 @@ class UserAgentService:
             if not await self.start():
                 return 0
             
-        removed_count = 0
-        try:
-            # Resolve entity
-            if str(group_id).lstrip('-').isdigit(): 
-                target = int(group_id)
-            else:
-                target = group_id
-            
-            entity = await self.client.get_entity(target)
-            
-            logger.info(f"    🧹 [UserAgent] Starting Bot Cleanup in {entity.title}...")
-            
-            # Prepare rights for kicking (view_messages=True banning kicks them)
-            from telethon.tl.functions.channels import EditBannedRequest, GetParticipantRequest
-            from telethon.tl.types import ChatBannedRights, ChannelParticipantAdmin, ChannelParticipantCreator
-            
-            kick_rights = ChatBannedRights(
-                until_date=None,
-                view_messages=True
-            )
-            
-            # Normalize whitelist
-            whitelist_str = [str(x).strip().lstrip('@') for x in (whitelist_ids or [])]
-            
-            async for user in self.client.iter_participants(entity):
-                if user.bot:
-                    # 1. Check Whitelist
-                    if str(user.id) in whitelist_str or user.username in whitelist_str:
-                         continue
-                         
-                    # 2. Check Admin Status if requested
-                    if only_non_admins:
-                        try:
-                            participant = await self.client(GetParticipantRequest(channel=entity, participant=user))
-                            if isinstance(participant.participant, (ChannelParticipantAdmin, ChannelParticipantCreator)):
-                                # logger.info(f"    🛡️ [UserAgent] Skipping admin bot: @{user.username}")
-                                continue
-                        except Exception:
-                            pass
+            removed_count = 0
+            try:
+                # Resolve entity
+                if str(group_id).lstrip('-').isdigit(): 
+                    target = int(group_id)
+                else:
+                    target = group_id
+                
+                entity = await self.client.get_entity(target)
+                
+                logger.info(f"    🧹 [UserAgent] Starting Bot Cleanup in {entity.title}...")
+                
+                # Prepare rights for kicking (view_messages=True banning kicks them)
+                from telethon.tl.functions.channels import EditBannedRequest, GetParticipantRequest
+                from telethon.tl.types import ChatBannedRights, ChannelParticipantAdmin, ChannelParticipantCreator
+                
+                kick_rights = ChatBannedRights(
+                    until_date=None,
+                    view_messages=True
+                )
+                
+                # Normalize whitelist
+                whitelist_str = [str(x).strip().lstrip('@') for x in (whitelist_ids or [])]
+                
+                async for user in self.client.iter_participants(entity):
+                    if user.bot:
+                        # 1. Check Whitelist
+                        if str(user.id) in whitelist_str or user.username in whitelist_str:
+                             continue
+                             
+                        # 2. Check Admin Status if requested
+                        if only_non_admins:
+                            try:
+                                participant = await self.client(GetParticipantRequest(channel=entity, participant=user))
+                                if isinstance(participant.participant, (ChannelParticipantAdmin, ChannelParticipantCreator)):
+                                    # logger.info(f"    🛡️ [UserAgent] Skipping admin bot: @{user.username}")
+                                    continue
+                            except Exception:
+                                pass
 
-                    # Check if it is ME (User Agent)
-                    if user.is_self: continue
-                    
-                    logger.info(f"    🚫 [UserAgent] Kicking bot: @{user.username} ({user.id})")
-                    try:
-                        await self.client(EditBannedRequest(
-                            channel=entity,
-                            participant=user,
-                            banned_rights=kick_rights
-                        ))
-                        removed_count += 1
+                        # Check if it is ME (User Agent)
+                        if user.is_self: continue
                         
-                        # Unban immediately to clear from "Removed Users" list in UI 
-                        # and allow re-inviting if needed.
-                        await self.client(EditBannedRequest(
-                            channel=entity,
-                            participant=user,
-                            banned_rights=ChatBannedRights(until_date=None, view_messages=False)
-                        ))
-                    except Exception as e_kick:
-                        logger.error(f"        ❌ Failed to kick: {e_kick}")
+                        logger.info(f"    🚫 [UserAgent] Kicking bot: @{user.username} ({user.id})")
+                        try:
+                            await self.client(EditBannedRequest(
+                                channel=entity,
+                                participant=user,
+                                banned_rights=kick_rights
+                            ))
+                            removed_count += 1
+                            
+                            # Unban immediately to clear from "Removed Users" list in UI 
+                            # and allow re-inviting if needed.
+                            await self.client(EditBannedRequest(
+                                channel=entity,
+                                participant=user,
+                                banned_rights=ChatBannedRights(until_date=None, view_messages=False)
+                            ))
+                        except Exception as e_kick:
+                            logger.error(f"        ❌ Failed to kick: {e_kick}")
 
-            logger.info(f"    ✨ [UserAgent] Cleanup Complete. Removed {removed_count} bots.")
-            return removed_count
+                logger.info(f"    ✨ [UserAgent] Cleanup Complete. Removed {removed_count} bots.")
+                return removed_count
 
-        except Exception as e:
-            logger.error(f"    ❌ [UserAgent] Cleanup failed: {e}")
-            return 0
-        finally:
-            await self._disconnect()
+            except Exception as e:
+                logger.error(f"    ❌ [UserAgent] Cleanup failed: {e}")
+                return 0
+            finally:
+                await self._disconnect()
 
     async def clear_removed_users(self, group_id: int | str) -> int:
         """
@@ -557,38 +557,38 @@ class UserAgentService:
             if not await self.start():
                 return 0
                 
-        cleared_count = 0
-        try:
-            if str(group_id).lstrip('-').isdigit():
-                target = int(group_id)
-            else:
-                target = group_id
-            entity = await self.client.get_entity(target)
-            
-            from telethon.tl.types import ChannelParticipantsKicked, ChatBannedRights
-            from telethon.tl.functions.channels import EditBannedRequest
-            
-            logger.info(f"    🧹 [UserAgent] Clearing Removed Users list in {entity.title}...")
-            
-            async for user in self.client.iter_participants(entity, filter=ChannelParticipantsKicked()):
-                try:
-                    # Setting view_messages=False effectively unbans/clears them
-                    await self.client(EditBannedRequest(
-                        channel=entity,
-                        participant=user,
-                        banned_rights=ChatBannedRights(until_date=None, view_messages=False)
-                    ))
-                    cleared_count += 1
-                except Exception as e:
-                    logger.warning(f"    ⚠️ [UserAgent] Could not clear user {user.id}: {e}")
-            
-            logger.info(f"    ✨ [UserAgent] Cleared {cleared_count} users from removed list.")
-            return cleared_count
-        except Exception as e:
-            logger.error(f"    ❌ [UserAgent] clear_removed_users failed: {e}")
-            return 0
-        finally:
-            await self._disconnect()
+            cleared_count = 0
+            try:
+                if str(group_id).lstrip('-').isdigit():
+                    target = int(group_id)
+                else:
+                    target = group_id
+                entity = await self.client.get_entity(target)
+                
+                from telethon.tl.types import ChannelParticipantsKicked, ChatBannedRights
+                from telethon.tl.functions.channels import EditBannedRequest
+                
+                logger.info(f"    🧹 [UserAgent] Clearing Removed Users list in {entity.title}...")
+                
+                async for user in self.client.iter_participants(entity, filter=ChannelParticipantsKicked()):
+                    try:
+                        # Setting view_messages=False effectively unbans/clears them
+                        await self.client(EditBannedRequest(
+                            channel=entity,
+                            participant=user,
+                            banned_rights=ChatBannedRights(until_date=None, view_messages=False)
+                        ))
+                        cleared_count += 1
+                    except Exception as e:
+                        logger.warning(f"    ⚠️ [UserAgent] Could not clear user {user.id}: {e}")
+                
+                logger.info(f"    ✨ [UserAgent] Cleared {cleared_count} users from removed list.")
+                return cleared_count
+            except Exception as e:
+                logger.error(f"    ❌ [UserAgent] clear_removed_users failed: {e}")
+                return 0
+            finally:
+                await self._disconnect()
 
     async def delete_old_messages(self, group_id: int | str, age_hours: int, topic_id: int | None = None) -> int:
         """
@@ -599,44 +599,44 @@ class UserAgentService:
             if not await self.start():
                 return 0
 
-        import datetime
-        from telethon.tl.types import Message
-        
-        deleted_count = 0
-        try:
-            if str(group_id).lstrip('-').isdigit():
-                target = int(group_id)
-            else:
-                target = group_id
-            entity = await self.client.get_entity(target)
+            import datetime
+            from telethon.tl.types import Message
             
-            now = datetime.datetime.now(datetime.timezone.utc)
-            cutoff = now - datetime.timedelta(hours=age_hours)
-            
-            logger.info(f"    🧹 [UserAgent] Cleaning up messages older than {age_hours}h in topic {topic_id or 'General'}...")
-            
-            # Use iter_messages with reply_to=topic_id for specific topics
-            # If topic_id is None, it targets General (thread-less) in many Supergroups
-            # or simply the main chat.
-            async for message in self.client.iter_messages(entity, reply_to=topic_id):
-                if not isinstance(message, Message): continue
+            deleted_count = 0
+            try:
+                if str(group_id).lstrip('-').isdigit():
+                    target = int(group_id)
+                else:
+                    target = group_id
+                entity = await self.client.get_entity(target)
                 
-                # Check if message is older than cutoff
-                if message.date < cutoff:
-                    try:
-                        await self.client.delete_messages(entity, [message.id])
-                        deleted_count += 1
-                    except Exception as e:
-                        logger.warning(f"    ⚠️ [UserAgent] Failed to delete message {message.id}: {e}")
-                        
-            logger.info(f"    ✨ [UserAgent] Deleted {deleted_count} messages.")
-            return deleted_count
-            
-        except Exception as e:
-            logger.error(f"    ❌ [UserAgent] delete_old_messages failed: {e}")
-            return 0
-        finally:
-            await self._disconnect()
+                now = datetime.datetime.now(datetime.timezone.utc)
+                cutoff = now - datetime.timedelta(hours=age_hours)
+                
+                logger.info(f"    🧹 [UserAgent] Cleaning up messages older than {age_hours}h in topic {topic_id or 'General'}...")
+                
+                # Use iter_messages with reply_to=topic_id for specific topics
+                # If topic_id is None, it targets General (thread-less) in many Supergroups
+                # or simply the main chat.
+                async for message in self.client.iter_messages(entity, reply_to=topic_id):
+                    if not isinstance(message, Message): continue
+                    
+                    # Check if message is older than cutoff
+                    if message.date < cutoff:
+                        try:
+                            await self.client.delete_messages(entity, [message.id])
+                            deleted_count += 1
+                        except Exception as e:
+                            logger.warning(f"    ⚠️ [UserAgent] Failed to delete message {message.id}: {e}")
+                            
+                logger.info(f"    ✨ [UserAgent] Deleted {deleted_count} messages.")
+                return deleted_count
+                
+            except Exception as e:
+                logger.error(f"    ❌ [UserAgent] delete_old_messages failed: {e}")
+                return 0
+            finally:
+                await self._disconnect()
 
     async def send_message(self, target: int | str, message: str) -> bool:
         """
@@ -646,21 +646,21 @@ class UserAgentService:
             if not await self.start():
                 return False
 
-        try:
-            # Resolve entity
-            if str(target).lstrip('-').isdigit():
-                entity = int(target)
-            else:
-                entity = target
+            try:
+                # Resolve entity
+                if str(target).lstrip('-').isdigit():
+                    entity = int(target)
+                else:
+                    entity = target
 
-            await self.client.send_message(entity, message)
-            logger.info(f"    🗣️ [UserAgent] Sent: '{message}'")
-            return True
-        except Exception as e:
-            logger.error(f"    ❌ [UserAgent] Send failed: {e}")
-            return False
-        finally:
-            await self._disconnect()
+                await self.client.send_message(entity, message)
+                logger.info(f"    🗣️ [UserAgent] Sent: '{message}'")
+                return True
+            except Exception as e:
+                logger.error(f"    ❌ [UserAgent] Send failed: {e}")
+                return False
+            finally:
+                await self._disconnect()
 
     async def get_last_message_id(self, group_id: int | str, topic_id: int) -> int | None:
         """
@@ -671,34 +671,34 @@ class UserAgentService:
             if not await self.start():
                 return None
             
-        try:
-            # Resolve entity
-            if str(group_id).lstrip('-').isdigit(): 
-                target = int(group_id)
-            else:
-                target = group_id
+            try:
+                # Resolve entity
+                if str(group_id).lstrip('-').isdigit(): 
+                    target = int(group_id)
+                else:
+                    target = group_id
+                    
+                entity = await self.client.get_entity(target)
                 
-            entity = await self.client.get_entity(target)
-            
-            # Fetch last message in the topic
-            # Telethon's iter_messages with reply_to=topic_id filters for that thread
-            messages = await self.client.get_messages(
-                entity, 
-                limit=1, 
-                reply_to=topic_id
-            )
-            
-            if messages:
-                # print(f"    🔍 [UserAgent] Last Msg ID in Topic {topic_id}: {messages[0].id}")
-                return messages[0].id
+                # Fetch last message in the topic
+                # Telethon's iter_messages with reply_to=topic_id filters for that thread
+                messages = await self.client.get_messages(
+                    entity, 
+                    limit=1, 
+                    reply_to=topic_id
+                )
                 
-            return None
-            
-        except Exception as e:
-            logger.error(f"    ❌ [UserAgent] Failed to get last message: {e}")
-            return None
-        finally:
-            await self._disconnect()
+                if messages:
+                    # print(f"    🔍 [UserAgent] Last Msg ID in Topic {topic_id}: {messages[0].id}")
+                    return messages[0].id
+                    
+                return None
+                
+            except Exception as e:
+                logger.error(f"    ❌ [UserAgent] Failed to get last message: {e}")
+                return None
+            finally:
+                await self._disconnect()
 
     async def get_history(self, group_id: int | str, limit: int) -> list[dict]:
         """
@@ -710,54 +710,54 @@ class UserAgentService:
             if not await self.start():
                 return []
             
-        msgs = []
-        try:
-            # Resolve entity
-            if str(group_id).lstrip('-').isdigit(): 
-                target = int(group_id)
-            else:
-                target = group_id
+            msgs = []
+            try:
+                # Resolve entity
+                if str(group_id).lstrip('-').isdigit(): 
+                    target = int(group_id)
+                else:
+                    target = group_id
+                    
+                entity = await self.client.get_entity(target)
                 
-            entity = await self.client.get_entity(target)
-            
-            async for message in self.client.iter_messages(entity, limit=limit):
-                if not isinstance(message, Message): continue
+                async for message in self.client.iter_messages(entity, limit=limit):
+                    if not isinstance(message, Message): continue
+                    
+                    content = message.text or ""
+                    media_type = "text"
+                    file_meta = {}
+
+                    if message.media:
+                        if isinstance(message.media, MessageMediaPhoto):
+                            media_type = "photo"
+                            file_meta = {"wc": "photo", "id": getattr(message.media.photo, 'id', 0)}
+                        elif isinstance(message.media, MessageMediaDocument):
+                            media_type = "document"
+                            file_meta = {"mime": message.media.document.mime_type}
+                        else:
+                            media_type = "other"
+
+                    sender_name = "Unknown"
+                    if message.sender:
+                        if hasattr(message.sender, 'username') and message.sender.username:
+                            sender_name = message.sender.username
+                        elif hasattr(message.sender, 'first_name'):
+                            sender_name = message.sender.first_name
+
+                    msgs.append({
+                        "telegram_msg_id": message.id,
+                        "sender_name": sender_name,
+                        "content": content,
+                        "media_type": media_type,
+                        "file_meta": file_meta,
+                        "chat_id": entity.id if hasattr(entity, 'id') else group_id
+                    })
+            except Exception as e:
+                logger.error(f"    ❌ [UserAgent] Failed to fetch history: {e}")
+            finally:
+                await self._disconnect()
                 
-                content = message.text or ""
-                media_type = "text"
-                file_meta = {}
-
-                if message.media:
-                    if isinstance(message.media, MessageMediaPhoto):
-                        media_type = "photo"
-                        file_meta = {"wc": "photo", "id": getattr(message.media.photo, 'id', 0)}
-                    elif isinstance(message.media, MessageMediaDocument):
-                        media_type = "document"
-                        file_meta = {"mime": message.media.document.mime_type}
-                    else:
-                        media_type = "other"
-
-                sender_name = "Unknown"
-                if message.sender:
-                    if hasattr(message.sender, 'username') and message.sender.username:
-                        sender_name = message.sender.username
-                    elif hasattr(message.sender, 'first_name'):
-                        sender_name = message.sender.first_name
-
-                msgs.append({
-                    "telegram_msg_id": message.id,
-                    "sender_name": sender_name,
-                    "content": content,
-                    "media_type": media_type,
-                    "file_meta": file_meta,
-                    "chat_id": entity.id if hasattr(entity, 'id') else group_id
-                })
-        except Exception as e:
-            logger.error(f"    ❌ [UserAgent] Failed to fetch history: {e}")
-        finally:
-            await self._disconnect()
-            
-        return msgs
+            return msgs
 
     async def check_membership(self, group_id: int | str, user_identifier: str | int) -> dict | None:
         """
@@ -768,50 +768,50 @@ class UserAgentService:
             if not await self.start():
                 return None
 
-        try:
-            # Resolve group
-            if str(group_id).lstrip('-').isdigit():
-                target = int(group_id)
-            else:
-                target = group_id
-            group_entity = await self.client.get_entity(target)
-
-            # Resolve user/bot
-            if str(user_identifier).lstrip('-').isdigit():
-                user_target = int(user_identifier)
-            else:
-                user_target = user_identifier
-            
             try:
-                user_entity = await self.client.get_entity(user_target)
-            except Exception:
-                logger.warning(f"    ⚠️ [UserAgent] Could not resolve entity: {user_identifier}")
-                return None
+                # Resolve group
+                if str(group_id).lstrip('-').isdigit():
+                    target = int(group_id)
+                else:
+                    target = group_id
+                group_entity = await self.client.get_entity(target)
 
-            # Check if user is in the group
-            from telethon.tl.functions.channels import GetParticipantRequest
-            try:
-                result = await self.client(GetParticipantRequest(
-                    channel=group_entity,
-                    participant=user_entity
-                ))
-                return {
-                    "id": getattr(user_entity, 'id', 0),
-                    "username": getattr(user_entity, 'username', None),
-                    "is_admin": hasattr(result.participant, 'admin_rights') and result.participant.admin_rights is not None
-                }
+                # Resolve user/bot
+                if str(user_identifier).lstrip('-').isdigit():
+                    user_target = int(user_identifier)
+                else:
+                    user_target = user_identifier
+                
+                try:
+                    user_entity = await self.client.get_entity(user_target)
+                except Exception:
+                    logger.warning(f"    ⚠️ [UserAgent] Could not resolve entity: {user_identifier}")
+                    return None
+
+                # Check if user is in the group
+                from telethon.tl.functions.channels import GetParticipantRequest
+                try:
+                    result = await self.client(GetParticipantRequest(
+                        channel=group_entity,
+                        participant=user_entity
+                    ))
+                    return {
+                        "id": getattr(user_entity, 'id', 0),
+                        "username": getattr(user_entity, 'username', None),
+                        "is_admin": hasattr(result.participant, 'admin_rights') and result.participant.admin_rights is not None
+                    }
+                except Exception as e:
+                    err_str = str(e)
+                    if "USER_NOT_PARTICIPANT" in err_str or "400" in err_str:
+                        return None  # Not a member
+                    logger.warning(f"    ⚠️ [UserAgent] Membership check error: {e}")
+                    return None
+
             except Exception as e:
-                err_str = str(e)
-                if "USER_NOT_PARTICIPANT" in err_str or "400" in err_str:
-                    return None  # Not a member
-                logger.warning(f"    ⚠️ [UserAgent] Membership check error: {e}")
+                logger.error(f"    ❌ [UserAgent] check_membership failed: {e}")
                 return None
-
-        except Exception as e:
-            logger.error(f"    ❌ [UserAgent] check_membership failed: {e}")
-            return None
-        finally:
-            await self._disconnect()
+            finally:
+                await self._disconnect()
 
     async def promote_to_admin(self, group_id: int | str, user_identifier: str | int, title: str = "Bot") -> bool:
         """
@@ -821,53 +821,53 @@ class UserAgentService:
             if not await self.start():
                 return False
 
-        try:
-            # Resolve entities
-            if str(group_id).lstrip('-').isdigit():
-                target = int(group_id)
-            else:
-                target = group_id
-            group_entity = await self.client.get_entity(target)
+            try:
+                # Resolve entities
+                if str(group_id).lstrip('-').isdigit():
+                    target = int(group_id)
+                else:
+                    target = group_id
+                group_entity = await self.client.get_entity(target)
 
-            if str(user_identifier).lstrip('-').isdigit():
-                user_target = int(user_identifier)
-            else:
-                user_target = user_identifier
-            user_entity = await self.client.get_entity(user_target)
+                if str(user_identifier).lstrip('-').isdigit():
+                    user_target = int(user_identifier)
+                else:
+                    user_target = user_identifier
+                user_entity = await self.client.get_entity(user_target)
 
-            from telethon.tl.functions.channels import EditAdminRequest
-            from telethon.tl.types import ChatAdminRights
+                from telethon.tl.functions.channels import EditAdminRequest
+                from telethon.tl.types import ChatAdminRights
 
-            admin_rights = ChatAdminRights(
-                change_info=True,
-                post_messages=True,
-                edit_messages=True,
-                delete_messages=True,
-                ban_users=True,
-                invite_users=True,
-                pin_messages=True,
-                manage_call=True,
-                other=True,
-                manage_topics=True,
-            )
+                admin_rights = ChatAdminRights(
+                    change_info=True,
+                    post_messages=True,
+                    edit_messages=True,
+                    delete_messages=True,
+                    ban_users=True,
+                    invite_users=True,
+                    pin_messages=True,
+                    manage_call=True,
+                    other=True,
+                    manage_topics=True,
+                )
 
-            await self.client(EditAdminRequest(
-                channel=group_entity,
-                user_id=user_entity,
-                admin_rights=admin_rights,
-                rank=title
-            ))
-            logger.info(f"    👑 [UserAgent] Promoted {user_identifier} to admin in group.")
-            return True
+                await self.client(EditAdminRequest(
+                    channel=group_entity,
+                    user_id=user_entity,
+                    admin_rights=admin_rights,
+                    rank=title
+                ))
+                logger.info(f"    👑 [UserAgent] Promoted {user_identifier} to admin in group.")
+                return True
 
-        except errors.FloodWaitError as e:
-            await self._handle_flood_error(e)
-            return False
-        except Exception as e:
-            logger.error(f"    ❌ [UserAgent] Promote failed for {user_identifier}: {e}")
-            return False
-        finally:
-            await self._disconnect()
+            except errors.FloodWaitError as e:
+                await self._handle_flood_error(e)
+                return False
+            except Exception as e:
+                logger.error(f"    ❌ [UserAgent] Promote failed for {user_identifier}: {e}")
+                return False
+            finally:
+                await self._disconnect()
 
     async def _ensure_monitor_bots_membership(self):
         """Checks and ensures all broadcaster bots are in the monitor group."""

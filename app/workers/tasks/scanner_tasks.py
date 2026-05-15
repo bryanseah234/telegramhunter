@@ -29,6 +29,7 @@ from app.workers.celery_app import app
 from app.workers.tasks.flow_tasks import (  # Import for triggering and DB
     async_execute,
     enrich_credential,
+    redis_client,  # Shared module-level pool — avoids per-call ConnectionPool allocation
 )
 
 # Configure Task Logger
@@ -292,9 +293,6 @@ async def _scan_shodan_async(query: str = None, country_code: str = None):
     )
 
     # Check Pause State
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [Shodan] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -359,9 +357,6 @@ async def _scan_urlscan_async(query: str = None, country_code: str = None):
     )
 
     # Check Pause State
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [URLScan] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -443,9 +438,6 @@ async def _scan_github_async(query: str = None):
     errors = []
 
     # Check Pause State
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [GitHub] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -504,9 +496,6 @@ async def _scan_fofa_async(task_self, query: str = None, country_code: str = Non
     )
 
     # Check Pause State
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [FOFA] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -554,9 +543,6 @@ def scan_gitlab(query: str = None):
 
 
 async def _scan_gitlab_async(query: str = None):
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [GitLab] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -594,9 +580,6 @@ def scan_bitbucket(query: str = None):
 
 
 async def _scan_bitbucket_async(query: str = None):
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [Bitbucket] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -632,9 +615,6 @@ def scan_gist(query: str = None):
 
 
 async def _scan_gist_async(query: str = None):
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [Gist] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -672,9 +652,6 @@ def scan_grepapp(query: str = None):
 
 
 async def _scan_grepapp_async(query: str = None):
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [GrepApp] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -712,9 +689,6 @@ def scan_publicwww(query: str = None):
 
 
 async def _scan_publicwww_async(query: str = None):
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [PublicWWW] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -752,9 +726,6 @@ def scan_pastebin(query: str = None):
 
 
 async def _scan_pastebin_async(query: str = None):
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         logger.warning("⏸️ [Pastebin] System is PAUSED. Skipping scan.")
         return "System Paused"
@@ -790,9 +761,6 @@ def scan_serper(query: str = None):
 
 
 async def _scan_serper_async(query: str = None):
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         return "System Paused"
 
@@ -830,20 +798,17 @@ def retry_cold():
 
 
 async def _retry_cold_async():
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         return "System Paused"
 
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from app.workers.tasks.flow_tasks import async_execute, enrich_credential
 
     logger.info("🔄 [RetryCold] Starting retry for low-viability but valid tokens...")
     await _send_log_async("🔄 [RetryCold] Starting chat discovery retry for cold valid tokens...")
 
-    threshold = datetime.utcnow() - timedelta(hours=6)
+    threshold = datetime.now(timezone.utc) - timedelta(hours=6)
     threshold_str = threshold.strftime("%Y-%m-%dT%H:%M:%S")
 
     res = await async_execute(
@@ -888,9 +853,6 @@ def scan_google(query: str = None):
 
 
 async def _scan_google_async(query: str = None):
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         return "System Paused"
 
@@ -943,9 +905,6 @@ def scan_shodan_c2():
 
 
 async def _scan_shodan_c2_async():
-    import redis
-
-    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         return "System Paused"
 
@@ -1190,9 +1149,6 @@ def scan_netlas(query: str = None):
 
 
 async def _scan_netlas_async(query: str = None):
-    import redis as redis_lib
-
-    redis_client = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
     if redis_client.get("system:paused"):
         return "System Paused"
 

