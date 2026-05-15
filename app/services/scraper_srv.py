@@ -926,14 +926,4 @@ class ScraperService:
 
         return anchor_id
 
-    async def attempt_orphan_match(self, token: str, known_chat_ids: List[int]) -> Optional[int]:
-        """
-        [DEPRECATED/DISABLED]
-        Try to match a token to a known chat ID by checking visibility (getChat).
-        Returns None immediately to save rate limits.
-        """
-        # Feature disabled by user request to prevent rate limiting.
-        return None
-
-
 scraper_service = ScraperService()

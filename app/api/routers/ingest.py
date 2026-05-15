@@ -3,9 +3,10 @@ import hashlib
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
 from app.core.database import db
 from app.core.security import security
 
@@ -53,11 +54,14 @@ class ExtensionIngestResponse(BaseModel):
 @router.post("/extension/credentials", response_model=ExtensionIngestResponse)
 async def ingest_extension_credentials(
     payload: ExtensionIngestRequest,
+    x_monitor_key: str | None = Header(None),
 ):
     """
-    Ingest endpoint kept for any server-side tooling that wants to push credentials.
-    The Chrome extension now writes directly to Supabase — no API key required.
+    Ingest endpoint for server-side tooling. Requires X-Monitor-Key header.
+    The Chrome extension writes directly to Supabase and does not use this endpoint.
     """
+    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
 
     inserted = 0
     updated = 0
