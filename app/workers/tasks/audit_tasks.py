@@ -28,18 +28,23 @@ def audit_active_topics():
 
 
 async def _audit_active_topics_async():
+    import os
     broadcaster = get_broadcaster()
     await broadcaster.send_log("🛡️ **Audit**: Starting Topic Integrity Check...")
 
-    # 1. Fetch all ACTIVE credentials — BUG-007: use async_execute
+    # Cap to AUDIT_BATCH_SIZE (default 100) — 100 × 0.2s Telegram ping = ~20s minimum.
+    # Full sweep happens across successive hourly runs.
+    AUDIT_BATCH_SIZE = int(os.getenv("AUDIT_BATCH_SIZE", 100))
+
     try:
         response = await async_execute(
             db.table("discovered_credentials")
             .select("id, meta, chat_id, status")
             .in_("status", ["active", "pending"])
+            .limit(AUDIT_BATCH_SIZE)
         )
         creds = response.data or []
-        logger.info(f"    [Audit] Checking {len(creds)} active credentials...")
+        logger.info(f"    [Audit] Checking {len(creds)} credentials (batch cap: {AUDIT_BATCH_SIZE})...")
     except Exception as e:
         logger.error(f"    ❌ [Audit] DB Fetch failed: {e}")
         return f"DB Fetch failed: {e}"

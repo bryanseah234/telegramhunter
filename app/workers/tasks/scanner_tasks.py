@@ -144,32 +144,37 @@ async def _save_credentials_async(results, source_name: str):
                 if chat_id:
                     logger.info(f"    📍 [Validate] Using extracted chat_id: {chat_id}")
                 else:
-                    # Try to fetch via API if we didn't extract one
-                    try:
-                        updates_res = await client.get(
-                            f"{base_url}/getUpdates", params={"limit": 10}
-                        )
-                        if updates_res.status_code == 200 and updates_res.json().get("ok"):
-                            updates = updates_res.json().get("result", [])
-                            for update in updates:
-                                for key in ["message", "channel_post", "my_chat_member"]:
-                                    if key in update and update[key].get("chat"):
-                                        chat = update[key]["chat"]
-                                        chat_id = chat.get("id")
-                                        chat_name = (
-                                            chat.get("title")
-                                            or chat.get("username")
-                                            or chat.get("first_name")
+                    # Skip getUpdates on the monitor bot — calling it here 409-conflicts with the bot_listener poller.
+                    from app.services.scraper_srv import scraper_service as _scraper_srv
+                    if _scraper_srv.is_monitor_bot(token):
+                        logger.debug(f"    ⏭️ [Validate] Skipping getUpdates for monitor bot token.")
+                    else:
+                        # Try to fetch via API if we didn't extract one
+                        try:
+                            updates_res = await client.get(
+                                f"{base_url}/getUpdates", params={"limit": 10}
+                            )
+                            if updates_res.status_code == 200 and updates_res.json().get("ok"):
+                                updates = updates_res.json().get("result", [])
+                                for update in updates:
+                                    for key in ["message", "channel_post", "my_chat_member"]:
+                                        if key in update and update[key].get("chat"):
+                                            chat = update[key]["chat"]
+                                            chat_id = chat.get("id")
+                                            chat_name = (
+                                                chat.get("title")
+                                                or chat.get("username")
+                                                or chat.get("first_name")
+                                            )
+                                            chat_type = chat.get("type")
+                                            break
+                                    if chat_id:
+                                        logger.info(
+                                            f"    🕵️ [Validate] Discovered chat_id via getUpdates: {chat_name} ({chat_id})"
                                         )
-                                        chat_type = chat.get("type")
                                         break
-                                if chat_id:
-                                    logger.info(
-                                        f"    🕵️ [Validate] Discovered chat_id via getUpdates: {chat_name} ({chat_id})"
-                                    )
-                                    break
-                    except Exception as e:
-                        logger.warning(f"    ⚠️ [Validate] getUpdates check failed: {e}")
+                        except Exception as e:
+                            logger.warning(f"    ⚠️ [Validate] getUpdates check failed: {e}")
 
                 # Step 5: Save to DB (INSERT new or UPDATE existing if we have chat_id)
 
@@ -259,6 +264,12 @@ def _run_sync(coro):
     return get_worker_loop().run_until_complete(coro)
 
 
+def _cb(service_name: str):
+    """Return the circuit breaker for a scanner service (cached singleton per name)."""
+    from app.core.circuit_breaker import get_circuit_breaker
+    return get_circuit_breaker(service_name)
+
+
 def _save_credentials(results, source_name: str):
     return _run_sync(_save_credentials_async(results, source_name))
 
@@ -308,8 +319,7 @@ async def _scan_shodan_async(query: str = None, country_code: str = None):
     for q in queries:
         try:
             logger.info(f"    🔎 [Shodan] Executing query: {q}")
-            # AWAIT the async search
-            results = await shodan.search(q, country_code=selected_country)
+            results = await _cb("shodan").call(shodan.search)(q, country_code=selected_country)
             logger.info(f"    ✅ [Shodan] Query returned {len(results)} raw results.")
 
             # AWAIT the async save
@@ -371,7 +381,7 @@ async def _scan_urlscan_async(query: str = None, country_code: str = None):
     for q in queries:
         try:
             logger.info(f"    🔎 [URLScan] Query: {q}")
-            results = await urlscan.search(q, country_code=selected_country)
+            results = await _cb("urlscan").call(urlscan.search)(q, country_code=selected_country)
             logger.info(f"    ✅ [URLScan] Returned {len(results)} results.")
 
             saved = await _save_credentials_async(results, "urlscan")
@@ -448,7 +458,7 @@ async def _scan_github_async(query: str = None):
     for q in queries:
         logger.info(f"    🔎 [GitHub] Dorking: {q}")
         try:
-            results = await github.search(q)
+            results = await _cb("github").call(github.search)(q)
             logger.info(f"    ✅ [GitHub] Dork returned {len(results)} matches.")
 
             saved = await _save_credentials_async(results, "github")
@@ -510,7 +520,7 @@ async def _scan_fofa_async(task_self, query: str = None, country_code: str = Non
     for q in queries:
         try:
             logger.info(f"    🔎 [FOFA] Executing query: {q}")
-            results = await fofa.search(query=q, country_code=selected_country)
+            results = await _cb("fofa").call(fofa.search)(query=q, country_code=selected_country)
             logger.info(f"    ✅ [FOFA] Query returned {len(results)} raw results.")
 
             saved = await _save_credentials_async(results, "fofa")
@@ -825,16 +835,14 @@ async def _retry_cold_async():
         reason = row.get("retry_reason", "")
         try:
             logger.info(f"    🔁 [RetryCold] Retrying {cred_id} (reason: {reason})")
+            # Fetch current meta first then merge — avoid overwriting topic_id, bot info, etc.
+            cur = await async_execute(db.table("discovered_credentials").select("meta").eq("id", cred_id).single())
+            existing_meta = (cur.data or {}).get("meta") or {}
+            existing_meta["retryable"] = False
+            existing_meta["last_retry_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             await async_execute(
                 db.table("discovered_credentials")
-                .update(
-                    {
-                        "meta": {
-                            "retryable": False,
-                            "last_retry_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        }
-                    }
-                )
+                .update({"meta": existing_meta})
                 .eq("id", cred_id)
             )
             enrich_credential.delay(cred_id)

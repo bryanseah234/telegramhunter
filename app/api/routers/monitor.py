@@ -8,8 +8,10 @@ router = APIRouter(prefix="/monitor", tags=["Monitor"])
 
 
 def _check_monitor_auth(x_monitor_key: str | None):
-    """Raises 403 if MONITOR_API_KEY is set and the provided key does not match."""
-    if settings.MONITOR_API_KEY and x_monitor_key != settings.MONITOR_API_KEY:
+    """Raises 403 if key is absent or wrong. Always enforced — MONITOR_API_KEY is required."""
+    if not settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=503, detail="Monitor API key not configured on server")
+    if x_monitor_key != settings.MONITOR_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
 
 

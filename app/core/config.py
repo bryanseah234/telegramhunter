@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # Security
     ENCRYPTION_KEY: str  # Fernet Key
-    MONITOR_API_KEY: Optional[str] = None  # Optional API key for monitor/health endpoints (T009)
+    MONITOR_API_KEY: str  # Required — protects /monitor and /health/detailed endpoints
 
     # Telegram Monitoring (The Bot(s) WE control - supports multi-bot rotation)
     # Comma-separated bot tokens, e.g. "token1,token2,token3"
@@ -30,9 +30,6 @@ class Settings(BaseSettings):
     TELEGRAM_API_ID: int
     TELEGRAM_API_HASH: str
 
-    # User Agent Session (Base64 encoded for Railway)
-    USER_SESSION_STRING: Optional[str] = None
-    
     # OSINT KeysAPI Keys
     SHODAN_KEY: Optional[str] = None
     FOFA_EMAIL: Optional[str] = None

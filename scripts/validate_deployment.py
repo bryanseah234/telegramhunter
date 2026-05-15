@@ -83,7 +83,19 @@ def test_config_validation():
         assert settings.SUPABASE_URL is not None
         assert settings.REDIS_URL is not None
         assert len(settings.TARGET_COUNTRIES) > 0
-        print(f"   ✅ Config valid ({len(settings.TARGET_COUNTRIES)} countries configured)")
+
+        # MONITOR_API_KEY is required — /monitor and /health/detailed are unprotected without it
+        if not settings.MONITOR_API_KEY:
+            print("   ❌ MONITOR_API_KEY is not set — /monitor endpoints are unprotected!")
+            return False
+
+        print(f"   ✅ Config valid ({len(settings.TARGET_COUNTRIES)} countries, MONITOR_API_KEY set)")
+
+        # Non-fatal advisory: Supabase RLS
+        print("   ⚠️  ADVISORY: Verify Supabase RLS is enabled on 'exfiltrated_messages' and")
+        print("      'discovered_credentials'. The anon key is embedded in the frontend bundle.")
+        print("      Without RLS, anyone with the anon key can query all data directly.")
+
         return True
     except Exception as e:
         print(f"   ❌ Config validation failed: {e}")

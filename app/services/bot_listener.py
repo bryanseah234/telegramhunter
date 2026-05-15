@@ -28,16 +28,9 @@ from app.core.config import settings
 from app.core.database import db
 from app.core.constants import LOCK_TTL_SECONDS, SESSION_FILE_PERMISSIONS, WORKER_HEARTBEAT_TIMEOUT_SECONDS
 
-from enum import Enum, auto
 
 # Unique ID for this process instance — used in distributed Redis locks
 INSTANCE_ID = str(uuid.uuid4())
-
-# Login flow states
-class LoginState(Enum):
-    WAITING_FOR_PHONE = 0
-    WAITING_FOR_CODE = 1
-    WAITING_FOR_2FA = 2
 
 # For ConversationHandler compatibility
 WAIT_PHONE, WAIT_CODE, WAIT_PASSWORD = range(3)
@@ -47,6 +40,8 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("bot_listener")
 
 # Global Redis Client (initialized in main)
@@ -382,7 +377,7 @@ async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     sent_msg = await update.message.reply_text(msg)
     
     # Track state in context (LoginState object for that user_id)
-    context.user_data['login_state'] = LoginState.WAITING_FOR_PHONE
+    context.user_data['login_state'] = "WAITING_FOR_PHONE"
     
     # Schedule deletion of user's command if possible
     await schedule_deletion(context, update.effective_chat.id, update.message.message_id)
@@ -422,7 +417,7 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         context.user_data['phone'] = phone
         context.user_data['phone_code_hash'] = sent_code.phone_code_hash
         context.user_data['temp_session_path'] = temp_session_path
-        context.user_data['login_state'] = LoginState.WAITING_FOR_CODE
+        context.user_data['login_state'] = "WAITING_FOR_CODE"
 
         msg = (
             "✅ Code requested!\n\n"
@@ -469,7 +464,7 @@ async def handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         msg = "🔐 Two-Step Verification is enabled.\nPlease enter your password:"
         sent_msg = await update.message.reply_text(msg)
         context.user_data['bot_messages'].append(sent_msg.message_id)
-        context.user_data['login_state'] = LoginState.WAITING_FOR_2FA
+        context.user_data['login_state'] = "WAITING_FOR_2FA"
         return WAIT_PASSWORD
     except Exception as e:
         logger.error(f"Error signing in: {e}")
@@ -696,10 +691,10 @@ async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 def _build_application(token: str) -> Application:
     """Builds a python-telegram-bot Application for a single bot token."""
     application = ApplicationBuilder().token(token).build()
-    
+
     # Store the token in bot_data so handlers can identify which bot they're running on
     application.bot_data['_bot_token'] = token
-    
+
     # Add Handlers (same for all bots)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))

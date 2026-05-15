@@ -25,9 +25,8 @@ async def detailed_health(x_monitor_key: str | None = Header(None)):
     """
     Detailed health check with dependency status (protected if MONITOR_API_KEY set).
     """
-    if settings.MONITOR_API_KEY:
-        if x_monitor_key != settings.MONITOR_API_KEY:
-            raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
+    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     health_status = {
         "status": "healthy",
         "checks": {}
@@ -79,9 +78,8 @@ async def get_metrics(x_monitor_key: str | None = Header(None)):
     """
     Get system metrics (protected if MONITOR_API_KEY set).
     """
-    if settings.MONITOR_API_KEY:
-        if x_monitor_key != settings.MONITOR_API_KEY:
-            raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
+    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     from app.core.metrics import metrics
 
     return {
@@ -95,9 +93,8 @@ async def get_circuit_breakers(x_monitor_key: str | None = Header(None)):
     """
     Get circuit breaker status (protected if MONITOR_API_KEY set).
     """
-    if settings.MONITOR_API_KEY:
-        if x_monitor_key != settings.MONITOR_API_KEY:
-            raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
+    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     from app.core.circuit_breaker import get_all_circuit_status
 
     return {
@@ -111,9 +108,8 @@ async def reset_circuit_breaker(service: str, x_monitor_key: str | None = Header
     Manually reset a circuit breaker (protected if MONITOR_API_KEY set).
     Use this to force-enable a service after fixing issues.
     """
-    if settings.MONITOR_API_KEY:
-        if x_monitor_key != settings.MONITOR_API_KEY:
-            raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
+    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     from app.core.circuit_breaker import get_circuit_breaker
 
     try:

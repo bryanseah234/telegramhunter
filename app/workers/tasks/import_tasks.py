@@ -39,6 +39,14 @@ async def _import_csv_logic() -> str:
     IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Recover any .pending files left by a previous crashed run — rename back to .csv
+    for stuck in IMPORTS_DIR.glob("*.pending"):
+        try:
+            stuck.rename(stuck.with_suffix(".csv"))
+            logger.info(f"[CSV Import] Recovered stuck pending file: {stuck.name} → {stuck.stem}.csv")
+        except OSError as e:
+            logger.warning(f"[CSV Import] Could not recover {stuck.name}: {e}")
+
     csv_files = list(IMPORTS_DIR.glob("*.csv"))
     if not csv_files:
         return "No CSV files to import."

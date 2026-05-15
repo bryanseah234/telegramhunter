@@ -42,6 +42,12 @@ services:
     volumes:
       - sessions:/app/sessions
       - imports:/app/imports
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     logging:
       driver: "json-file"
       options:
@@ -61,6 +67,12 @@ services:
     volumes:
       - sessions:/app/sessions
       - imports:/app/imports
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.workers.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME", "--timeout", "5"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
@@ -111,7 +123,7 @@ services:
     restart: always
     init: true
     env_file: .env
-    command: celery -A app.workers.celery_app beat --loglevel=info --schedule /app/celerybeat/celerybeat-schedule
+    command: celery -A app.workers.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
     depends_on:
       redis:
         condition: service_healthy
@@ -119,7 +131,6 @@ services:
         condition: service_started
     volumes:
       - sessions:/app/sessions
-      - celerybeat:/app/celerybeat
     logging:
       driver: "json-file"
       options:
@@ -171,5 +182,3 @@ volumes:
     name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_sessions
   imports:
     name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_imports
-  celerybeat:
-    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_celerybeat

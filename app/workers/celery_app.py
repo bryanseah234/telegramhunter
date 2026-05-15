@@ -19,6 +19,8 @@ logging.basicConfig(
     stream=sys.stdout,
     force=True,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 app = Celery("telegram_hunter", broker=settings.REDIS_URL, backend=settings.REDIS_URL)

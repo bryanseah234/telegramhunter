@@ -68,28 +68,50 @@ class CircuitBreaker:
         self.last_failure_time: Optional[float] = None
     
     def call(self, func: Callable[..., T]) -> Callable[..., T]:
-        """Decorator to protect a function with circuit breaker"""
+        """Decorator to protect a sync or async function with circuit breaker."""
+        import asyncio as _asyncio
+
+        if _asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                if self.state == CircuitState.OPEN:
+                    if self._should_attempt_reset():
+                        logger.info(f"Circuit breaker [{self.name}] attempting recovery (HALF_OPEN)")
+                        self.state = CircuitState.HALF_OPEN
+                    else:
+                        raise CircuitBreakerError(
+                            f"Circuit breaker [{self.name}] is OPEN. Service temporarily disabled."
+                        )
+                try:
+                    result = await func(*args, **kwargs)
+                    self._on_success()
+                    return result
+                except CircuitBreakerError:
+                    raise
+                except Exception:
+                    self._on_failure()
+                    raise
+            return async_wrapper  # type: ignore[return-value]
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            # Check if circuit is open
             if self.state == CircuitState.OPEN:
                 if self._should_attempt_reset():
                     logger.info(f"Circuit breaker [{self.name}] attempting recovery (HALF_OPEN)")
                     self.state = CircuitState.HALF_OPEN
                 else:
                     raise CircuitBreakerError(
-                        f"Circuit breaker [{self.name}] is OPEN. "
-                        f"Service temporarily disabled."
+                        f"Circuit breaker [{self.name}] is OPEN. Service temporarily disabled."
                     )
-            
             try:
                 result = func(*args, **kwargs)
                 self._on_success()
                 return result
-            except Exception as e:
+            except CircuitBreakerError:
+                raise
+            except Exception:
                 self._on_failure()
                 raise
-        
         return wrapper
     
     def _should_attempt_reset(self) -> bool:
