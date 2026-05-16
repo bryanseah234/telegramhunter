@@ -364,10 +364,7 @@ async def schedule_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, me
     asyncio.create_task(delete_task())
 
 async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Starts the login flow."""
-    if not is_admin(update):
-        return ConversationHandler.END
-
+    """Starts the login flow. Open to any user — no admin check."""
     if update.effective_chat.type != "private":
         await update.message.reply_text(
             "⚠️ For security, please use /starthunter in a *private chat* with me — not in a group.\n"
