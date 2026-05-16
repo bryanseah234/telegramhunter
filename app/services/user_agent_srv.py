@@ -278,18 +278,22 @@ class UserAgentService:
         try:
             from app.core.database import db
             abs_path = os.path.abspath(session_path)
-            res = db.table("telegram_accounts").select("phone").eq("session_path", abs_path).limit(1).execute()
+            res = await asyncio.to_thread(
+                lambda: db.table("telegram_accounts").select("phone").eq("session_path", abs_path).limit(1).execute()
+            )
             if not res.data:
                 return True
             phone = res.data[0].get("phone")
             if not phone:
                 return True
             lease_until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
-            updated = db.table("telegram_accounts")\
-                .update({"locked_by": self._instance_id, "locked_until": lease_until})\
-                .eq("phone", phone)\
-                .or_("locked_until.is.null,locked_until.lt.now()")\
-                .execute()
+            updated = await asyncio.to_thread(
+                lambda: db.table("telegram_accounts")
+                    .update({"locked_by": self._instance_id, "locked_until": lease_until})
+                    .eq("phone", phone)
+                    .or_("locked_until.is.null,locked_until.lt.now()")
+                    .execute()
+            )
             if updated.data:
                 self._current_phone = phone
                 return True
@@ -303,11 +307,13 @@ class UserAgentService:
             return
         try:
             from app.core.database import db
-            db.table("telegram_accounts")\
-                .update({"locked_by": None, "locked_until": None})\
-                .eq("phone", self._current_phone)\
-                .eq("locked_by", self._instance_id)\
-                .execute()
+            await asyncio.to_thread(
+                lambda: db.table("telegram_accounts")
+                    .update({"locked_by": None, "locked_until": None})
+                    .eq("phone", self._current_phone)
+                    .eq("locked_by", self._instance_id)
+                    .execute()
+            )
         except Exception as e:
             logger.warning(f"    ⚠️ [UserAgent] DB lease release failed: {e}")
         finally:

