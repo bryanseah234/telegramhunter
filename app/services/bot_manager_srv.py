@@ -55,7 +55,7 @@ class BotClientManager:
             if len(self._clients) >= _MAX_CACHED_CLIENTS:
                 oldest_token, oldest_client = next(iter(self._clients.items()))
                 try:
-                    await oldest_client.disconnect()
+                    await asyncio.wait_for(oldest_client.disconnect(), timeout=5.0)
                 except Exception:
                     pass
                 del self._clients[oldest_token]

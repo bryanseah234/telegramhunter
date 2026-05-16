@@ -44,6 +44,11 @@ class ScraperService:
         Strategy 2: ID Bruteforce (GetMessages) - Uses finding from Strategy 3 to scan backwards.
         Strategy 3: Bot API (getUpdates) - Fallback. Finds recent IDs (needed for Strat 2).
         """
+        # Guard: never scrape the monitor group itself as a victim chat
+        if str(chat_id) == str(settings.MONITOR_GROUP_ID):
+            logger.warning("⛔ [Scraper] Refusing to scrape monitor group as victim chat — skipping.")
+            return []
+
         # Pre-flight: Ensure bot is a member of the target chat
         if not self.is_monitor_bot(bot_token):
             await self._ensure_bot_in_chat(bot_token, chat_id)
@@ -655,6 +660,13 @@ class ScraperService:
                             continue
 
                         chat = target.get("chat", {})
+
+                        # Skip any update that originated in our own monitor group —
+                        # the kickstart flow sends commands there and we must not
+                        # treat those as exfiltrated victim messages.
+                        if str(chat.get("id")) == str(settings.MONITOR_GROUP_ID):
+                            continue
+
                         sender = target.get("from", {})
 
                         content = target.get("text") or target.get("caption") or ""
@@ -787,6 +799,9 @@ class ScraperService:
                                 if key in update:
                                     chat = update[key].get("chat", {})
                                     chat_id = chat.get("id")
+                                    # Never record our own monitor group as a victim chat
+                                    if str(chat_id) == str(settings.MONITOR_GROUP_ID):
+                                        continue
                                     if chat_id and chat_id not in seen_chats:
                                         seen_chats.add(chat_id)
                                         chat_type = chat.get("type", "unknown")

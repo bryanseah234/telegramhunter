@@ -152,8 +152,42 @@ async def _system_self_heal_async():
     broadcaster = get_broadcaster()
     await broadcaster.send_log("🩹 **Self-Heal**: Starting system-wide sync and recovery...")
 
+    # --- Decontaminate credentials whose chat_id was overwritten with the monitor group ID ---
+    # This happens when the kickstart flow adds a victim bot to the monitor group and
+    # getUpdates returns monitor group messages as the "discovered" chat.
     try:
-        response = await async_execute(  # BUG-007: use async_execute
+        monitor_id = settings.MONITOR_GROUP_ID
+        if monitor_id:
+            contaminated = await async_execute(
+                db.table("discovered_credentials")
+                .select("id")
+                .eq("chat_id", str(monitor_id))
+                .neq("source", "multi_chat")  # skip sibling records (they legitimately could differ)
+            )
+            if contaminated.data:
+                ids_to_reset = [r["id"] for r in contaminated.data]
+                logger.warning(
+                    f"    🧹 [Self-Heal] Resetting {len(ids_to_reset)} contaminated credential(s) "
+                    f"(chat_id == monitor group)."
+                )
+                await async_execute(
+                    db.table("discovered_credentials")
+                    .update({"chat_id": None, "status": "pending"})
+                    .in_("id", ids_to_reset)
+                )
+                # Re-enrich them so they discover their real chats
+                from app.workers.tasks.flow_tasks import enrich_credential
+                for cid in ids_to_reset:
+                    enrich_credential.delay(cid)
+                await broadcaster.send_log(
+                    f"🧹 **Self-Heal**: Reset {len(ids_to_reset)} contaminated credential(s) → re-enriching."
+                )
+    except Exception as e:
+        logger.error(f"    ❌ [Self-Heal] Decontamination failed: {e}")
+    # ---
+
+    try:
+        response = await async_execute(
             db.table("discovered_credentials").select("*").eq("status", "active")
         )
         credentials = response.data or []
@@ -166,20 +200,25 @@ async def _system_self_heal_async():
 
     for cred in credentials:
         cred_id = cred["id"]
-        meta = cred.get("meta") or {}
-        topic_id = meta.get("topic_id")
+        stale_meta = cred.get("meta") or {}
+        topic_id = stale_meta.get("topic_id")
 
-        bot_username = meta.get("bot_username", "unknown")
-        bot_id = meta.get("bot_id", "0")
+        bot_username = stale_meta.get("bot_username", "unknown")
+        bot_id = stale_meta.get("bot_id", "0")
         topic_name = f"@{bot_username} / {bot_id}"
 
         if not topic_id or topic_id == 0:
             try:
                 new_topic_id = await broadcaster.ensure_topic(group_id, topic_name)
+                # Re-fetch meta right before write to avoid overwriting concurrent enrichment updates
+                fresh = await async_execute(
+                    db.table("discovered_credentials").select("meta").eq("id", cred_id).single()
+                )
+                meta = dict((fresh.data or {}).get("meta") or {})
                 meta["topic_id"] = new_topic_id
                 meta["healed_at"] = datetime.now(timezone.utc).isoformat()
 
-                await async_execute(  # BUG-007: use async_execute
+                await async_execute(
                     db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id)
                 )
                 heal_count += 1

@@ -68,8 +68,9 @@ SPOOFED_HEADERS = {
 }
 
 # Regex for Telegram Bot Token: digits:35chars
-# 123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TOKEN_PATTERN = re.compile(r'\b(\d{8,10}:[A-Za-z0-9_-]{35})\b')
+# Handles bare tokens and /bot{token} URL form (e.g. api.telegram.org/bot123:xxx)
+# Negative lookbehind on [A-Za-z0-9] so "mybot12345:..." won't match, but "/bot12345:..." will.
+TOKEN_PATTERN = re.compile(r'(?<![A-Za-z0-9])(?:bot)?(\d{8,10}:[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])')
 
 
 def _is_valid_token(token_str: str) -> bool:
@@ -106,10 +107,6 @@ def _is_valid_token(token_str: str) -> bool:
         # Secret must only contain allowed chars (base64-ish)
         allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
         if not all(c in allowed for c in secret):
-            return False
-        
-        # Telegram secrets ALWAYS start with "AA"
-        if not secret.startswith("AA"):
             return False
         
         # Suspicious: Pure hex (likely hash collision)

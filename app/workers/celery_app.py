@@ -99,7 +99,7 @@ app.conf.update(
     worker_prefetch_multiplier=1,
     task_acks_late=True,
     task_soft_time_limit=1200,  # 20 minutes soft limit
-    task_time_limit=1300,       # Hard limit > soft limit
+    task_time_limit=1800,       # Hard limit — 10 min window after soft for graceful save
     broker_pool_limit=10,
     # Auto-discover tasks in these modules
     imports=[
@@ -120,9 +120,9 @@ app.conf.update(
         # ============================================
         # BROADCAST & RESCRAPE
         # ============================================
-        "broadcast-hourly": {
+        "broadcast-every-minute": {
             "task": "flow.broadcast_pending",
-            "schedule": crontab(minute=f"*/{int(os.getenv('BROADCAST_INTERVAL_MINUTES', 60))}"),
+            "schedule": crontab(minute=f"*/{int(os.getenv('BROADCAST_INTERVAL_MINUTES', 1))}"),
         },
         "rescrape-active-hourly": {
             "task": "flow.rescrape_active",
