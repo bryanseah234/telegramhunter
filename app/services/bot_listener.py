@@ -344,7 +344,7 @@ async def watchdog_loop(bot):
 
 async def _send_alert(bot, msg):
     try:
-        await bot.send_message(chat_id=settings.MONITOR_GROUP_ID, message_thread_id=None, text=f"🚨 [Watchdog]\n{msg}")
+        await bot.send_message(chat_id=settings.MONITOR_GROUP_ID, text=f"🚨 [Watchdog]\n{msg}")
     except Exception as e:
         logger.error(f"Failed to send watchdog alert: {e}")
 
@@ -366,6 +366,14 @@ async def schedule_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, me
 async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the login flow."""
     if not is_admin(update):
+        return ConversationHandler.END
+
+    if update.effective_chat.type != "private":
+        await update.message.reply_text(
+            "⚠️ For security, please use /starthunter in a *private chat* with me — not in a group.\n"
+            "Open a DM with @telehunter234bot and run /starthunter there.",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return ConversationHandler.END
 
     msg = (
@@ -724,8 +732,24 @@ async def _run_bot(token: str, is_primary: bool = False):
     """Runs a single bot's polling loop. Primary bot also runs the Watchdog."""
     lock_key = await _acquire_poll_lock(token)
     if redis_client and not lock_key:
-        # Another instance is already polling this bot ID.
-        return
+        # Lock held by a previous instance — wait for it to expire, then retry once.
+        # This prevents a Docker restart loop when the container restarts before the TTL expires.
+        logger.info(
+            f"Poll lock held by previous instance for bot_id={_bot_id_from_token(token)}. "
+            f"Waiting {LOCK_TTL_SECONDS + 5}s for expiry before retrying..."
+        )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=LOCK_TTL_SECONDS + 5)
+            return  # Stop requested while waiting — exit cleanly
+        except asyncio.TimeoutError:
+            pass
+        lock_key = await _acquire_poll_lock(token)
+        if not lock_key:
+            logger.error(
+                f"Poll lock still held after {LOCK_TTL_SECONDS + 5}s wait. "
+                f"Giving up for bot_id={_bot_id_from_token(token)}."
+            )
+            return
 
     application = _build_application(token)
     lock_renew_task = None
