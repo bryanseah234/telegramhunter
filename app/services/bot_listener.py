@@ -17,6 +17,7 @@ from telegram.ext import (
     Application
 )
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 import shutil
@@ -44,10 +45,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("bot_listener")
 
+logger.info(f"🆔 Process Instance ID: {INSTANCE_ID}")
+
 # Global Redis Client (initialized in main)
 redis_client: redis.Redis = None
 PAUSE_KEY = "system:paused"
-# LOCK_TTL_SECONDS imported from app.core.constants — do not redefine here (BUG-014)
 
 # Admin IDs — configurable via ANONYMOUS_ADMIN_ID env var (default: Telegram anonymous group admin)
 ANONYMOUS_ADMIN_ID = settings.ANONYMOUS_ADMIN_ID
@@ -130,7 +132,7 @@ def _get_whitelisted_usernames():
     return [u.strip().lower().replace("@", "") for u in raw.split(",") if u.strip()]
 
 def is_admin(update: Update) -> bool:
-    """Checks if the user is an admin (Whitelisted Username or Group Anonymous Bot)"""
+    """Checks if the user is an admin (Whitelisted ID/Username or Group Anonymous Bot)"""
     user = update.effective_user
     
     if not user:
@@ -138,14 +140,20 @@ def is_admin(update: Update) -> bool:
         
     # 1. Check ID (Anonymous Admin)
     if user.id == ANONYMOUS_ADMIN_ID:
-        # If sent as anonymous admin in a group, we assume it's an admin of that group.
         return True
         
+    whitelist = _get_whitelisted_usernames()
+    logger.info(f"🔍 Checking admin for {user.id} (@{user.username}). Whitelist: {whitelist}")
+    
     # 2. Check Username
-    if user.username:
-        whitelist = _get_whitelisted_usernames()
-        if user.username.lower() in whitelist:
-            return True
+    if user.username and user.username.lower() in whitelist:
+        logger.info(f"✅ User @{user.username} matched username in whitelist.")
+        return True
+        
+    # 3. Check ID (as string for whitelist matching)
+    if str(user.id) in whitelist:
+        logger.info(f"✅ User ID {user.id} matched in whitelist.")
+        return True
             
     return False
 
@@ -165,35 +173,54 @@ def _get_all_bot_usernames_except(current_bot_username: str) -> list[str]:
     ]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"📥 Received /start from {update.effective_user.id} (@{update.effective_user.username})")
     if not is_admin(update):
-        return # Silent ignore
+        logger.info(f"🚫 User {update.effective_user.id} is NOT an admin. Sending guest start.")
+        await update.message.reply_text(
+            "👋 **Welcome to Telegram Hunter Bot**\n\n"
+            "This bot is used for OSINT and account management.\n"
+            "Use /starthunter in a private chat to login an account.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    logger.info(f"✅ User {update.effective_user.id} IS an admin. Sending admin start.")
     await update.message.reply_text("🤖 **Telegram Hunter Bot** is online.\nUse /help to see all available commands.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
+    is_user_admin = is_admin(update)
     
     # Show all available bots in the help text
     bot_list = ", ".join([f"@{u}" for u in _bot_usernames.values()])
     
-    help_text = (
-        "📖 **Telegram Hunter Bot Help**\n\n"
-        "Here are the available commands:\n"
-        "• /status - Check system health and pending broadcasts\n"
-        "• /pause - Pause scanners and broadcaster\n"
-        "• /resume - Resume operations\n"
-        "• /restart - Restart the bot service\n"
-        "• /commands - List all commands (Alias for /help)\n"
-        "• /starthunter - Login a new Telegram account\n"
-        "• /bots - Show all available bots\n\n"
-        f"**Available Bots**: {bot_list}\n\n"
-        "Only authorized administrators can use these commands."
-    )
+    if is_user_admin:
+        help_text = (
+            "📖 **Telegram Hunter Bot Help**\n\n"
+            "Here are the available commands:\n"
+            "• /status - Check system health and pending broadcasts\n"
+            "• /pause - Pause scanners and broadcaster\n"
+            "• /resume - Resume operations\n"
+            "• /restart - Restart the bot service\n"
+            "• /commands - List all commands (Alias for /help)\n"
+            "• /starthunter - Login a new Telegram account\n"
+            "• /bots - Show all available bots\n\n"
+            f"**Available Bots**: {bot_list}\n\n"
+            "Only authorized administrators can use these commands."
+        )
+    else:
+        help_text = (
+            "📖 **Telegram Hunter Bot Help**\n\n"
+            "Available commands:\n"
+            "• /starthunter - Login a new Telegram account\n"
+            "• /help - Show this help message\n\n"
+            "Please use /starthunter in a private chat to begin."
+        )
+        
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows all available bots and their lock status."""
     if not is_admin(update):
+        await update.message.reply_text("⚠️ This command is restricted to administrators.")
         return
     
     lines = ["🤖 **Bot Rotation Pool**\n"]
@@ -366,9 +393,10 @@ async def schedule_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, me
 async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the login flow. Open to any user — no admin check."""
     if update.effective_chat.type != "private":
+        bot_username = context.bot.username or "telehunter234bot"
         await update.message.reply_text(
             "⚠️ For security, please use /starthunter in a *private chat* with me — not in a group.\n"
-            "Open a DM with @telehunter234bot and run /starthunter there.",
+            f"Open a DM with @{bot_username} and run /starthunter there.",
             parse_mode=ParseMode.MARKDOWN
         )
         return ConversationHandler.END
@@ -528,10 +556,6 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception:
                 pass
 
-        # Also delete all messages in the Bot chat (Nuke Messages)
-        # Assuming the history cleanup below handles dialogue, but requirements say "immediately deletes all messages in the Bot chat"
-        # We've already scheduled deletion for user messages and deleted bot flow messages.
-
         # Use the USER account to clear history (Footprint Cleanup)
         try:
             # 1. Delete "Telegram Service Notification"
@@ -618,20 +642,13 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.error(f"Failed to update database: {e}")
 
         if not saved_successfully:
-            # ==========================================
-            # BOT LOCKED — RECOMMEND ANOTHER BOT
-            # ==========================================
             logger.warning(f"Bot @{current_bot_username} could not save session — recommending alternative bot.")
-            
-            # Mark this bot as locked
             current_token = context.bot_data.get('_bot_token', '')
             if current_token:
                 _locked_bots.add(current_token)
             
-            # Find alternative bots
             other_bots = _get_other_bot_usernames(current_bot_username)
             if not other_bots:
-                # All bots locked or only one — show all alternatives anyway
                 other_bots = _get_all_bot_usernames_except(current_bot_username)
             
             if other_bots:
@@ -652,17 +669,14 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
             
             sent_msg = await update.message.reply_text(lock_msg, parse_mode=ParseMode.MARKDOWN)
-            # Auto-delete the lock message after 30 seconds
             await schedule_deletion(context, chat_id, sent_msg.message_id, delay=30)
-            
             return ConversationHandler.END
 
-        # Session saved successfully — clear any lock on this bot
+        # Session saved successfully
         current_token = context.bot_data.get('_bot_token', '')
         if current_token:
             _locked_bots.discard(current_token)
         
-        # Clean up temp
         try:
             os.remove(temp_session_path + ".session")
         except Exception:
@@ -671,7 +685,6 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         success_msg = f"✅ Successfully logged in as {me.first_name} (@{me.username or 'No Username'}).\nSession saved to {filename}.session"
         sent_msg = await update.message.reply_text(success_msg)
         await schedule_deletion(context, chat_id, sent_msg.message_id, delay=30)
-        
         return ConversationHandler.END
 
     except Exception as e:
@@ -689,18 +702,26 @@ async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await update.message.reply_text('Login process cancelled.')
     return ConversationHandler.END
 
-# ==========================================
-# MULTI-BOT APPLICATION BUILDER
-# ==========================================
+async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Logs every incoming update for debugging."""
+    user = update.effective_user
+    chat = update.effective_chat
+    text = update.message.text if update.message else "No text"
+    logger.info(f"🔄 Update from {user.id if user else 'Unknown'} in {chat.id if chat else 'Unknown'}: {text}")
 
 def _build_application(token: str) -> Application:
     """Builds a python-telegram-bot Application for a single bot token."""
-    application = ApplicationBuilder().token(token).build()
-
-    # Store the token in bot_data so handlers can identify which bot they're running on
+    request = HTTPXRequest(
+        read_timeout=30.0,
+        connect_timeout=30.0,
+        pool_timeout=60.0
+    )
+    application = ApplicationBuilder().token(token).request(request).build()
     application.bot_data['_bot_token'] = token
 
-    # Add Handlers (same for all bots)
+    # Group -1 runs before other handlers
+    application.add_handler(MessageHandler(filters.ALL, log_update), group=-1)
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("pause", pause))
@@ -710,7 +731,6 @@ def _build_application(token: str) -> Application:
     application.add_handler(CommandHandler("commands", help_command))
     application.add_handler(CommandHandler("bots", bots_command))
 
-    # Add Login Conversation Handler
     login_conv_handler = ConversationHandler(
         entry_points=[CommandHandler('starthunter', starthunter)],
         states={
@@ -721,7 +741,6 @@ def _build_application(token: str) -> Application:
         fallbacks=[CommandHandler('cancel', cancel_login)],
     )
     application.add_handler(login_conv_handler)
-    
     return application
 
 
@@ -729,23 +748,18 @@ async def _run_bot(token: str, is_primary: bool = False):
     """Runs a single bot's polling loop. Primary bot also runs the Watchdog."""
     lock_key = await _acquire_poll_lock(token)
     if redis_client and not lock_key:
-        # Lock held by a previous instance — wait for it to expire, then retry once.
-        # This prevents a Docker restart loop when the container restarts before the TTL expires.
         logger.info(
             f"Poll lock held by previous instance for bot_id={_bot_id_from_token(token)}. "
             f"Waiting {LOCK_TTL_SECONDS + 5}s for expiry before retrying..."
         )
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=LOCK_TTL_SECONDS + 5)
-            return  # Stop requested while waiting — exit cleanly
+            return
         except asyncio.TimeoutError:
             pass
         lock_key = await _acquire_poll_lock(token)
         if not lock_key:
-            logger.error(
-                f"Poll lock still held after {LOCK_TTL_SECONDS + 5}s wait. "
-                f"Giving up for bot_id={_bot_id_from_token(token)}."
-            )
+            logger.error(f"Poll lock still held after wait. Giving up for bot_id={_bot_id_from_token(token)}.")
             return
 
     application = _build_application(token)
@@ -754,75 +768,52 @@ async def _run_bot(token: str, is_primary: bool = False):
     
     try:
         async with application:
-            # Resolve bot username via getMe
             bot_info = await application.bot.get_me()
             bot_username = bot_info.username or f"bot_{bot_info.id}"
             _bot_usernames[token] = bot_username
-
             logger.info(f"🤖 Bot @{bot_username} starting polling...")
 
             if lock_key:
                 lock_renew_task = asyncio.create_task(_renew_poll_lock(lock_key))
 
             try:
-                await application.updater.start_polling(drop_pending_updates=True)
+                await application.updater.start_polling(drop_pending_updates=False)
             except Conflict as e:
-                logger.error(
-                    f"⚠️ Polling conflict for @{bot_username}: {e}. "
-                    "Another getUpdates consumer is active for this token."
-                )
+                logger.error(f"⚠️ Polling conflict for @{bot_username}: {e}")
                 return
 
-            # Only primary bot runs the Watchdog
             if is_primary:
                 watchdog_task = asyncio.create_task(watchdog_loop(application.bot))
                 logger.info(f"🐶 Watchdog attached to primary bot @{bot_username}")
 
-            logger.info(f"🚀 Bot @{bot_username} Started")
+            logger.info(f"🚀 Bot @{bot_username} Started and Polling...")
 
-            # Wait until stop_event is set (by /restart or signal)
+            heartbeat_count = 0
             while not stop_event.is_set():
-                await asyncio.sleep(1)
+                await asyncio.sleep(10)
+                heartbeat_count += 1
+                if heartbeat_count % 30 == 0:
+                    logger.info(f"💓 Bot @{bot_username} polling heartbeat (Event loop active)")
 
             logger.info(f"Stopping bot @{bot_username}...")
 
     finally:
-        # Cleanup Watchdog
         if watchdog_task:
             watchdog_task.cancel()
-            try:
-                await watchdog_task
-            except asyncio.CancelledError:
-                pass
-
-        # Cleanup lock renew loop
         if lock_renew_task:
             lock_renew_task.cancel()
-            try:
-                await lock_renew_task
-            except asyncio.CancelledError:
-                pass
-
         await _release_poll_lock(lock_key)
-
-    logger.info(f"Bot poller for token_id={_bot_id_from_token(token)} stopped.")
-
 
 async def main():
     global redis_client
-    
     raw_tokens = settings.bot_tokens
-    # Deduplicate by bot ID prefix to avoid spawning multiple pollers for the same bot.
     seen_ids = set()
     tokens = []
     for token in raw_tokens:
         token = token.strip()
-        if not token:
-            continue
+        if not token: continue
         bot_id = _bot_id_from_token(token)
-        if bot_id in seen_ids:
-            logger.warning(f"Duplicate monitor bot token detected for bot_id={bot_id}; skipping duplicate entry.")
-            continue
+        if bot_id in seen_ids: continue
         seen_ids.add(bot_id)
         tokens.append(token)
 
@@ -831,40 +822,19 @@ async def main():
         return
 
     logger.info(f"🚀 Starting Multi-Bot Listener with {len(tokens)} bot(s)...")
-
-    # Initialize Redis inside the event loop
     redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
-    # Handle signals for graceful shutdown (Unix only, Windows ignored)
     if os.name != 'nt':
         loop = asyncio.get_running_loop()
-        def _handle_signal():
-            try:
-                stop_event.set()
-            except Exception as e:
-                logger.error(f"Signal handler error: {e}")
-            finally:
-                stop_event.set()  # Guarantee set even if exception occurred above
+        def _handle_signal(): stop_event.set()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, _handle_signal)
     
-    # Run all bots concurrently — first token is primary (runs Watchdog)
     tasks = []
     for i, token in enumerate(tokens):
-        token = token.strip()
-        if not token:
-            continue
-        is_primary = (i == 0)
-        tasks.append(asyncio.create_task(_run_bot(token, is_primary=is_primary)))
+        tasks.append(asyncio.create_task(_run_bot(token, is_primary=(i == 0))))
     
-    if not tasks:
-        logger.error("No valid bot tokens found!")
-        return
-    
-    # Wait for all bots to finish (they all stop on stop_event)
     await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # Close Redis
     await redis_client.aclose()
     logger.info("Bye!")
 

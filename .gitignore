@@ -8,6 +8,10 @@ venv/
 env/
 .Python
 
+# Local Tools / Scripts
+check_bot.py
+cli_login.py
+
 # Environment — never commit secrets
 .env
 

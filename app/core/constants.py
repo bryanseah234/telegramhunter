@@ -10,7 +10,7 @@ CLAIM_TIMEOUT_MINUTES = 5
 WORKER_HEARTBEAT_TIMEOUT_SECONDS = 45 * 60
 
 # Rate limit sleep between broadcast sends (seconds)
-BROADCAST_RATE_LIMIT_SLEEP = 2.0
+BROADCAST_RATE_LIMIT_SLEEP = 5.0
 
 # Maximum entries kept in scanner error buffers
 MAX_ERRORS_BUFFER = 100

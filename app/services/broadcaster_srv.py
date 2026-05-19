@@ -1,6 +1,6 @@
 from telegram import Bot
 from telegram.request import HTTPXRequest
-from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError, Forbidden, Unauthorized
+from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError, Forbidden
 import asyncio
 import logging
 import time
@@ -157,7 +157,7 @@ class BroadcasterService:
                     text=to_send_text,
                 )
                 return  # success
-            except (Forbidden, Unauthorized) as e:
+            except Forbidden as e:
                 # Bot was kicked or token revoked — mark and try next
                 if current_token:
                     self._mark_failed(current_token)
