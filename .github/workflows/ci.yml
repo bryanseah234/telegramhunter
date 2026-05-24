@@ -11,10 +11,10 @@ jobs:
         runs-on: ubuntu-latest
 
         steps:
-            - uses: actions/checkout@v3
+            - uses: actions/checkout@v4
 
             - name: Set up Python 3.11
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@v5
               with:
                   python-version: "3.11"
 
@@ -37,5 +37,7 @@ jobs:
                   MONITOR_GROUP_ID: "-100123"
                   TELEGRAM_API_ID: "12345"
                   TELEGRAM_API_HASH: "abc"
+                  SUPABASE_SERVICE_ROLE_KEY: "mock-service-role-key"
+                  MONITOR_API_KEY: "mock-monitor-api-key"
               run: |
                   pytest
