@@ -25,19 +25,18 @@ jobs:
                   if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
             - name: Run Tests
-              # We need to mock environment variables that are required for the app to start/import
               env:
                   PROJECT_NAME: "CI Test"
                   ENV: "test"
-                  SUPABASE_URL: "https://example.supabase.co"
-                  SUPABASE_KEY: "mock-key"
+                  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+                  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+                  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
                   REDIS_URL: "redis://localhost:6379/0"
-                  ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" # 32 bytes base64url
-                  MONITOR_BOT_TOKEN: "123:ABC"
-                  MONITOR_GROUP_ID: "-100123"
-                  TELEGRAM_API_ID: "12345"
-                  TELEGRAM_API_HASH: "abc"
-                  SUPABASE_SERVICE_ROLE_KEY: "mock-service-role-key"
-                  MONITOR_API_KEY: "mock-monitor-api-key"
+                  ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+                  MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+                  MONITOR_GROUP_ID: ${{ secrets.MONITOR_GROUP_ID }}
+                  MONITOR_API_KEY: ${{ secrets.MONITOR_API_KEY }}
+                  TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+                  TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
               run: |
                   pytest
