@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     FOFA_EMAIL: Optional[str] = None
     FOFA_KEY: Optional[str] = None
     URLSCAN_KEY: Optional[str] = None
-    GITHUB_TOKEN: Optional[str] = None
+    GITHUB_TOKEN: Optional[str] = None  # Also accepts GH_OSINT_TOKEN (GitHub Actions reserves the name GITHUB_TOKEN for its own token)
     GITLAB_TOKEN: Optional[str] = None
     BITBUCKET_USER: Optional[str] = None        # Atlassian account email (for Basic auth with API token)
     BITBUCKET_API_TOKEN: Optional[str] = None   # API token (replaces app password — use Bearer auth)
@@ -73,6 +73,14 @@ class Settings(BaseSettings):
     def bot_tokens(self) -> list[str]:
         """Returns parsed list of bot tokens from MONITOR_BOT_TOKEN."""
         return self._bot_tokens
+
+    @model_validator(mode='before')
+    @classmethod
+    def resolve_token_aliases(cls, values):
+        """Resolve GitHub Actions naming conflicts (GITHUB_TOKEN is reserved as a secret name)."""
+        if not values.get('GITHUB_TOKEN'):
+            values['GITHUB_TOKEN'] = os.environ.get('GH_OSINT_TOKEN')
+        return values
 
     @model_validator(mode='after')
     def parse_bot_tokens(self) -> 'Settings':
