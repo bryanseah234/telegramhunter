@@ -4,21 +4,34 @@ from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError, Fo
 import asyncio
 import logging
 import time
+import itertools
 from app.core.config import settings
+from app.services.user_agent_srv import user_agent
 
 logger = logging.getLogger("broadcaster")
 
 class BroadcasterService:
     def __init__(self):
         self.bot_tokens = settings.bot_tokens
-        self.bot_token = self.bot_tokens[0] if self.bot_tokens else None
-        self._bot = None
         self._bots = {} # token -> Bot instance
-        self._failed_tokens: set = set()  # tokens confirmed kicked/unauthorized
+        self._failed_tokens: set = set()
 
-        # Simple round-robin for broadcaster
-        import itertools
-        self._token_cycle = itertools.cycle(self.bot_tokens)
+        # Combine bots and user sessions into a rotation pool
+        # We use placeholders for user sessions to trigger UserAgentService
+        self._pool = []
+        for token in self.bot_tokens:
+            self._pool.append({"type": "bot", "id": token})
+        
+        # User accounts are handled dynamically via UserAgentService
+        # We add 2 placeholders if user sessions exist to increase rotation frequency
+        user_agent._discover_sessions()
+        for i in range(len(user_agent.sessions)):
+             self._pool.append({"type": "user", "id": f"session_{i}"})
+
+        self._cycle = itertools.cycle(self._pool)
+        self._last_send_time = 0
+        from app.core.constants import BROADCAST_RATE_LIMIT_SLEEP
+        self._min_delay = BROADCAST_RATE_LIMIT_SLEEP
 
     def _get_bot_instance(self, token: str) -> Bot:
         if token not in self._bots:
@@ -31,104 +44,17 @@ class BroadcasterService:
             self._bots[token] = Bot(token=token, request=request)
         return self._bots[token]
 
-    def _mark_failed(self, token: str):
-        self._failed_tokens.add(token)
-        logger.warning(f"⚠️ [Broadcaster] Marked bot {token[:10]}... as failed (kicked/unauthorized)")
-
-    @property
-    def bot(self):
-        """Returns the next healthy bot in the rotation pool, skipping known-failed ones."""
-        for _ in range(len(self.bot_tokens)):
-            token = next(self._token_cycle)
-            if token not in self._failed_tokens:
-                self._bot = self._get_bot_instance(token)
-                return self._bot
-        # All bots marked failed — clear and try again (they may have been re-added to group)
-        logger.warning("⚠️ [Broadcaster] All bots marked failed — resetting failure set and retrying")
-        self._failed_tokens.clear()
-        token = next(self._token_cycle)
-        self._bot = self._get_bot_instance(token)
-        return self._bot
-
-    async def _retry_on_flood(self, func, *args, **kwargs):
-        """
-        Executes an async function with retry logic for Flood Control (429).
-        """
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                return await func(*args, **kwargs)
-            except RetryAfter as e:
-                wait_time = e.retry_after + 1  # Add buffer
-                logger.warning(f"⚠️ Flood control exceeded. Retrying in {wait_time}s...")
-                await asyncio.sleep(wait_time)
-            except TimedOut:
-                logger.warning(f"⚠️ Request Timed Out. Retrying in 5s...")
-                await asyncio.sleep(5)
-            except NetworkError as e:
-                logger.warning(f"⚠️ Network Error ({e.message}). Retrying in 5s...")
-                await asyncio.sleep(5)
-            except TelegramError as e:
-                # If it's a generic buffer error (sometimes happens with 429 without RetryAfter type)
-                if "Flood control exceeded" in str(e) or "Too Many Requests" in str(e):
-                    logger.warning(f"⚠️ Flood control exceeded (Generic). Retrying in 10s... ({e})")
-                    await asyncio.sleep(10)
-                else:
-                    raise e
-        # Final attempt
-        return await func(*args, **kwargs)
-
-    async def ensure_topic(self, group_id: int | str, topic_name: str) -> int:
-        """
-        Ensures a forum topic exists for the credential.
-        Checks ALL available topics via UserAgent first to avoid duplicates.
-        """
-        # 1. Try to find existing topic via UserAgent (User strict requirement)
-        try:
-            from app.services.user_agent_srv import user_agent
-            existing_id = await user_agent.find_topic_id(group_id, topic_name)
-            if existing_id:
-                return existing_id
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to check existing topics via UserAgent: {e}")
-
-        # Check for "General" topic collision or if user tries to create topic 1
-        if topic_name in ["General", "general", "main"] or group_id == 1:
-             return 1 # ID 1 is usually reserved for General in topics view (or None)
-
-
-        # 2. Create if not found
-        try:
-            logger.info(f"    [Broadcaster] Creating topic '{topic_name}' in {group_id}...")
-            # Enforce strict timeout specifically for creation which can hang
-            topic = await asyncio.wait_for(
-                self._retry_on_flood(
-                    self.bot.create_forum_topic, chat_id=group_id, name=topic_name
-                ), 
-                timeout=15.0
-            )
-            thread_id = topic.message_thread_id
-            logger.info(f"    ✅ [Broadcaster] Created topic {thread_id}")
-            
-            # 3. Lay the ground: Send Topic Name as first message
-            try:
-                await self.send_topic_header(group_id, thread_id, topic_name)
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to send header for new topic: {e}")
-                
-            return thread_id
-        except asyncio.TimeoutError:
-            logger.error(f"❌ [Broadcaster] Topic creation timed out for '{topic_name}'")
-            raise TimedOut("Topic creation timed out inside ensure_topic")
-        except TelegramError as e:
-            logger.error(f"Error creating topic: {e}")
-            raise e
+    async def _wait_for_rate_limit(self):
+        """Ensures a minimum delay between ANY two messages sent by the system."""
+        elapsed = time.time() - self._last_send_time
+        if elapsed < self._min_delay:
+            wait_time = self._min_delay - elapsed
+            await asyncio.sleep(wait_time)
+        self._last_send_time = time.time()
 
     async def send_message(self, group_id: int | str, thread_id: int, msg_obj: dict):
         """
-        Sends a message to the specific topic.
-        Rotates to the next bot automatically if the current one is kicked (Forbidden/Unauthorized).
-        TOPIC_DELETED errors are re-raised so the caller can recreate the topic.
+        Sends a message using the next available identity (Bot or User Account).
         """
         content = msg_obj.get("content", "")
         sender = msg_obj.get("sender_name", "Unknown")
@@ -141,77 +67,78 @@ class BroadcasterService:
 
         to_send_text = caption
         if media_type == "photo":
-            to_send_text = f"{caption}\n\n[Photo Media Detected - Not downloaded]"
+            to_send_text = f"{caption}\n\n[Photo Media Detected]"
         elif media_type != "text":
             to_send_text = f"{caption}\n\n[{media_type} Media Detected]"
 
-        last_err = None
-        for _ in range(len(self.bot_tokens)):
-            current_bot = self.bot
-            current_token = getattr(current_bot, 'token', None)
-            try:
-                await self._retry_on_flood(
-                    current_bot.send_message,
-                    chat_id=group_id,
-                    message_thread_id=thread_id,
-                    text=to_send_text,
-                )
-                return  # success
-            except Forbidden as e:
-                # Bot was kicked or token revoked — mark and try next
-                if current_token:
-                    self._mark_failed(current_token)
-                last_err = e
-                continue
-            except TelegramError as e:
-                # Topic-deleted and other errors bubble up to the caller
-                raise e
+        # Try up to N times (total size of pool)
+        for _ in range(len(self._pool)):
+            identity = next(self._cycle)
+            
+            await self._wait_for_rate_limit()
 
-        raise last_err or TelegramError("All broadcaster bots failed to send message")
+            if identity["type"] == "bot":
+                token = identity["id"]
+                if token in self._failed_tokens: continue
+                
+                bot = self._get_bot_instance(token)
+                try:
+                    logger.info(f"📤 [Broadcaster] Sending via Bot: {token[:10]}...")
+                    await bot.send_message(
+                        chat_id=group_id,
+                        message_thread_id=thread_id if thread_id != 1 else None, # 1 often causes issues
+                        text=to_send_text
+                    )
+                    return
+                except Forbidden:
+                    self._failed_tokens.add(token)
+                    logger.warning(f"⚠️ Bot {token[:10]}... kicked. Rotating...")
+                except TelegramError as e:
+                    if "Message thread not found" in str(e) and thread_id is not None:
+                        logger.warning("⚠️ Topic not supported in this group. Retrying in General...")
+                        await bot.send_message(chat_id=group_id, text=to_send_text)
+                        return
+                    logger.error(f"❌ Bot send failed: {e}")
+
+            elif identity["type"] == "user":
+                # Ensure we pick a fresh session for each "user" slot
+                logger.info(f"📤 [Broadcaster] Sending via User Account placeholder: {identity['id']}")
+                success = await user_agent.send_message(
+                    target=group_id,
+                    message=to_send_text,
+                    thread_id=thread_id if thread_id != 1 else None
+                )
+                if success: return
+                logger.warning("⚠️ User account send failed. Rotating...")
+
+        logger.error("❌ All identities failed to send message.")
 
     async def send_log(self, message: str):
-        """
-        Sends a log message to the General topic of the monitor group.
-        Retries with the next bot in the pool if the current one was kicked (403 Forbidden).
-        """
-        last_err = None
-        for _ in range(len(self.bot_tokens)):
-            try:
-                await self._retry_on_flood(
-                    self.bot.send_message,
-                    chat_id=settings.MONITOR_GROUP_ID,
-                    message_thread_id=None,  # Explicitly target General Topic
-                    text=f"🤖 [System Log]\n{message}"
-                )
-                return  # Success — stop trying
-            except TelegramError as e:
-                err_str = str(e)
-                if "Forbidden" in err_str or "not a member" in err_str:
-                    logger.warning(f"⚠️ Bot not in monitor group, rotating to next bot... ({e})")
-                    last_err = e
-                    continue  # Try next bot in rotation
-                # Non-recoverable Telegram error
-                logger.error(f"Failed to send log: {e}")
-                return
-            except Exception as e:
-                logger.error(f"Failed to send log: {e}")
-                return
-        # All bots failed
-        if last_err:
-            logger.error(f"Failed to send log (all {len(self.bot_tokens)} bots kicked from group): {last_err}")
-
-    async def send_topic_header(self, group_id: int | str, thread_id: int, text: str):
-        """
-        Sends a plain text message to the topic (used for headers).
-        """
+        """Sends a log to the General topic using a healthy bot."""
+        await self._wait_for_rate_limit()
         try:
-            await self._retry_on_flood(
-                self.bot.send_message,
-                chat_id=group_id,
-                message_thread_id=thread_id,
-                text=text
+            bot = self._get_bot_instance(self.bot_tokens[0])
+            await bot.send_message(
+                chat_id=settings.MONITOR_GROUP_ID,
+                text=f"🤖 [System Log]\n{message}"
             )
         except Exception as e:
-            logger.error(f"Failed to send topic header: {e}")
+            logger.error(f"Failed to send log: {e}")
 
+    async def ensure_topic(self, group_id: int | str, topic_name: str) -> int:
+        """Ensures a forum topic exists."""
+        try:
+            from app.services.user_agent_srv import user_agent
+            existing_id = await user_agent.find_topic_id(group_id, topic_name)
+            if existing_id: return existing_id
+        except Exception: pass
 
+        if topic_name in ["General", "general", "main"]: return 1
+
+        bot = self._get_bot_instance(self.bot_tokens[0])
+        try:
+            topic = await bot.create_forum_topic(chat_id=group_id, name=topic_name)
+            return topic.message_thread_id
+        except Exception as e:
+            logger.error(f"Topic creation failed: {e}")
+            return 1 # Fallback to general
