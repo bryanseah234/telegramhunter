@@ -38,5 +38,6 @@ jobs:
                   MONITOR_API_KEY: ${{ secrets.MONITOR_API_KEY }}
                   TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
                   TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+                  GH_OSINT_TOKEN: ${{ secrets.GH_OSINT_TOKEN }}
               run: |
                   pytest
