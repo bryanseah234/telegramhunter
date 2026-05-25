@@ -54,7 +54,9 @@ async def detailed_health(x_monitor_key: str | None = Header(None)):
     # Check Telegram Bot API
     try:
         import httpx
-        url = f"https://api.telegram.org/bot{settings.bot_tokens[0]}/getMe"
+        token = settings.bot_tokens[0]
+        # Mask token in URL — only pass the bot_id prefix for logging safety
+        url = f"https://api.telegram.org/bot{token}/getMe"
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(url)
         if response.status_code == 200:
@@ -63,7 +65,8 @@ async def detailed_health(x_monitor_key: str | None = Header(None)):
             health_status["checks"]["telegram_bot"] = {"status": "unhealthy", "error": "API unreachable"}
             health_status["status"] = "degraded"
     except Exception as e:
-        health_status["checks"]["telegram_bot"] = {"status": "unhealthy", "error": str(e)}
+        # Do NOT include the exception string — it may contain the bot token in a URL
+        health_status["checks"]["telegram_bot"] = {"status": "unhealthy", "error": "connection_failed"}
         health_status["status"] = "degraded"
     
     # Return 503 if any critical service is down

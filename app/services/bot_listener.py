@@ -594,31 +594,40 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if os.path.isdir(final_path):
                     shutil.rmtree(final_path)
                 dst_conn = sqlite3.connect(final_path, timeout=30.0)
-                
+                # Enable WAL mode so concurrent readers get a consistent snapshot
+                dst_conn.execute("PRAGMA journal_mode=WAL")
+
                 src_cur = src_conn.cursor()
                 dst_cur = dst_conn.cursor()
-                
-                # Copy sessions table
-                src_cur.execute("SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions")
-                row = src_cur.fetchone()
-                dst_cur.execute("CREATE TABLE IF NOT EXISTS sessions (dc_id integer primary key, server_address text, port integer, auth_key blob, takeout_id integer)")
-                dst_cur.execute("DELETE FROM sessions")
-                if row:
-                    dst_cur.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)", row)
-                
-                # Copy entities table safely
+
                 try:
-                    src_cur.execute("SELECT id, hash, username, phone, name, date FROM entities")
-                    entities = src_cur.fetchall()
-                    dst_cur.execute("CREATE TABLE IF NOT EXISTS entities (id integer primary key, hash integer not null, username text, phone text, name text, date integer)")
-                    dst_cur.executemany("INSERT OR REPLACE INTO entities VALUES (?, ?, ?, ?, ?, ?)", entities)
-                except Exception as e:
-                    logger.warning(f"Failed to copy entities: {e}")
-                
-                dst_conn.commit()
+                    # Wrap entire copy in a single transaction; rollback if anything fails
+                    # Copy sessions table
+                    src_cur.execute("SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions")
+                    row = src_cur.fetchone()
+                    dst_cur.execute("CREATE TABLE IF NOT EXISTS sessions (dc_id integer primary key, server_address text, port integer, auth_key blob, takeout_id integer)")
+                    dst_cur.execute("DELETE FROM sessions")
+                    if row:
+                        dst_cur.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)", row)
+
+                    # Copy entities table safely
+                    try:
+                        src_cur.execute("SELECT id, hash, username, phone, name, date FROM entities")
+                        entities = src_cur.fetchall()
+                        dst_cur.execute("CREATE TABLE IF NOT EXISTS entities (id integer primary key, hash integer not null, username text, phone text, name text, date integer)")
+                        dst_cur.executemany("INSERT OR REPLACE INTO entities VALUES (?, ?, ?, ?, ?, ?)", entities)
+                    except Exception as e:
+                        logger.warning(f"Failed to copy entities: {e}")
+
+                    dst_conn.commit()
+                    saved_successfully = True
+                except Exception as copy_err:
+                    dst_conn.rollback()
+                    logger.error(f"Sqlite copy failed mid-transaction, rolled back: {copy_err}")
+                    raise
+
                 src_conn.close()
                 dst_conn.close()
-                saved_successfully = True
                 try:
                     os.chmod(final_path, SESSION_FILE_PERMISSIONS)  # SECURITY: restrict to owner only
                 except Exception as e:

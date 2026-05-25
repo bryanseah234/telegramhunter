@@ -96,8 +96,12 @@ class BroadcasterService:
                 except TelegramError as e:
                     if "Message thread not found" in str(e) and thread_id is not None:
                         logger.warning("⚠️ Topic not supported in this group. Retrying in General...")
-                        await bot.send_message(chat_id=group_id, text=to_send_text)
-                        return
+                        await self._wait_for_rate_limit()
+                        try:
+                            await bot.send_message(chat_id=group_id, text=to_send_text)
+                            return
+                        except Exception as fallback_e:
+                            logger.error(f"❌ General fallback send failed: {fallback_e}")
                     logger.error(f"❌ Bot send failed: {e}")
 
             elif identity["type"] == "user":

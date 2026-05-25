@@ -72,7 +72,13 @@ async def _audit_active_topics_async():
 
         # Case B: Has topic_id, verify it exists on Telegram
         try:
-            await broadcaster.bot.send_chat_action(
+            from telegram import Bot
+            from telegram.request import HTTPXRequest
+            _audit_bot = Bot(
+                token=settings.bot_tokens[0],
+                request=HTTPXRequest(read_timeout=10.0, write_timeout=10.0),
+            )
+            await _audit_bot.send_chat_action(
                 chat_id=group_id,
                 message_thread_id=topic_id,
                 action="typing"
@@ -147,7 +153,6 @@ def system_self_heal():
 
 async def _system_self_heal_async():
     from datetime import datetime, timezone
-    from app.workers.tasks.flow_tasks import _broadcast_logic
 
     broadcaster = get_broadcaster()
     await broadcaster.send_log("🩹 **Self-Heal**: Starting system-wide sync and recovery...")
@@ -187,8 +192,10 @@ async def _system_self_heal_async():
     # ---
 
     try:
+        import os
+        SELF_HEAL_BATCH = int(os.getenv("SELF_HEAL_BATCH_SIZE", 500))
         response = await async_execute(
-            db.table("discovered_credentials").select("*").eq("status", "active")
+            db.table("discovered_credentials").select("*").eq("status", "active").limit(SELF_HEAL_BATCH)
         )
         credentials = response.data or []
     except Exception as e:

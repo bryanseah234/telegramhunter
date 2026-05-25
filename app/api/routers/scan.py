@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Header
 from app.schemas.models import ScanRequest
 from app.workers.celery_app import app as celery_app
 from app.core.config import settings
@@ -7,10 +7,11 @@ router = APIRouter(prefix="/scan", tags=["Scanner"])
 
 
 @router.post("/trigger")
-async def trigger_scan(request: ScanRequest):
+async def trigger_scan(request: ScanRequest, x_monitor_key: str | None = Header(None)):
     """
     Manually trigger an OSINT scan task.
     DISABLED in Production to prevent public abuse.
+    Requires X-Monitor-Key header in all environments.
     Valid sources: shodan, fofa, github, gitlab, urlscan
     """
     if settings.ENV == "production":
@@ -18,6 +19,10 @@ async def trigger_scan(request: ScanRequest):
             status_code=403,
             detail="Manual triggering is disabled in production. Scheduled tasks only."
         )
+
+    # Require API key in all environments to prevent abuse
+    if not settings.MONITOR_API_KEY or not x_monitor_key or x_monitor_key != settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
 
     task_name = f"scanner.scan_{request.source.lower()}"
 

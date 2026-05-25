@@ -369,8 +369,9 @@ async def _enrich_logic(cred_id: str):
 def broadcast_pending():
     # Distributed Lock to prevent race conditions (e.g. Local Worker vs Prod Worker)
     lock_key = "telegram_hunter:lock:broadcast"
-    # timeout=55s (slightly less than 60s schedule) to auto-release if crash
-    lock = redis_client.lock(lock_key, timeout=55, blocking=False)
+    # TTL = 240s: covers 100 msgs × 2s sleep = 200s worst case + 40s buffer.
+    # Previous 55s TTL was too short — expired during large batches and allowed parallel runs.
+    lock = redis_client.lock(lock_key, timeout=240, blocking=False)
     
     acquired = lock.acquire()
     if not acquired:
@@ -499,7 +500,9 @@ async def _broadcast_logic():
                      try:
                         cred_res = await async_execute(db.table("discovered_credentials").select("bot_token").eq("id", cred_id).single())
                         if cred_res.data:
-                            decrypted = security.decrypt(cred_res.data["bot_token"])
+                            # .single() returns a dict, not a list — access directly
+                            raw_token = cred_res.data.get("bot_token") if isinstance(cred_res.data, dict) else cred_res.data[0]["bot_token"]
+                            decrypted = security.decrypt(raw_token)
                             if ":" in decrypted:
                                 bot_id = decrypted.split(":")[0]
                                 meta["bot_id"] = bot_id
@@ -693,5 +696,4 @@ async def _rescrape_active_logic():
     except Exception as e:
         error_msg = f"❌ **Re-scrape** failed: {e}"
         await broadcaster.send_log(error_msg)
-        return error_msg
         return error_msg

@@ -122,6 +122,8 @@ app.conf.update(
         # ============================================
         "broadcast-every-minute": {
             "task": "flow.broadcast_pending",
+            # Default every 1 minute. If BROADCAST_INTERVAL_MINUTES=1 and batch=100 msgs × 2s sleep
+            # the task can run up to ~200s. Lock TTL (set in broadcast_pending) must exceed that.
             "schedule": crontab(minute=f"*/{int(os.getenv('BROADCAST_INTERVAL_MINUTES', 1))}"),
         },
         "rescrape-active-hourly": {
