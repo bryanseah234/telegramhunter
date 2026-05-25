@@ -35,19 +35,29 @@ class RedisService:
         idx = self.client.incr(f"rotation_index:{key}")
         return idx % max_val
 
-    def acquire_lock(self, key: str, ttl_seconds: int) -> bool:
+    def acquire_lock(self, key: str, ttl_seconds: int, owner: str = "1") -> bool:
         if ttl_seconds <= 0:
             ttl_seconds = 60
-        return bool(self.client.set(f"lock:{key}", "1", nx=True, ex=ttl_seconds))
+        return bool(self.client.set(f"lock:{key}", owner, nx=True, ex=ttl_seconds))
 
-    def release_lock(self, key: str):
-        self.client.delete(f"lock:{key}")
+    def release_lock(self, key: str, owner: str = "1"):
+        """Release lock only if we still own it (fencing via Lua CAS)."""
+        lua = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+else
+    return 0
+end
+"""
+        self.client.eval(lua, 1, f"lock:{key}", owner)
 
     def incr_key(self, key: str, ttl_seconds: int | None = None) -> int:
-        new_val = self.client.incr(f"counter:{key}")
+        pipe = self.client.pipeline()
+        pipe.incr(f"counter:{key}")
         if ttl_seconds:
-            self.client.expire(f"counter:{key}", ttl_seconds)
-        return int(new_val)
+            pipe.expire(f"counter:{key}", ttl_seconds)
+        results = pipe.execute()
+        return int(results[0])
 
     def reset_key(self, key: str):
         self.client.delete(f"counter:{key}")

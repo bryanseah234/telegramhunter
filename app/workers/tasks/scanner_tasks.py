@@ -179,16 +179,20 @@ async def _save_credentials_async(results, source_name: str):
                 # Step 5: Save to DB (INSERT new or UPDATE existing if we have chat_id)
 
                 if existing_id and chat_id:
-                    # UPDATE existing record with new chat_id
+                    # UPDATE existing record with new chat_id.
+                    # Merge meta: existing stored meta takes priority so we never clobber
+                    # already-resolved fields (topic_id, bot_username, etc.).
+                    # Scanner result only fills keys that are missing from the stored meta.
+                    merged_meta = {
+                        **item.get("meta", {}),                    # scanner result (lowest prio)
+                        **existing.data[0].get("meta", {}),        # stored meta (wins on conflict)
+                        "last_seen_source": source_name,           # always update provenance
+                        "last_verified_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }
                     update_data = {
                         "chat_id": chat_id,
                         "status": "active",
-                        "meta": {
-                            **item.get("meta", {}),
-                            **existing.data[0].get("meta", {}),
-                            "last_seen_source": source_name,
-                            "last_verified_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        },
+                        "meta": merged_meta,
                     }
                     if chat_name:
                         update_data["chat_name"] = chat_name

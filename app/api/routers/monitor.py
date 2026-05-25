@@ -8,10 +8,10 @@ router = APIRouter(prefix="/monitor", tags=["Monitor"])
 
 
 def _check_monitor_auth(x_monitor_key: str | None):
-    """Raises 403 if key is absent or wrong. Always enforced — MONITOR_API_KEY is required."""
+    """Raises 403 if key is absent or wrong. Raises 503 if key not configured on server."""
     if not settings.MONITOR_API_KEY:
         raise HTTPException(status_code=503, detail="Monitor API key not configured on server")
-    if x_monitor_key != settings.MONITOR_API_KEY:
+    if not x_monitor_key or x_monitor_key != settings.MONITOR_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
 
 
@@ -46,6 +46,7 @@ async def get_stats(x_monitor_key: str | None = Header(None)):
 async def list_credentials(limit: int = 100, x_monitor_key: str | None = Header(None)):
     """List recent credentials. Requires X-Monitor-Key header if MONITOR_API_KEY is configured."""
     _check_monitor_auth(x_monitor_key)
+    limit = max(1, min(limit, 1000))  # Clamp to [1, 1000]
     try:
         res = db.table("discovered_credentials").select("*").order("created_at", desc=True).limit(limit).execute()
         return res.data
@@ -57,6 +58,7 @@ async def list_credentials(limit: int = 100, x_monitor_key: str | None = Header(
 async def list_messages(limit: int = 100, x_monitor_key: str | None = Header(None)):
     """List recent exfiltrated messages. Requires X-Monitor-Key header if MONITOR_API_KEY is configured."""
     _check_monitor_auth(x_monitor_key)
+    limit = max(1, min(limit, 1000))  # Clamp to [1, 1000]
     try:
         res = db.table("exfiltrated_messages").select("*").order("created_at", desc=True).limit(limit).execute()
         return res.data

@@ -115,17 +115,43 @@ def retry(
 def retry_on_telegram_error(max_attempts: int = 3):
     """
     Specialized retry decorator for Telegram API errors.
-    Handles rate limits (429) with proper backoff.
+    Handles rate limits (429/RetryAfter) by honoring Telegram's retry_after hint.
     """
     from telegram.error import RetryAfter, TimedOut, NetworkError
-    
-    return retry(
-        max_attempts=max_attempts,
-        base_delay=2.0,
-        max_delay=30.0,
-        exponential=True,
-        exceptions=(RetryAfter, TimedOut, NetworkError)
-    )
+    import asyncio as _asyncio
+    import functools
+
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except RetryAfter as e:
+                    last_exc = e
+                    wait = getattr(e, "retry_after", None) or 30
+                    logger.warning(
+                        f"Telegram RetryAfter in {func.__name__} (attempt {attempt}/{max_attempts}). "
+                        f"Sleeping {wait}s as instructed by Telegram."
+                    )
+                    if attempt < max_attempts:
+                        await _asyncio.sleep(wait)
+                    else:
+                        raise
+                except (TimedOut, NetworkError) as e:
+                    last_exc = e
+                    if attempt == max_attempts:
+                        logger.error(f"{func.__name__} failed after {max_attempts} attempts: {e}", exc_info=True)
+                        raise
+                    delay = min(2.0 * (2 ** (attempt - 1)), 30.0)
+                    logger.warning(
+                        f"{func.__name__} failed (attempt {attempt}/{max_attempts}). Retrying in {delay:.1f}s. Error: {e}"
+                    )
+                    await _asyncio.sleep(delay)
+            raise last_exc if last_exc else RuntimeError("Unexpected retry state")
+        return wrapper
+    return decorator
 
 
 def retry_on_connection_error(max_attempts: int = 3):

@@ -23,6 +23,8 @@ class CircuitState(Enum):
 class CircuitBreaker:
     """
     Circuit breaker implementation for external service protection.
+    Thread-safe via threading.Lock (Celery prefork workers each get their own instance).
+    Note: state is per-process — not cluster-wide. Each Celery worker has independent state.
     
     States:
     - CLOSED: Normal operation, requests pass through
@@ -48,15 +50,6 @@ class CircuitBreaker:
         recovery_timeout: int = 60,
         success_threshold: int = 2
     ):
-        """
-        Initialize circuit breaker.
-        
-        Args:
-            name: Service name for logging
-            failure_threshold: Number of failures before opening circuit
-            recovery_timeout: Seconds to wait before trying again
-            success_threshold: Consecutive successes needed to close circuit
-        """
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
@@ -66,6 +59,7 @@ class CircuitBreaker:
         self.failure_count = 0
         self.success_count = 0
         self.last_failure_time: Optional[float] = None
+        self._lock = __import__("threading").Lock()  # Thread-safe state mutations
     
     def call(self, func: Callable[..., T]) -> Callable[..., T]:
         """Decorator to protect a sync or async function with circuit breaker."""
@@ -122,40 +116,43 @@ class CircuitBreaker:
     
     def _on_success(self):
         """Handle successful call"""
-        if self.state == CircuitState.HALF_OPEN:
-            self.success_count += 1
-            if self.success_count >= self.success_threshold:
-                logger.info(f"Circuit breaker [{self.name}] recovered (CLOSED)")
-                self.state = CircuitState.CLOSED
+        with self._lock:
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                if self.success_count >= self.success_threshold:
+                    logger.info(f"Circuit breaker [{self.name}] recovered (CLOSED)")
+                    self.state = CircuitState.CLOSED
+                    self.failure_count = 0
+                    self.success_count = 0
+            else:
+                # Reset failure count on success in CLOSED state
                 self.failure_count = 0
-                self.success_count = 0
-        else:
-            # Reset failure count on success in CLOSED state
-            self.failure_count = 0
     
     def _on_failure(self):
         """Handle failed call"""
-        self.failure_count += 1
-        self.last_failure_time = time.time()
-        
-        if self.state == CircuitState.HALF_OPEN:
-            # Failed during recovery attempt
-            logger.warning(f"Circuit breaker [{self.name}] recovery failed, reopening")
-            self.state = CircuitState.OPEN
-            self.success_count = 0
-        elif self.failure_count >= self.failure_threshold:
-            logger.error(
-                f"Circuit breaker [{self.name}] OPENED after {self.failure_count} failures"
-            )
-            self.state = CircuitState.OPEN
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            
+            if self.state == CircuitState.HALF_OPEN:
+                # Failed during recovery attempt
+                logger.warning(f"Circuit breaker [{self.name}] recovery failed, reopening")
+                self.state = CircuitState.OPEN
+                self.success_count = 0
+            elif self.failure_count >= self.failure_threshold:
+                logger.error(
+                    f"Circuit breaker [{self.name}] OPENED after {self.failure_count} failures"
+                )
+                self.state = CircuitState.OPEN
     
     def reset(self):
         """Manually reset circuit breaker"""
-        logger.info(f"Circuit breaker [{self.name}] manually reset")
-        self.state = CircuitState.CLOSED
-        self.failure_count = 0
-        self.success_count = 0
-        self.last_failure_time = None
+        with self._lock:
+            logger.info(f"Circuit breaker [{self.name}] manually reset")
+            self.state = CircuitState.CLOSED
+            self.failure_count = 0
+            self.success_count = 0
+            self.last_failure_time = None
     
     def get_status(self) -> dict:
         """Get current circuit breaker status"""
@@ -183,22 +180,27 @@ _circuit_breakers = {
 }
 
 
+import threading as _threading
+_circuit_breakers_lock = _threading.Lock()
+
+
 def get_circuit_breaker(service_name: str) -> CircuitBreaker:
     """
-    Get circuit breaker for a service.
-    
-    Args:
-        service_name: Name of the external service
-    
-    Returns:
-        CircuitBreaker instance
+    Get or lazily create a circuit breaker for a service.
+    Thread-safe via module-level lock to prevent duplicate instantiation
+    under concurrent first-call from multiple Celery worker threads.
     """
-    if service_name not in _circuit_breakers:
-        _circuit_breakers[service_name] = CircuitBreaker(
-            service_name,
-            failure_threshold=5,
-            recovery_timeout=60
-        )
+    # Fast path: already exists (no lock needed for read on CPython due to GIL,
+    # but dict membership test is not atomic under concurrent writes, so check twice).
+    if service_name in _circuit_breakers:
+        return _circuit_breakers[service_name]
+    with _circuit_breakers_lock:
+        if service_name not in _circuit_breakers:
+            _circuit_breakers[service_name] = CircuitBreaker(
+                service_name,
+                failure_threshold=5,
+                recovery_timeout=60
+            )
     return _circuit_breakers[service_name]
 
 

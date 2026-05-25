@@ -69,9 +69,15 @@ app = FastAPI(
 # This API should rely on explicit API keys for sensitive operations.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        # Restrict to known frontend origins. Wildcard is intentionally avoided in production.
+        # Add your frontend domain here, e.g. "https://dashboard.example.com"
+        # In development, localhost variants are permitted.
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ] if settings.ENV == "production" else ["*"],
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
