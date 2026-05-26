@@ -577,6 +577,12 @@ class UserAgentService:
 
     async def get_history(self, group_id: int | str, limit: int) -> list[dict]:
         from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
+        from telethon.errors import FloodWaitError
+        import os as _os
+        # Minimum sleep between successive get_history calls on the same session.
+        # Prevents back-to-back MTProto requests across concurrent Celery tasks from
+        # triggering Telegram FloodWait. Tune via MTPROTO_INTER_REQUEST_SLEEP (default 3s).
+        INTER_SLEEP = float(_os.getenv("MTPROTO_INTER_REQUEST_SLEEP", 3.0))
         async with self.lock:
             if not await self.start(): return []
             msgs = []
@@ -605,8 +611,23 @@ class UserAgentService:
                         "telegram_msg_id": message.id, "sender_name": sender_name, "content": content,
                         "media_type": media_type, "file_meta": file_meta, "chat_id": entity.id if hasattr(entity, 'id') else group_id
                     })
-            except Exception: pass
-            finally: await self._disconnect()
+            except FloodWaitError as fwe:
+                # Surface FloodWait so caller and logs know — swallowing it hides the signal
+                logger.warning(f"    🛑 [UserAgent] FloodWait in get_history for {group_id}: {fwe.seconds}s")
+                from app.core.redis_srv import redis_srv
+                session_name = self.current_session_name or "unknown"
+                cooldown_key = f"user_agent:{session_name}"
+                wait = fwe.seconds + 60  # buffer
+                if wait > 3600:
+                    logger.error(f"    🛑 [UserAgent] SEVERE FLOOD WAIT for '{session_name}': {wait}s.")
+                redis_srv.set_cooldown(cooldown_key, wait)
+            except Exception as e:
+                logger.debug(f"    ⚠️ [UserAgent] get_history error for {group_id}: {e}")
+            finally:
+                # Inter-request sleep INSIDE the lock so concurrent workers naturally queue
+                # behind each other with spacing instead of all firing at once.
+                await asyncio.sleep(INTER_SLEEP)
+                await self._disconnect()
             return msgs
 
 user_agent = UserAgentService()
