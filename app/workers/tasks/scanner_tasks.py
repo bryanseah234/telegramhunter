@@ -590,6 +590,14 @@ async def _scan_gitlab_async(query: str = None):
         logger.warning("⏸️ [GitLab] System is PAUSED. Skipping scan.")
         return "System Paused"
 
+    # Guard: skip if GitLab token is broken (403 = expired or missing read_api scope).
+    GITLAB_COOLDOWN_KEY = "cooldown:scanner:gitlab_api_broken"
+    GITLAB_COOLDOWN_TTL = int(os.getenv("GITLAB_BROKEN_COOLDOWN_SECS", 82800))  # 23h default
+    if redis_client.get(GITLAB_COOLDOWN_KEY):
+        ttl = redis_client.ttl(GITLAB_COOLDOWN_KEY)
+        logger.info(f"⏭️ [GitLab] Token on cooldown ({ttl}s remaining) — skipping scan.")
+        return "GitLab token on cooldown — skipped."
+
     logger.info("🔍 [GitLab] Starting scan...")
     await _send_log_async("🔍 [GitLab] Starting scheduled scan...")
 
@@ -602,8 +610,15 @@ async def _scan_gitlab_async(query: str = None):
         saved = await _save_credentials_async(results, "gitlab")
         total_saved += saved
     except Exception as e:
-        logger.error(f"    ❌ [GitLab] Scan failed: {str(e)}")
-        errors.append(str(e))
+        err_str = str(e)
+        logger.error(f"    ❌ [GitLab] Scan failed: {err_str}")
+        errors.append(err_str)
+        # 403 = token expired or missing read_api scope — set cooldown and surface action
+        if "403" in err_str or "Forbidden" in err_str:
+            redis_client.set(GITLAB_COOLDOWN_KEY, "1", ex=GITLAB_COOLDOWN_TTL)
+            msg = f"⚠️ [GitLab] 403 Forbidden — token expired or missing read_api scope. Cooldown set for {GITLAB_COOLDOWN_TTL//3600}h. Regenerate token at gitlab.com/-/user_settings/personal_access_tokens."
+            logger.warning(msg)
+            await _send_log_async(msg)
 
     result_msg = f"GitLab scan finished. Saved {total_saved} new credentials."
     if errors:
@@ -807,6 +822,14 @@ async def _scan_serper_async(query: str = None):
     if redis_client.get("system:paused"):
         return "System Paused"
 
+    # Guard: skip if Serper key is known-broken (400 = malformed/invalid key, 403 = quota).
+    SERPER_COOLDOWN_KEY = "cooldown:scanner:serper_api_broken"
+    SERPER_COOLDOWN_TTL = int(os.getenv("SERPER_BROKEN_COOLDOWN_SECS", 82800))  # 23h default
+    if redis_client.get(SERPER_COOLDOWN_KEY):
+        ttl = redis_client.ttl(SERPER_COOLDOWN_KEY)
+        logger.info(f"⏭️ [Serper] API key on cooldown ({ttl}s remaining) — skipping scan.")
+        return "Serper API key on cooldown — skipped."
+
     # Default clones to sweep
     dorks = [
         'site:pastebin.com "api.telegram.org/bot"',
@@ -829,7 +852,15 @@ async def _scan_serper_async(query: str = None):
             saved = await _save_credentials_async(results, "serper_dev")
             total_saved += saved
         except Exception as e:
-            logger.error(f"    ❌ [Serper] Failed on {dork}: {e}")
+            err_str = str(e)
+            logger.error(f"    ❌ [Serper] Failed on {dork}: {err_str}")
+            # 400 = invalid/malformed key or request, 403 = quota exceeded — abort all dorks
+            if "400" in err_str or "Bad Request" in err_str or "403" in err_str or "Forbidden" in err_str:
+                redis_client.set(SERPER_COOLDOWN_KEY, "1", ex=SERPER_COOLDOWN_TTL)
+                msg = f"⚠️ [Serper] {err_str[:80]} — API key invalid or quota exhausted. Cooldown set for {SERPER_COOLDOWN_TTL//3600}h. Check serper.dev dashboard."
+                logger.warning(msg)
+                await _send_log_async(msg)
+                break
 
     await _send_log_async(f"🏁 [Serper] Finished. Saved {total_saved} new credentials.")
     return f"Serper scan finished. Saved {total_saved}."
@@ -897,6 +928,16 @@ async def _scan_google_async(query: str = None):
     if redis_client.get("system:paused"):
         return "System Paused"
 
+    # Guard: skip entire run if Google CSE key is known-broken (403 = quota exhausted or key invalid).
+    # A 403 on the first dork means all subsequent dorks will also fail — no point running them.
+    # The cooldown (default 23h) prevents hammering a dead key every scan cycle.
+    GOOGLE_COOLDOWN_KEY = "cooldown:scanner:google_api_broken"
+    GOOGLE_COOLDOWN_TTL = int(os.getenv("GOOGLE_BROKEN_COOLDOWN_SECS", 82800))  # 23h default
+    if redis_client.get(GOOGLE_COOLDOWN_KEY):
+        ttl = redis_client.ttl(GOOGLE_COOLDOWN_KEY)
+        logger.info(f"⏭️ [Google] API key on cooldown ({ttl}s remaining) — skipping scan.")
+        return "Google API key on cooldown — skipped."
+
     dorks = [
         'site:pastebin.com "api.telegram.org/bot"',
         'site:github.com "TELEGRAM_BOT_TOKEN" filetype:env',
@@ -923,9 +964,18 @@ async def _scan_google_async(query: str = None):
             saved = await _save_credentials_async(results, "google_dork")
             total_saved += saved
         except Exception as e:
-            logger.error(f"    ❌ [Google] Dork failed: {e}")
-            errors.append(str(e))
+            err_str = str(e)
+            logger.error(f"    ❌ [Google] Dork failed: {err_str}")
+            errors.append(err_str)
             errors = errors[-MAX_ERRORS_BUFFER:]
+            # 403 = quota exhausted or key invalid — all remaining dorks will also fail.
+            # Set cooldown and abort early rather than burning time on dead requests.
+            if "403" in err_str or "Forbidden" in err_str:
+                redis_client.set(GOOGLE_COOLDOWN_KEY, "1", ex=GOOGLE_COOLDOWN_TTL)
+                msg = f"⚠️ [Google] 403 Forbidden — API key quota exhausted or invalid. Cooldown set for {GOOGLE_COOLDOWN_TTL//3600}h. Check billing/quota at console.cloud.google.com."
+                logger.warning(msg)
+                await _send_log_async(msg)
+                break
         await asyncio.sleep(2)
 
     result_msg = f"Google scan finished. Saved {total_saved} new credentials."
