@@ -911,68 +911,85 @@ class PublicWwwService:
             return []
 
 
-class SerperService:
+class ExaService:
+    """
+    Paste-site crawler using Exa neural search API.
+    Replaces SerperService — Exa returns full page content directly,
+    eliminating the second HTTP fetch pass that Serper required.
+
+    Scopes searches to known paste/code-sharing domains and extracts
+    Telegram bot tokens from returned content inline.
+    """
+    PASTE_DOMAINS = [
+        "pastebin.com",
+        "hastebin.com",
+        "rentry.co",
+        "ghostbin.com",
+        "paste.ee",
+        "controlc.com",
+    ]
+
     def __init__(self):
-        self.api_key = settings.SERPER_API_KEY
-        self.base_url = "https://google.serper.dev/search"
-        
-    async def search(self, query: str = r'site:pastebin.com "api.telegram.org/bot"') -> List[Dict[str, Any]]:
+        self.api_key = settings.EXA_API_KEY
+        self.base_url = "https://api.exa.ai/search"
+
+    async def search(self, query: str = '"api.telegram.org/bot"') -> List[Dict[str, Any]]:
         if not self.api_key:
-            logger.warning("    [Serper] Missing SERPER_API_KEY")
+            logger.warning("    [Exa] Missing EXA_API_KEY")
             return []
-            
+
         try:
             headers = {
-                'X-API-KEY': self.api_key,
-                'Content-Type': 'application/json'
+                "x-api-key": self.api_key,
+                "Content-Type": "application/json",
             }
             payload = {
-                "q": query,
-                "num": 20
+                "query": query,
+                "numResults": 25,
+                "includeDomains": self.PASTE_DOMAINS,
+                "contents": {
+                    "text": {"maxCharacters": 10000},
+                },
+                "type": "keyword",
             }
-            
-            async def do_serper():
+
+            async def do_exa():
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     res = await client.post(self.base_url, headers=headers, json=payload)
+                    if res.status_code in [401, 403]:
+                        raise httpx.HTTPStatusError(
+                            f"Exa auth error {res.status_code}",
+                            request=res.request, response=res
+                        )
                     res.raise_for_status()
-                    return res.json().get("organic", [])
-            
-            organic = await retry_with_backoff(do_serper)
-            if not organic: return []
-            
+                    return res.json().get("results", [])
+
+            exa_results = await retry_with_backoff(do_exa)
+            if not exa_results:
+                return []
+
             results = []
-            
-            async with httpx.AsyncClient(verify=False, timeout=10.0) as scan_client:
-                tasks = []
-                sem = asyncio.Semaphore(10)
-                
-                async def scan_url(link):
-                    async with sem:
-                        try:
-                            found = await _perform_active_deep_scan(link, client=scan_client)
-                            return link, found
-                        except Exception: return None
-                
-                for item in organic:
-                    link = item.get("link")
-                    if link:
-                        tasks.append(scan_url(link))
-                    
-                scan_results = await asyncio.gather(*tasks, return_exceptions=True)
-                for res_item in scan_results:
-                    if not res_item or isinstance(res_item, Exception): continue
-                    target_url, f_items = res_item
-                    for t_item in f_items:
-                        results.append({
-                            "token": t_item['token'],
-                            "chat_id": t_item.get('chat_id'),
-                            "meta": {"source": "serper_dev", "url": target_url}
-                        })
+            for item in exa_results:
+                text = item.get("text") or ""
+                url  = item.get("url", "")
+                if not text:
+                    continue
+                # Extract tokens from returned content — no second fetch needed
+                found_tokens = TOKEN_PATTERN.findall(text)
+                for t in found_tokens:
+                    if not _is_valid_token(t):
+                        continue
+                    results.append({
+                        "token":   t,
+                        "chat_id": None,
+                        "meta":    {"source": "exa", "url": url},
+                    })
             return results
-            
+
         except Exception as e:
-            logger.error(f"    [Serper] Error: {e}")
+            logger.error(f"    [Exa] Error: {e}")
             return []
+
 
 
 class BitbucketService:

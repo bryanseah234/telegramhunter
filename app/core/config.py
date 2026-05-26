@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     GITLAB_TOKEN: Optional[str] = None
     BITBUCKET_USER: Optional[str] = None        # Atlassian account email (for Basic auth with API token)
     BITBUCKET_API_TOKEN: Optional[str] = None   # API token (replaces app password — use Bearer auth)
-    SERPER_API_KEY: Optional[str] = None
+    EXA_API_KEY: Optional[str] = None
     CENSYS_ID: Optional[str] = None
     CENSYS_SECRET: Optional[str] = None
     HYBRID_ANALYSIS_KEY: Optional[str] = None

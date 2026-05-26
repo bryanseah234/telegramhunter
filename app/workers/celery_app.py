@@ -175,8 +175,8 @@ app.conf.update(
             "task": "scanner.scan_pastebin",
             "schedule": crontab(minute=15, hour="*/12"),
         },
-        "scan-serper-12hours": {
-            "task": "scanner.scan_serper",
+        "scan-exa-12hours": {
+            "task": "scanner.scan_exa",
             "schedule": crontab(minute=35, hour="*/12"),
         },
         "scan-google-12hours": {
