@@ -179,10 +179,8 @@ app.conf.update(
             "task": "scanner.scan_exa",
             "schedule": crontab(minute=35, hour="*/12"),
         },
-        "scan-google-12hours": {
-            "task": "scanner.scan_google",
-            "schedule": crontab(minute=50, hour="*/12"),
-        },
+        # scan-google-12hours: DISABLED — GCP project access issue, replaced by Exa.
+        # Re-enable by uncommenting once Custom Search API is properly bound to billing.
         "scan-bitbucket-8hours": {
             "task": "scanner.scan_bitbucket",
             "schedule": crontab(minute=30, hour="*/8"),
