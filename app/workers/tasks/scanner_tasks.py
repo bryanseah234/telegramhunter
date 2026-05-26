@@ -14,7 +14,7 @@ from app.services.scanners import (
     GitlabService,
     GrepAppService,
     PastebinService,
-    SerperService,
+    ExaService,
     ShodanService,
     UrlScanService,
 )
@@ -47,7 +47,7 @@ bitbucket_srv = BitbucketService()
 gist_srv = GithubGistService()
 grepapp_srv = GrepAppService()
 pastebin_srv = PastebinService()
-serper_srv = SerperService()
+exa_srv = ExaService()
 google_srv = GoogleSearchService()
 netlas_srv = NetlasService()
 publicwww_srv = PublicWwwService()  # BUG-002: was missing, caused NameError in scan_publicwww
@@ -813,57 +813,62 @@ async def _scan_pastebin_async(query: str = None):
     return result_msg
 
 
-@app.task(name="scanner.scan_serper", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
-def scan_serper(query: str = None):
-    return _run_sync(_scan_serper_async(query))
+@app.task(name="scanner.scan_exa", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def scan_exa(query: str = None):
+    """
+    Paste-site scan via Exa neural search API.
+    Replaces Serper — Exa returns full page content directly so no second
+    HTTP fetch is needed. Scoped to pastebin/hastebin/rentry/ghostbin/paste.ee.
+    """
+    return _run_sync(_scan_exa_async(query))
 
 
-async def _scan_serper_async(query: str = None):
+async def _scan_exa_async(query: str = None):
     if redis_client.get("system:paused"):
         return "System Paused"
 
-    # Guard: skip if Serper key is known-broken (400 = malformed/invalid key, 403 = quota).
-    SERPER_COOLDOWN_KEY = "cooldown:scanner:serper_api_broken"
-    SERPER_COOLDOWN_TTL = int(os.getenv("SERPER_BROKEN_COOLDOWN_SECS", 82800))  # 23h default
-    if redis_client.get(SERPER_COOLDOWN_KEY):
-        ttl = redis_client.ttl(SERPER_COOLDOWN_KEY)
-        logger.info(f"⏭️ [Serper] API key on cooldown ({ttl}s remaining) — skipping scan.")
-        return "Serper API key on cooldown — skipped."
+    # Guard: skip if Exa key is broken (401/403)
+    EXA_COOLDOWN_KEY = "cooldown:scanner:exa_api_broken"
+    EXA_COOLDOWN_TTL = int(os.getenv("EXA_BROKEN_COOLDOWN_SECS", 82800))  # 23h default
+    if redis_client.get(EXA_COOLDOWN_KEY):
+        ttl = redis_client.ttl(EXA_COOLDOWN_KEY)
+        logger.info(f"⏭️ [Exa] API key on cooldown ({ttl}s remaining) — skipping scan.")
+        return "Exa API key on cooldown — skipped."
 
-    # Default clones to sweep
-    dorks = [
-        'site:pastebin.com "api.telegram.org/bot"',
-        'site:hastebin.com "api.telegram.org/bot"',
-        'site:ghostbin.com "api.telegram.org/bot"',
-        'site:rentry.co "api.telegram.org/bot"',
+    queries = [query] if query else [
+        '"api.telegram.org/bot"',
+        '"TELEGRAM_BOT_TOKEN"',
+        '"bot_token" "telegram"',
     ]
-    if query:
-        dorks = [query]
 
-    logger.info(f"🔍 [Serper] Starting scan with {len(dorks)} dorks...")
-    await _send_log_async(
-        f"🔍 [Serper] Starting sweep across {len(dorks)} paste sites via Serper.dev..."
-    )
+    logger.info(f"🔍 [Exa] Starting paste-site scan ({len(queries)} queries)...")
+    await _send_log_async(f"🔍 [Exa] Scanning paste sites via Exa ({len(queries)} queries)...")
 
     total_saved = 0
-    for dork in dorks:
+    errors = []
+
+    for q in queries:
         try:
-            results = await serper_srv.search(dork)
-            saved = await _save_credentials_async(results, "serper_dev")
+            results = await exa_srv.search(q)
+            logger.info(f"    ✅ [Exa] Query '{q[:50]}' returned {len(results)} matches.")
+            saved = await _save_credentials_async(results, "exa")
             total_saved += saved
         except Exception as e:
             err_str = str(e)
-            logger.error(f"    ❌ [Serper] Failed on {dork}: {err_str}")
-            # 400 = invalid/malformed key or request, 403 = quota exceeded — abort all dorks
-            if "400" in err_str or "Bad Request" in err_str or "403" in err_str or "Forbidden" in err_str:
-                redis_client.set(SERPER_COOLDOWN_KEY, "1", ex=SERPER_COOLDOWN_TTL)
-                msg = f"⚠️ [Serper] {err_str[:80]} — API key invalid or quota exhausted. Cooldown set for {SERPER_COOLDOWN_TTL//3600}h. Check serper.dev dashboard."
+            logger.error(f"    ❌ [Exa] Query failed: {err_str}")
+            errors.append(err_str)
+            if "401" in err_str or "403" in err_str or "auth" in err_str.lower():
+                redis_client.set(EXA_COOLDOWN_KEY, "1", ex=EXA_COOLDOWN_TTL)
+                msg = f"⚠️ [Exa] Auth error — API key invalid or quota exhausted. Cooldown set for {EXA_COOLDOWN_TTL//3600}h. Check dashboard.exa.ai."
                 logger.warning(msg)
                 await _send_log_async(msg)
                 break
+        await asyncio.sleep(2)
 
-    await _send_log_async(f"🏁 [Serper] Finished. Saved {total_saved} new credentials.")
-    return f"Serper scan finished. Saved {total_saved}."
+    msg = f"Exa scan finished. Saved {total_saved} new credentials."
+    await _send_log_async(f"🏁 [Exa] Finished. Saved {total_saved} new credentials.")
+    return msg
+
 
 
 @app.task(name="scanner.retry_cold")
