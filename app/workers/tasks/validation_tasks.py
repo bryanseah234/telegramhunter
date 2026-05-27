@@ -574,3 +574,72 @@ def _scraper_srv_is_monitor(token: str) -> bool:
         return _s.is_monitor_bot(token)
     except Exception:
         return False
+
+
+# ============================================================
+# Backfill: score + enrich all active rows missing confidence_score
+# ============================================================
+
+@app.task(name="validation.backfill_scoring", queue="validation")
+def backfill_scoring(batch_size: int = 50):
+    """Re-run getChat enrichment + confidence scoring on active rows
+    that have a chat_id but no confidence_score in meta yet.
+
+    Does NOT call getMe (token already confirmed live).
+    Runs in batches — safe to call repeatedly via beat or manually.
+    """
+    from app.workers.tasks.scanner_tasks import _run_sync
+    return _run_sync(_backfill_scoring_async(batch_size))
+
+
+async def _backfill_scoring_async(batch_size: int):
+    import httpx
+    from app.core.security import security
+
+    res = await async_execute(
+        db.table("discovered_credentials")
+        .select("id, bot_token, chat_id, chat_type, bot_username, meta")
+        .eq("status", "active")
+        .not_.is_("chat_id", "null")
+        .is_("meta->>confidence_score", "null")
+        .order("updated_at", desc=False)
+        .limit(batch_size)
+    )
+    rows = res.data or []
+    if not rows:
+        logger.info("[Backfill] no rows need scoring — done")
+        return 0
+
+    logger.info(f"[Backfill] scoring {len(rows)} rows")
+    done = 0
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for row in rows:
+            try:
+                token = security.decrypt(row["bot_token"])
+                if _scraper_srv_is_monitor(token):
+                    continue
+                base_url = f"https://api.telegram.org/bot{token}"
+                chat_id = row["chat_id"]
+                await _acquire_rate_token()
+                enrichment = await _enrich_chat(chat_id, base_url, client)
+                score, reasons = _score_credential(
+                    chat_id=chat_id,
+                    chat_type=row.get("chat_type"),
+                    webhook_url=(row.get("meta") or {}).get("webhook_url"),
+                    chat_enrichment=enrichment,
+                    bot_username=row.get("bot_username"),
+                )
+                new_meta = {**(row.get("meta") or {}), **enrichment,
+                            "confidence_score": score, "confidence_reasons": reasons}
+                await async_execute(
+                    db.table("discovered_credentials")
+                    .update({"meta": new_meta, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                    .eq("id", row["id"])
+                )
+                done += 1
+            except Exception as e:
+                logger.warning(f"[Backfill] row {row['id'][:8]} failed: {e}")
+                continue
+
+    logger.info(f"[Backfill] scored {done}/{len(rows)} rows")
+    return done

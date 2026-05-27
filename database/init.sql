@@ -1,7 +1,7 @@
 -- ============================================================
--- Telegram Hunter — Database Schema
--- Run this once in your Supabase SQL Editor to initialize.
--- Safe to re-run: all statements use IF NOT EXISTS guards.
+-- Telegram Hunter — Database Schema (canonical, single source of truth)
+-- Safe to re-run on a fresh DB: all statements use IF NOT EXISTS guards.
+-- Do NOT add migrations/ patches alongside this file — amend here instead.
 -- ============================================================
 
 
@@ -23,11 +23,42 @@ CREATE TABLE IF NOT EXISTS discovered_credentials (
     status       TEXT        CHECK (status IN ('pending', 'active', 'revoked')) DEFAULT 'pending',
     meta         JSONB       DEFAULT '{}'::jsonb,
     created_at   TIMESTAMPTZ DEFAULT NOW(),
-    updated_at   TIMESTAMPTZ DEFAULT NOW()
+    updated_at   TIMESTAMPTZ DEFAULT NOW(),
+
+    -- Bundle 4: STORED generated columns derived from meta jsonb.
+    -- Postgres maintains these automatically — no app writes needed.
+    -- Enables real INT sort/filter without jsonb string coercion.
+    confidence_score INTEGER GENERATED ALWAYS AS (
+        CASE
+            WHEN meta ? 'confidence_score'
+              AND jsonb_typeof(meta->'confidence_score') = 'number'
+            THEN (meta->>'confidence_score')::int
+            ELSE NULL
+        END
+    ) STORED,
+
+    chat_member_count INTEGER GENERATED ALWAYS AS (
+        CASE
+            WHEN meta ? 'chat_member_count'
+              AND jsonb_typeof(meta->'chat_member_count') = 'number'
+            THEN (meta->>'chat_member_count')::int
+            ELSE NULL
+        END
+    ) STORED
 );
 
 CREATE INDEX IF NOT EXISTS idx_creds_status   ON discovered_credentials(status);
 CREATE INDEX IF NOT EXISTS idx_creds_bot_id   ON discovered_credentials(bot_id);
+
+-- Partial indexes for confidence/member sort — only non-null rows indexed,
+-- keeps index size bounded since most legacy rows score NULL.
+CREATE INDEX IF NOT EXISTS idx_discovered_credentials_confidence_score
+    ON discovered_credentials (confidence_score DESC NULLS LAST)
+    WHERE confidence_score IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_discovered_credentials_chat_member_count
+    ON discovered_credentials (chat_member_count DESC NULLS LAST)
+    WHERE chat_member_count IS NOT NULL;
 
 
 -- ============================================================
@@ -79,27 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_accounts_status ON telegram_accounts(status);
 
 
 -- ============================================================
--- VIEW: discovered_credentials_public
--- Safe projection for anon/frontend queries. Excludes Bot Token, Hash, Bot ID/Username, Chat ID/Name/Type.
--- ============================================================
-CREATE OR REPLACE VIEW discovered_credentials_public AS
-SELECT
-    id,
-    created_at,
-    source,
-    status,
-    meta,
-    -- Bundle 4: surface scoring/sizing as top-level int columns for fast sort
-    confidence_score,
-    chat_member_count
-FROM discovered_credentials;
-
--- Grant SELECT on view to anon
-GRANT SELECT ON discovered_credentials_public TO anon;
-
-
--- ============================================================
--- TABLE: audit_logs (MISSING-002)
+-- TABLE: audit_logs
 -- Persists high-importance security audit events.
 -- Written by AuditLogger._persist_to_db() for compliance.
 -- ============================================================
@@ -115,3 +126,35 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_logs(event_type);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp  ON audit_logs(timestamp);
+
+
+-- ============================================================
+-- TABLE: keepalive_log
+-- Heartbeat records written by the keepalive system task.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS keepalive_log (
+    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    status     TEXT        DEFAULT 'ok'
+);
+
+
+-- ============================================================
+-- VIEW: discovered_credentials_public
+-- Safe anon projection: excludes bot_token, token_hash,
+-- bot_id/username, chat_id/name/type (PII / operational secrets).
+-- Frontend and Supabase anon key queries hit this, never the raw table.
+-- ============================================================
+DROP VIEW IF EXISTS discovered_credentials_public;
+CREATE VIEW discovered_credentials_public AS
+SELECT
+    id,
+    created_at,
+    source,
+    status,
+    meta,
+    confidence_score,
+    chat_member_count
+FROM discovered_credentials;
+
+GRANT SELECT ON discovered_credentials_public TO anon;
