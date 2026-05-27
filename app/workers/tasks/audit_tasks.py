@@ -55,6 +55,14 @@ async def _audit_active_topics_async():
 
     group_id = settings.MONITOR_GROUP_ID
 
+    # Single Bot instance for all pings — avoid creating 100 connections per run
+    from telegram import Bot
+    from telegram.request import HTTPXRequest
+    _audit_bot = Bot(
+        token=settings.bot_tokens[0],
+        request=HTTPXRequest(read_timeout=10.0, write_timeout=10.0),
+    )
+
     for cred in creds:
         cred_id = cred["id"]
         meta = cred.get("meta") or {}
@@ -62,22 +70,37 @@ async def _audit_active_topics_async():
 
         checked_count += 1
 
-        # Case A: Active but NO topic_id in DB
+        # Case A: Active but NO topic_id in DB — try to find existing topic first
+        # to avoid creating duplicate topics on repeated audit cycles.
         if not topic_id:
             logger.warning(f"    ⚠️ [Audit] Cred {cred_id} is ACTIVE but missing topic_id. Recovering...")
             missing_topic_count += 1
+            bot_username = meta.get("bot_username", "unknown")
+            bot_id = meta.get("bot_id", "0")
+            topic_name = f"@{bot_username} / {bot_id}"
+            broadcaster = get_broadcaster()
+            try:
+                recovered_id = await broadcaster.ensure_topic(group_id, topic_name)
+                if recovered_id:
+                    fresh = await async_execute(
+                        db.table("discovered_credentials").select("meta").eq("id", cred_id).single()
+                    )
+                    fresh_meta = dict((fresh.data or {}).get("meta") or {})
+                    fresh_meta["topic_id"] = recovered_id
+                    await async_execute(
+                        db.table("discovered_credentials").update({"meta": fresh_meta}).eq("id", cred_id)
+                    )
+                    recovered_count += 1
+                    continue
+            except Exception as e:
+                logger.warning(f"    ⚠️ [Audit] ensure_topic failed for {cred_id}: {e}")
+            # Fallback: re-enqueue full enrichment
             from app.workers.tasks.flow_tasks import enrich_credential
             enrich_credential.delay(cred_id)
             continue
 
         # Case B: Has topic_id, verify it exists on Telegram
         try:
-            from telegram import Bot
-            from telegram.request import HTTPXRequest
-            _audit_bot = Bot(
-                token=settings.bot_tokens[0],
-                request=HTTPXRequest(read_timeout=10.0, write_timeout=10.0),
-            )
             await _audit_bot.send_chat_action(
                 chat_id=group_id,
                 message_thread_id=topic_id,
