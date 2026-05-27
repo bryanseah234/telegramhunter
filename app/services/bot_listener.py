@@ -785,11 +785,19 @@ async def _run_bot(token: str, is_primary: bool = False):
             if lock_key:
                 lock_renew_task = asyncio.create_task(_renew_poll_lock(lock_key))
 
-            try:
-                await application.updater.start_polling(drop_pending_updates=False)
-            except Conflict as e:
-                logger.error(f"⚠️ Polling conflict for @{bot_username}: {e}")
-                return
+            # Retry start_polling up to 3 times on Conflict — another instance
+            # may still be releasing its long-poll connection.
+            for attempt in range(3):
+                try:
+                    await application.updater.start_polling(drop_pending_updates=False)
+                    break
+                except Conflict as e:
+                    if attempt < 2:
+                        logger.warning(f"⚠️ Polling conflict for @{bot_username} (attempt {attempt+1}/3), retrying in 10s: {e}")
+                        await asyncio.sleep(10)
+                    else:
+                        logger.error(f"⚠️ Polling conflict for @{bot_username} after 3 attempts, giving up: {e}")
+                        return
 
             if is_primary:
                 watchdog_task = asyncio.create_task(watchdog_loop(application.bot))
