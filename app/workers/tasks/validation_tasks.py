@@ -150,6 +150,10 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
         # Step 3: Rate-limited getMe (the expensive call)
         await _acquire_rate_token()
 
+        # Variables that must outlive the http client block (used in persist step)
+        webhook_url = None
+        chat_enrichment: dict = {}
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             base_url = f"https://api.telegram.org/bot{token}"
             me_data = None
@@ -176,7 +180,6 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
             logger.info(f"[Validate] ✅ @{bot_username} (id={bot_info.get('id')})")
 
             # ---- Bundle 1.4: getWebhookInfo (capture C2 host if set) ----
-            webhook_url = None
             try:
                 wh_res = await client.get(f"{base_url}/getWebhookInfo", timeout=5.0)
                 if wh_res.status_code == 200:
@@ -246,6 +249,22 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
                     except Exception as e:
                         logger.warning(f"[Validate] getUpdates failed: {e}")
 
+            # ---- Bundle 4: enrichment + confidence scoring ----
+            # Collect richer chat metadata via getChat / getChatAdministrators
+            # when we have a chat_id. Best-effort — failures never block save.
+            if chat_id:
+                chat_enrichment = await _enrich_chat(chat_id, base_url, client)
+
+        # Confidence score derived from collected signals (always computed,
+        # outside the http client block — pure data transformation)
+        confidence_score, confidence_reasons = _score_credential(
+            chat_id=chat_id,
+            chat_type=chat_type,
+            webhook_url=webhook_url,
+            chat_enrichment=chat_enrichment if chat_id else {},
+            bot_username=bot_username,
+        )
+
         # Step 5: Persist (UPDATE existing or INSERT new)
         if existing_id and chat_id:
             # Update existing — stored meta wins to preserve enrichment
@@ -257,6 +276,10 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
             }
             if webhook_url:
                 merged_meta["webhook_url"] = webhook_url
+            if chat_enrichment:
+                merged_meta.update(chat_enrichment)
+            merged_meta["confidence_score"] = confidence_score
+            merged_meta["confidence_reasons"] = confidence_reasons
             update_data = {
                 "chat_id": chat_id,
                 "status": "active",
@@ -300,6 +323,9 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
                 "chat_name": chat_name,
                 "chat_type": chat_type,
                 **({"webhook_url": webhook_url} if webhook_url else {}),
+                **(chat_enrichment or {}),
+                "confidence_score": confidence_score,
+                "confidence_reasons": confidence_reasons,
             },
         }
         res = await async_execute(db.table("discovered_credentials").insert(new_data))
@@ -383,3 +409,168 @@ async def _refresh_pending_tokens_async():
             await asyncio.sleep(1)  # pace the enqueue burst
     logger.info(f"[Refresh] re-enqueued {enqueued} pending tokens")
     return f"refreshed:{enqueued}"
+
+
+# ============================================
+# Bundle 4: enrichment + confidence helpers
+# ============================================
+
+async def _enrich_chat(chat_id, base_url: str, client) -> dict:
+    """Best-effort getChat + getChatAdministrators enrichment.
+
+    Returns a dict of fields to merge into meta. NEVER raises — every API
+    failure logs and returns whatever was collected so far.
+    """
+    out: dict = {}
+
+    # getChat — description, member_count, pinned_message
+    try:
+        await _acquire_rate_token()
+        cr = await client.get(
+            f"{base_url}/getChat", params={"chat_id": chat_id}, timeout=5.0
+        )
+        if cr.status_code == 200:
+            cdata = cr.json()
+            if cdata.get("ok"):
+                ch = cdata.get("result") or {}
+                if ch.get("description"):
+                    out["chat_description"] = ch["description"][:500]
+                pinned = ch.get("pinned_message") or {}
+                pinned_text = pinned.get("text") or pinned.get("caption")
+                if pinned_text:
+                    out["chat_pinned_text"] = pinned_text[:500]
+                if ch.get("invite_link"):
+                    out["chat_invite_link"] = ch["invite_link"]
+    except Exception as e:
+        logger.debug(f"[Validate:enrich] getChat failed: {e}")
+
+    # getChatMemberCount — separate endpoint for groups/supergroups/channels
+    try:
+        await _acquire_rate_token()
+        mr = await client.get(
+            f"{base_url}/getChatMemberCount", params={"chat_id": chat_id}, timeout=5.0
+        )
+        if mr.status_code == 200:
+            mdata = mr.json()
+            if mdata.get("ok"):
+                count = mdata.get("result")
+                if isinstance(count, int):
+                    out["chat_member_count"] = count
+    except Exception as e:
+        logger.debug(f"[Validate:enrich] getChatMemberCount failed: {e}")
+
+    # getChatAdministrators — admin user IDs (operator pivot key)
+    try:
+        await _acquire_rate_token()
+        ar = await client.get(
+            f"{base_url}/getChatAdministrators", params={"chat_id": chat_id}, timeout=5.0
+        )
+        if ar.status_code == 200:
+            adata = ar.json()
+            if adata.get("ok"):
+                admins = adata.get("result") or []
+                # Only retain user-id + handle pairs, skip the rest (PII volume)
+                admin_summaries = []
+                for a in admins[:20]:  # cap at 20 to avoid bloat
+                    u = a.get("user") or {}
+                    if u.get("is_bot"):
+                        continue
+                    admin_summaries.append({
+                        "id": u.get("id"),
+                        "username": u.get("username"),
+                        "first_name": u.get("first_name"),
+                        "status": a.get("status"),
+                    })
+                if admin_summaries:
+                    out["chat_admins"] = admin_summaries
+    except Exception as e:
+        logger.debug(f"[Validate:enrich] getChatAdministrators failed: {e}")
+
+    if out:
+        logger.info(f"[Validate:enrich] +{len(out)} fields for chat={chat_id}")
+    return out
+
+
+def _score_credential(
+    *,
+    chat_id,
+    chat_type: str,
+    webhook_url: str,
+    chat_enrichment: dict,
+    bot_username: str,
+) -> tuple:
+    """Compute a 0-100 confidence score + list of human-readable reasons.
+
+    Higher = more likely to yield exfiltratable content. Designed for
+    dashboard sort-by-value, not gate-keeping.
+    """
+    score = 0
+    reasons = []
+
+    # Base: chat_id resolution alone is the foundation
+    if chat_id:
+        score += 30
+        reasons.append("chat_id_resolved")
+    else:
+        reasons.append("no_chat_id")
+
+    # Webhook configured = bot is in production use, not a test/abandoned
+    if webhook_url:
+        score += 20
+        reasons.append("webhook_configured")
+
+    # Chat type signal
+    if chat_type == "supergroup":
+        score += 15
+        reasons.append("chat_type_supergroup")
+    elif chat_type == "group":
+        score += 10
+        reasons.append("chat_type_group")
+    elif chat_type == "channel":
+        score += 12
+        reasons.append("chat_type_channel")
+    elif chat_type == "private":
+        score += 5
+        reasons.append("chat_type_private")
+
+    # Member count signal — bigger = more activity to exfiltrate
+    member_count = (chat_enrichment or {}).get("chat_member_count")
+    if isinstance(member_count, int):
+        if member_count >= 1000:
+            score += 20
+            reasons.append("members_1000+")
+        elif member_count >= 100:
+            score += 12
+            reasons.append("members_100+")
+        elif member_count >= 10:
+            score += 6
+            reasons.append("members_10+")
+
+    # Description present = curated, intentional bot
+    if (chat_enrichment or {}).get("chat_description"):
+        score += 5
+        reasons.append("has_description")
+
+    # Pinned message = admin announcements (often high-value content)
+    if (chat_enrichment or {}).get("chat_pinned_text"):
+        score += 8
+        reasons.append("has_pinned_message")
+
+    # Admins enumerated = operator pivot opportunity
+    admins = (chat_enrichment or {}).get("chat_admins") or []
+    if len(admins) >= 1:
+        score += 5
+        reasons.append("admins_enumerated")
+
+    # Cap at 100
+    score = min(score, 100)
+    return score, reasons
+
+
+def _scraper_srv_is_monitor(token: str) -> bool:
+    """Thin wrapper to call scraper_service.is_monitor_bot without import cycles."""
+    try:
+        from app.services.scraper_srv import scraper_service as _s
+        return _s.is_monitor_bot(token)
+    except Exception:
+        return False
