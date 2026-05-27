@@ -109,6 +109,7 @@ app.conf.update(
         "app.workers.tasks.import_tasks",   # MISSING-001: CSV import pipeline
         "app.workers.tasks.validation_tasks",  # async token validation (off scanner critical path)
         "app.workers.tasks.pivot_tasks",       # Bundle 1: pivot fan-out from validator
+        "app.workers.tasks.firehose_tasks",    # Bundle 2: GitHub Events real-time firehose
     ],
     # ============================================
     # QUEUE SEGREGATION
@@ -118,6 +119,8 @@ app.conf.update(
         "flow.rescrape_active": {"queue": "scrape"},
         "scanner.*": {"queue": "scanners"},
         "validation.*": {"queue": "validation"},
+        "pivot.*": {"queue": "validation"},
+        "firehose.*": {"queue": "scanners"},
     },
     beat_schedule={
         # ============================================
@@ -128,6 +131,13 @@ app.conf.update(
             # Default every 1 minute. If BROADCAST_INTERVAL_MINUTES=1 and batch=100 msgs × 2s sleep
             # the task can run up to ~200s. Lock TTL (set in broadcast_pending) must exceed that.
             "schedule": crontab(minute=f"*/{int(os.getenv('BROADCAST_INTERVAL_MINUTES', 1))}"),
+        },
+        # GitHub Events firehose — real-time leak detection (every 30s)
+        # Public timeline polling, ETag-aware. ~5000 req/hr GitHub quota.
+        # Catches leaks within ~30s of push, vs 6+ min for /search/code indexing.
+        "firehose-github-events-30s": {
+            "task": "firehose.poll_github_events",
+            "schedule": 30.0,  # raw seconds — fires every 30s
         },
         "rescrape-active-hourly": {
             "task": "flow.rescrape_active",
@@ -194,6 +204,13 @@ app.conf.update(
         "scan-telegram-search-12hours": {
             "task": "scanner.scan_telegram_search",
             "schedule": crontab(minute=20, hour="*/12"),
+        },
+        # Bundle 2.2: re-validate pending tokens daily — recovers chat_id
+        # for bots that activated AFTER initial discovery (dormant→active).
+        # 05:00 UTC = quiet period for Telegram getMe budget.
+        "validation-refresh-pending-daily": {
+            "task": "validation.refresh_pending_tokens",
+            "schedule": crontab(minute=0, hour=5),
         },
         # scan-google-12hours: DISABLED — GCP project access issue, replaced by Exa.
         # Re-enable by uncommenting once Custom Search API is properly bound to billing.
