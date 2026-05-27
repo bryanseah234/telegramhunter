@@ -1,7 +1,7 @@
 from app.workers.celery_app import app
 from app.core.database import db
 from app.core.config import settings
-from app.workers.tasks.flow_tasks import async_execute, get_broadcaster  # BUG-007, BUG-011
+from app.workers.tasks.flow_tasks import async_execute, get_broadcaster, _broadcast_logic
 import asyncio
 import logging
 from telegram.error import TelegramError
@@ -113,7 +113,7 @@ async def _audit_active_topics_async():
             if "Topic_deleted" in err_str or "message thread not found" in err_str or "TOPIC_DELETED" in err_str:
                 logger.error(f"    ❌ [Audit] Topic {topic_id} for {cred_id} is DELETED. Triggering recovery.")
 
-                # Clear invalid topic_id from DB — BUG-007: use async_execute
+                # Clear invalid topic_id from DB
                 meta["topic_id"] = None
                 await async_execute(
                     db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id)
@@ -130,7 +130,7 @@ async def _audit_active_topics_async():
 
         # Case C: Message Integrity Check
         try:
-            last_msg_db = await async_execute(  # BUG-007: use async_execute
+            last_msg_db = await async_execute(
                 db.table("exfiltrated_messages")
                 .select("telegram_msg_id, id")
                 .eq("credential_id", cred_id)

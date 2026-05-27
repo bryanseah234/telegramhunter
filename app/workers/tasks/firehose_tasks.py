@@ -140,7 +140,7 @@ async def _poll_github_events_async():
                             continue
                         redis_client.setex(seen_key, 7 * 86400, "1")
                     except Exception:
-                        pass  # Redis hiccup — proceed without dedup
+                        logger.debug("[Firehose] Redis dedup unavailable — proceeding without dedup (may reprocess commits)")
 
                     try:
                         cr = await client.get(commit_url)
