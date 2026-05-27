@@ -107,6 +107,7 @@ app.conf.update(
         "app.workers.tasks.scanner_tasks",
         "app.workers.tasks.audit_tasks",
         "app.workers.tasks.import_tasks",   # MISSING-001: CSV import pipeline
+        "app.workers.tasks.validation_tasks",  # async token validation (off scanner critical path)
     ],
     # ============================================
     # QUEUE SEGREGATION
@@ -115,6 +116,7 @@ app.conf.update(
         "flow.exfiltrate_chat": {"queue": "scrape"},
         "flow.rescrape_active": {"queue": "scrape"},
         "scanner.*": {"queue": "scanners"},
+        "validation.*": {"queue": "validation"},
     },
     beat_schedule={
         # ============================================
