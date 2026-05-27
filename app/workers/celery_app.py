@@ -212,6 +212,11 @@ app.conf.update(
             "task": "validation.refresh_pending_tokens",
             "schedule": crontab(minute=0, hour=5),
         },
+        # Backfill scoring: runs every 10min, processes 50 rows/batch, self-terminates when done
+        "validation-backfill-scoring": {
+            "task": "validation.backfill_scoring",
+            "schedule": crontab(minute="*/10"),
+        },
         # Common Crawl — petabyte-scale historical web crawl, free index API.
         # Daily backfill from latest crawl. ~500 URLs/run, ~2 min runtime.
         "scan-commoncrawl-daily": {
