@@ -126,6 +126,13 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
         logger.debug(f"[Validate] Invalid format: {token[:15]}...")
         return 0
 
+    # Own-bot guard — hard stop before ANY Telegram API call or DB write.
+    # MONITOR_BOT_TOKEN covers all our own bots. If a scanner finds our own
+    # token (e.g. via telegram_search), drop it here silently.
+    if _scraper_srv_is_monitor(token):
+        logger.debug(f"[Validate] Own monitor bot token — silently dropping")
+        return 0
+
     token_hash = _calculate_hash(token)
     extracted_chat_id = item.get("chat_id")
 
