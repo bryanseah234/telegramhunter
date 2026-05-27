@@ -161,10 +161,10 @@ app.conf.update(
             "task": "scanner.scan_fofa",
             "schedule": crontab(minute=0, hour=f"1-23/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"),
         },
-        "scan-gitlab-6hours": {
-            "task": "scanner.scan_gitlab",
-            "schedule": crontab(minute=10, hour="*/6"),
-        },
+        # scan-gitlab-6hours: DISABLED — gitlab.com free tier has global blob
+        # search disabled (returns "403 Forbidden - Global Search is disabled
+        # for this scope"). Re-enable only if upgrading to paid GitLab plan
+        # OR refactoring scanner to project-scoped search.
         "scan-grepapp-6hours": {
             "task": "scanner.scan_grepapp",
             "schedule": crontab(minute=25, hour="*/6"),
