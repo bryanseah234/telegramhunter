@@ -40,7 +40,11 @@ class UserAgentService:
         self._refresher_task = None
         self._ensure_task = None
         self._session_lock_key = None
-        self._instance_id = f"{socket.gethostname()}:{os.getpid()}"
+        # Instance ID must be stable across container restarts.
+        # Using a fixed process name (derived from env or hardcoded fallback) instead of hostname
+        # because Docker generates new hostnames on each container recreate.
+        import os as _os
+        self._instance_id = _os.getenv("WORKER_INSTANCE_ID", "worker-scrape")  # Override via env if needed
         self._current_phone = None
 
     def _discover_sessions(self):
@@ -264,13 +268,32 @@ class UserAgentService:
             from app.core.database import db
             abs_path = os.path.abspath(session_path)
             res = await asyncio.to_thread(
-                lambda: db.table("telegram_accounts").select("phone").eq("session_path", abs_path).limit(1).execute()
+                lambda: db.table("telegram_accounts").select("phone,locked_by,locked_until").eq("session_path", abs_path).limit(1).execute()
             )
             if not res.data:
                 return True
-            phone = res.data[0].get("phone")
+            row = res.data[0]
+            phone = row.get("phone")
             if not phone:
                 return True
+            
+            # Check if we already hold this lease (same instance_id and not expired)
+            current_holder = row.get("locked_by")
+            current_until = row.get("locked_until")
+            if current_holder == self._instance_id and current_until:
+                # We already hold it — just refresh the TTL
+                lease_until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+                await asyncio.to_thread(
+                    lambda: db.table("telegram_accounts")
+                        .update({"locked_until": lease_until})
+                        .eq("phone", phone)
+                        .eq("locked_by", self._instance_id)
+                        .execute()
+                )
+                self._current_phone = phone
+                return True
+            
+            # Try to acquire fresh lease (only if unlocked or expired)
             lease_until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
             updated = await asyncio.to_thread(
                 lambda: db.table("telegram_accounts")

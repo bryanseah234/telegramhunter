@@ -658,7 +658,7 @@ async def _rescrape_active_logic():
     # Guard: if ALL UserAgent sessions are on cooldown, skip this run entirely.
     # Queueing tasks when the UA is fully restricted just wastes worker slots and
     # causes noisy "All sessions failed" log spam.
-    from app.utils.helpers import _run_sync
+    from app.workers.tasks.scanner_tasks import _run_sync
     ua_sessions_available = False
     try:
         import os.path as _osp
