@@ -328,3 +328,58 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
         logger.error(f"[Validate] Error processing token: {e}", exc_info=True)
 
     return 0
+
+
+# ============================================
+# Bundle 2.2: Token validity refresh loop
+# ============================================
+
+@app.task(
+    name="validation.refresh_pending_tokens",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=1,
+)
+def refresh_pending_tokens():
+    """Re-enqueue validation for all 'pending' tokens (no chat_id resolved yet).
+
+    Some bot owners activate dormant bots later — re-validating periodically
+    recovers chat_id resolution for free.
+    """
+    from app.workers.tasks.scanner_tasks import _run_sync
+    return _run_sync(_refresh_pending_tokens_async())
+
+
+async def _refresh_pending_tokens_async():
+    if redis_client.get("system:paused"):
+        return "paused"
+    # Grab up to 500 oldest-validated pending tokens (no chat_id)
+    res = await async_execute(
+        db.table("discovered_credentials")
+        .select("id, bot_token, meta")
+        .is_("chat_id", "null")
+        .order("updated_at", desc=False)
+        .limit(500)
+    )
+    rows = res.data or []
+    enqueued = 0
+    for row in rows:
+        encrypted_token = row.get("bot_token")
+        if not encrypted_token:
+            continue
+        try:
+            token = security.decrypt(encrypted_token)
+        except Exception:
+            continue
+        if not token:
+            continue
+        # Re-enqueue (validate_token handles dedup, Redis dedup, getMe)
+        validate_token.apply_async(
+            args=[{"token": token, "meta": row.get("meta") or {}}, "refresh_pending"],
+            queue="validation",
+        )
+        enqueued += 1
+        if enqueued % 50 == 0:
+            await asyncio.sleep(1)  # pace the enqueue burst
+    logger.info(f"[Refresh] re-enqueued {enqueued} pending tokens")
+    return f"refreshed:{enqueued}"
