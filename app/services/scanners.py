@@ -6,6 +6,7 @@ Complementary services (GithubGistService, GrepAppService, etc.) live in scanner
 import httpx
 import asyncio
 import hashlib
+import json
 from typing import List, Dict, Any
 from app.core.config import settings
 import requests
@@ -1240,4 +1241,247 @@ class WaybackService:
                 await asyncio.sleep(1.2)
 
         logger.info(f"    [Wayback] Returned {len(results)} matches across {len(seen_in_run)} snapshots")
+        return results
+
+
+class CommonCrawlService:
+    """
+    Common Crawl Index API — free historical web crawl URL search.
+
+    Endpoint pattern:
+        https://index.commoncrawl.org/CC-MAIN-{crawl_id}-index
+        ?url=api.telegram.org&matchType=domain&output=json&limit=N
+
+    Response format: NDJSON (one JSON object per line, NOT a JSON array).
+
+    Strategy:
+      1. Discover the latest crawl ID from /collinfo.json
+      2. Query that crawl's index for URLs under api.telegram.org domain
+      3. Tokens leak via URL query strings: api.telegram.org/bot{TOKEN}/...
+      4. Extract tokens directly from URL — no WARC fetch needed for the
+         common case (CDX URL field already contains everything we need).
+
+    Cost: zero. No AWS, no Athena, no API key.
+    Rate: ~1 req/sec courtesy (no documented hard cap).
+    """
+
+    COLLINFO_URL = "https://index.commoncrawl.org/collinfo.json"
+    QUERY_DOMAIN = "api.telegram.org"
+
+    def __init__(self):
+        self.timeout = httpx.Timeout(30.0, connect=10.0)
+        self.dedupe_ttl = 30 * 86400  # 30 days
+
+    async def search(self, limit: int = 500) -> List[Dict[str, Any]]:
+        from app.core.redis_srv import redis_srv as _redis
+        results: List[Dict[str, Any]] = []
+
+        async with httpx.AsyncClient(
+            timeout=self.timeout,
+            follow_redirects=True,
+            headers={"User-Agent": "telegramhunter/1.0 (+research)"},
+        ) as client:
+            # Step 1: discover the newest crawl
+            try:
+                cr = await client.get(self.COLLINFO_URL)
+                cr.raise_for_status()
+                colls = cr.json()
+                if not colls:
+                    logger.warning("[CommonCrawl] empty collinfo")
+                    return []
+                latest = colls[0]  # newest first
+                index_api = latest.get("cdx-api")
+                crawl_id = latest.get("id")
+                if not index_api:
+                    logger.warning(f"[CommonCrawl] no cdx-api for {crawl_id}")
+                    return []
+                logger.info(f"[CommonCrawl] using crawl {crawl_id}")
+            except Exception as e:
+                logger.error(f"[CommonCrawl] collinfo failed: {e}")
+                return []
+
+            # Step 2: query the index — domain match, paginated by limit
+            try:
+                idx_resp = await client.get(
+                    index_api,
+                    params={
+                        "url": self.QUERY_DOMAIN,
+                        "matchType": "domain",
+                        "output": "json",
+                        "limit": limit,
+                        "filter": "=status:200",  # successful captures only
+                    },
+                )
+                if idx_resp.status_code != 200:
+                    logger.warning(f"[CommonCrawl] index HTTP {idx_resp.status_code}")
+                    return []
+                # NDJSON — one JSON object per line
+                raw = idx_resp.text or ""
+                lines = [l for l in raw.split("\n") if l.strip()]
+            except Exception as e:
+                logger.error(f"[CommonCrawl] index query failed: {e}")
+                return []
+
+            seen_in_run = set()
+            for line in lines:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                url = rec.get("url")
+                if not url:
+                    continue
+
+                url_hash = hashlib.sha256(url.encode("utf-8", errors="replace")).hexdigest()[:16]
+                if url_hash in seen_in_run:
+                    continue
+                seen_in_run.add(url_hash)
+
+                redis_key = f"commoncrawl:seen:{url_hash}"
+                try:
+                    if _redis.client.exists(redis_key):
+                        continue
+                except Exception:
+                    pass
+
+                # Extract tokens directly from URL
+                url_tokens = TOKEN_PATTERN.findall(url)
+                for tok in url_tokens:
+                    if not _is_valid_token(tok):
+                        continue
+                    results.append({
+                        "token": tok,
+                        "meta": {
+                            "commoncrawl_url": url,
+                            "commoncrawl_timestamp": rec.get("timestamp"),
+                            "commoncrawl_crawl": crawl_id,
+                            "extracted_from": "url",
+                            "source_kind": "commoncrawl",
+                        }
+                    })
+
+                # Mark seen regardless of match (avoids re-processing same URL)
+                try:
+                    _redis.client.setex(redis_key, self.dedupe_ttl, "1")
+                except Exception:
+                    pass
+
+        logger.info(
+            f"    [CommonCrawl] returned {len(results)} matches "
+            f"across {len(seen_in_run)} URLs"
+        )
+        return results
+
+
+class SourcegraphService:
+    """
+    Sourcegraph public code search — free, no auth, no key.
+
+    Endpoint: https://sourcegraph.com/.api/search/stream
+    Format: Server-Sent Events (SSE). Stream lines like 'event: matches\ndata: [...]\n\n'.
+    Index size: ~91k repos containing 'api.telegram.org'.
+    Rate limit: undocumented; we use 5s between queries as courtesy.
+
+    Replaces the abandoned Replit attempt — Replit's GraphQL now requires
+    persisted query hashes (anti-scraping), Sourcegraph remains open.
+    """
+
+    STREAM_URL = "https://sourcegraph.com/.api/search/stream"
+
+    QUERIES = [
+        "api.telegram.org/bot count:200",
+        "TELEGRAM_BOT_TOKEN count:200",
+        "TELEGRAM_TOKEN= count:200",
+    ]
+
+    def __init__(self):
+        self.timeout = httpx.Timeout(45.0, connect=10.0)
+        self.dedupe_ttl = 14 * 86400  # 14 days
+
+    async def search(self, query: str = None) -> List[Dict[str, Any]]:
+        from app.core.redis_srv import redis_srv as _redis
+        results: List[Dict[str, Any]] = []
+        queries = [query] if query else list(self.QUERIES)
+
+        async with httpx.AsyncClient(
+            timeout=self.timeout,
+            follow_redirects=True,
+            headers={"User-Agent": "telegramhunter/1.0 (+research)"},
+        ) as client:
+            for q in queries:
+                try:
+                    # SSE stream: query the stream endpoint, parse 'data:' lines
+                    r = await client.get(self.STREAM_URL, params={"q": q})
+                    if r.status_code != 200:
+                        logger.debug(f"[Sourcegraph] q='{q[:30]}' HTTP {r.status_code}")
+                        continue
+                    body = r.text or ""
+                except Exception as e:
+                    logger.warning(f"[Sourcegraph] stream failed: {e}")
+                    continue
+
+                # SSE parsing — events come as 'event: <type>\ndata: <json>\n\n'
+                for chunk in body.split("\n\n"):
+                    lines = chunk.split("\n")
+                    event_type = None
+                    data_str = None
+                    for line in lines:
+                        if line.startswith("event: "):
+                            event_type = line[7:].strip()
+                        elif line.startswith("data: "):
+                            data_str = line[6:].strip()
+                    if event_type != "matches" or not data_str:
+                        continue
+                    try:
+                        matches = json.loads(data_str)
+                    except Exception:
+                        continue
+                    if not isinstance(matches, list):
+                        continue
+
+                    for m in matches:
+                        if m.get("type") != "content":
+                            continue
+                        repo = m.get("repository") or ""
+                        path = m.get("path") or ""
+                        commit = m.get("commit") or ""
+                        # repo format: "github.com/owner/name" → strip "github.com/"
+                        repo_full = repo.replace("github.com/", "", 1) if repo.startswith("github.com/") else repo
+
+                        # Dedup per (repo, path, commit) — stable identity
+                        h = hashlib.sha256(f"{repo}|{path}|{commit}".encode()).hexdigest()[:16]
+                        redis_key = f"sourcegraph:seen:{h}"
+                        try:
+                            if _redis.client.exists(redis_key):
+                                continue
+                        except Exception:
+                            pass
+
+                        # Aggregate matched line text
+                        line_matches = m.get("lineMatches") or []
+                        for lm in line_matches:
+                            line_text = lm.get("line") or ""
+                            tokens = set(TOKEN_PATTERN.findall(line_text))
+                            for tok in tokens:
+                                if not _is_valid_token(tok):
+                                    continue
+                                results.append({
+                                    "token": tok,
+                                    "meta": {
+                                        "repo": repo_full,
+                                        "path": path,
+                                        "commit": commit,
+                                        "line_number": lm.get("lineNumber"),
+                                        "source_kind": "sourcegraph",
+                                    }
+                                })
+
+                        try:
+                            _redis.client.setex(redis_key, self.dedupe_ttl, "1")
+                        except Exception:
+                            pass
+
+                await asyncio.sleep(5)  # courtesy between queries
+
+        logger.info(f"    [Sourcegraph] returned {len(results)} matches")
         return results

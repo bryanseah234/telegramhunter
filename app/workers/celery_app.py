@@ -212,6 +212,18 @@ app.conf.update(
             "task": "validation.refresh_pending_tokens",
             "schedule": crontab(minute=0, hour=5),
         },
+        # Common Crawl — petabyte-scale historical web crawl, free index API.
+        # Daily backfill from latest crawl. ~500 URLs/run, ~2 min runtime.
+        "scan-commoncrawl-daily": {
+            "task": "scanner.scan_commoncrawl",
+            "schedule": crontab(minute=0, hour=2),  # 02:00 UTC
+        },
+        # Sourcegraph — public code search over ~91k indexed repos with
+        # api.telegram.org. Free, no auth. SSE stream search.
+        "scan-sourcegraph-12hours": {
+            "task": "scanner.scan_sourcegraph",
+            "schedule": crontab(minute=10, hour="*/12"),
+        },
         # scan-google-12hours: DISABLED — GCP project access issue, replaced by Exa.
         # Re-enable by uncommenting once Custom Search API is properly bound to billing.
         "scan-bitbucket-8hours": {
