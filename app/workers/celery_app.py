@@ -173,19 +173,37 @@ app.conf.update(
             "task": "scanner.scan_gist",
             "schedule": crontab(minute=45, hour="*/6"),
         },
-        "scan-pastebin-12hours": {
-            "task": "scanner.scan_pastebin",
-            "schedule": crontab(minute=15, hour="*/12"),
-        },
+        # scan-pastebin-12hours: DISABLED — Pastebin scraping API requires
+        # paid IP whitelist ($30 + manual approval). Exa scanner already
+        # covers pastebin.com via includeDomains with full content extraction.
         "scan-exa-12hours": {
             "task": "scanner.scan_exa",
             "schedule": crontab(minute=35, hour="*/12"),
+        },
+        # Wayback Machine — historical URL scanner (free, no key)
+        # 04:00 UTC slot avoids overlap with regular scanners + quietest period
+        # for archive.org's ~1 req/sec courtesy budget.
+        "scan-wayback-daily": {
+            "task": "scanner.scan_wayback",
+            "schedule": crontab(minute=0, hour=4),
+        },
+        # Telegram MTProto self-search — uses UserAgent session to query
+        # Telegram's own message index. 12h cadence respects per-account
+        # FloodWait budget. Catches leaks discussed in public channels.
+        "scan-telegram-search-12hours": {
+            "task": "scanner.scan_telegram_search",
+            "schedule": crontab(minute=20, hour="*/12"),
         },
         # scan-google-12hours: DISABLED — GCP project access issue, replaced by Exa.
         # Re-enable by uncommenting once Custom Search API is properly bound to billing.
         "scan-bitbucket-8hours": {
             "task": "scanner.scan_bitbucket",
             "schedule": crontab(minute=30, hour="*/8"),
+        },
+        # PublicWWW — HTML source code search (free tier 200 req/day)
+        "scan-publicwww-12hours": {
+            "task": "scanner.scan_publicwww",
+            "schedule": crontab(minute=15, hour="*/12"),
         },
         "scan-shodan-c2-6hours": {
             "task": "scanner.scan_shodan_c2",

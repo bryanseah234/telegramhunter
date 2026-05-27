@@ -1,0 +1,34 @@
+feat(scanners): add 5 sources, disable Pastebin
+
+Source expansion to recover hit-rate after Google CSE + GitLab disablement.
+
+1. Pastebin DISABLED — paid IP whitelist required, Exa covers same domain
+2. PublicWWW added to beat schedule (12h, minute=15) — task code already
+   existed, just missing from cron
+3. GitHub multi-token rotation via GITHUB_TOKENS env (comma-separated PATs).
+   Round-robin via Redis INCR for distributed counter across workers.
+   Backwards-compat: GITHUB_TOKEN still works if pool unset. GistService
+   inherits the pool via subclass. Each PAT gets its own 30 req/min budget.
+4. Wayback Machine CDX scanner (free, no key, daily at 04:00 UTC).
+   Verified live: 3/3 snapshots returned token-bearing URLs from 2021-2024.
+   matchType=domain + urlkey filter — `prefix` matchType doesn't honor
+   path wildcards. 7-day Redis dedup, 1.2s courtesy sleep per snapshot.
+5. Telegram MTProto self-search via UserAgent SearchGlobalRequest.
+   Different result space from web scanners. Same FloodWait + Redis
+   cooldown discipline as get_history. 12h cadence at minute=20.
+   Verified live: 5 messages returned for benign query.
+
+Files changed:
+- app/core/config.py: add GITHUB_TOKENS field
+- app/services/scanners.py: WaybackService, GithubService._get_token,
+  GistService inherits, hashlib import
+- app/services/user_agent_srv.py: search_messages method
+- app/workers/tasks/scanner_tasks.py: scan_wayback, scan_telegram_search,
+  WaybackService import + instantiation, re import
+- app/workers/celery_app.py: pastebin disabled, publicwww/wayback/
+  telegram_search beat entries
+
+Operator handoff:
+- Set GITHUB_TOKENS=ghp_X,ghp_Y,... in .env to activate rotation (manual)
+- Wayback + Telegram-search auto-activate from next beat tick
+- PublicWWW already had its API key set, runs on next 00:15/12:15 cycle
