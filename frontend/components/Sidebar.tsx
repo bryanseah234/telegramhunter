@@ -26,23 +26,43 @@ export default function Sidebar({
             console.log("[Sidebar] Fetching credentials...");
 
             try {
-                // Fetch credentials that have messages directly — avoids the 10 000-row
-                // message scan previously used to derive credential IDs.
-                const { data: creds, error } = await supabase
+                // Fetch credentials. After migration 004 the public view exposes
+                // confidence_score and chat_member_count as real INT columns.
+                // If the view is on the old schema (pre-migration), fall back
+                // to the legacy SELECT so the app keeps working during rollout.
+                let creds: Credential[] | null = null;
+                let error: { message: string } | null = null;
+
+                const { data: dataNew, error: errNew } = await supabase
                     .from("discovered_credentials_public")
-                    .select("id, created_at, source, meta")
+                    .select("id, created_at, source, meta, confidence_score, chat_member_count")
                     .not("id", "is", null)
+                    .order("confidence_score", { ascending: false, nullsFirst: false })
+                    .order("created_at", { ascending: false })
                     .limit(500);
-                // Supabase RLS on discovered_credentials_public already filters to
-                // credentials the anon key is allowed to see.
+
+                if (errNew && /confidence_score|chat_member_count/.test(errNew.message)) {
+                    // View is on old schema — migration 004 not applied yet.
+                    console.warn("[Sidebar] migration 004 not applied; falling back");
+                    const { data: dataOld, error: errOld } = await supabase
+                        .from("discovered_credentials_public")
+                        .select("id, created_at, source, meta")
+                        .not("id", "is", null)
+                        .order("created_at", { ascending: false })
+                        .limit(500);
+                    creds = dataOld;
+                    error = errOld;
+                } else {
+                    creds = dataNew;
+                    error = errNew;
+                }
 
                 if (error) {
                     console.error("[Sidebar] Error fetching credentials:", error.message);
                     return;
                 }
 
-                const sorted = (creds || [])
-                    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+                const sorted = creds || [];
 
                 console.log(`[Sidebar] Found ${sorted.length} bots with messages (sources: ${[...new Set(sorted.map(c => c.source))].join(', ') || 'none'})`);
                 setCredentials(sorted);
@@ -118,6 +138,24 @@ export default function Sidebar({
                         </div>
                         <div className="text-sm text-slate-500 truncate flex items-center gap-1">
                             <span className="bg-slate-200 px-1 py-0.5 rounded text-[10px] uppercase font-mono">{cred.source}</span>
+                            {typeof cred.confidence_score === "number" && (
+                                <span
+                                    className={`px-1 py-0.5 rounded text-[10px] font-mono font-semibold ${cred.confidence_score >= 70
+                                        ? "bg-emerald-100 text-emerald-800"
+                                        : cred.confidence_score >= 40
+                                            ? "bg-amber-100 text-amber-800"
+                                            : "bg-slate-100 text-slate-600"
+                                        }`}
+                                    title={`Confidence ${cred.confidence_score}/100`}
+                                >
+                                    {cred.confidence_score}
+                                </span>
+                            )}
+                            {typeof cred.chat_member_count === "number" && cred.chat_member_count > 1 && (
+                                <span className="bg-blue-50 text-blue-700 px-1 py-0.5 rounded text-[10px] font-mono" title={`${cred.chat_member_count} members`}>
+                                    👥{cred.chat_member_count >= 1000 ? `${Math.round(cred.chat_member_count / 1000)}k` : cred.chat_member_count}
+                                </span>
+                            )}
                             <span className="font-mono text-xs opacity-70 truncate">ID: {cred.meta?.bot_id || cred.id.slice(0, 8)}</span>
                         </div>
                     </button>
