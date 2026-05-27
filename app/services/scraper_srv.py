@@ -506,27 +506,35 @@ class ScraperService:
 
     def is_monitor_bot(self, token: str) -> bool:
         """
-        Robustly checks if a token belongs to the system monitor bot.
-        Strips whitespace and compares Bot IDs (prefix before colon) to prevent conflicts.
+        Robustly checks if a token belongs to one of OUR bots.
+
+        Checks two sources:
+        1. MONITOR_BOT_TOKEN — command bots that run the listener
+        2. PROTECTED_BOT_IDS — numeric IDs of owned bots whose tokens
+           we may not have (personal bots used in other projects)
+
+        Strips whitespace and compares Bot IDs (prefix before colon).
         """
-        if not token or not settings.bot_tokens:
+        if not token:
             return False
 
         clean_token = token.strip()
+        token_id = clean_token.split(":")[0] if ":" in clean_token else ""
 
-        for monitor_token in settings.bot_tokens:
+        # Check against MONITOR_BOT_TOKEN (full tokens)
+        for monitor_token in (settings.bot_tokens or []):
             clean_monitor = monitor_token.strip()
-
-            # 1. Exact match (after stripping)
             if clean_token == clean_monitor:
                 return True
-
-            # 2. ID-based match
-            if ":" in clean_token and ":" in clean_monitor:
-                id_token = clean_token.split(":")[0]
-                id_monitor = clean_monitor.split(":")[0]
-                if id_token == id_monitor:
+            if token_id and ":" in clean_monitor:
+                if token_id == clean_monitor.split(":")[0]:
                     return True
+
+        # Check against PROTECTED_BOT_IDS (numeric IDs only)
+        if token_id and settings.PROTECTED_BOT_IDS:
+            protected = [i.strip() for i in settings.PROTECTED_BOT_IDS.split(",") if i.strip()]
+            if token_id in protected:
+                return True
 
         return False
 

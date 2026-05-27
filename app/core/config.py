@@ -21,10 +21,17 @@ class Settings(BaseSettings):
 
     # Telegram Monitoring (The Bot(s) WE control - supports multi-bot rotation)
     # Comma-separated bot tokens, e.g. "token1,token2,token3"
+    # Only these bots run the command handler (starthunter, help, etc.)
     MONITOR_BOT_TOKEN: str
     MONITOR_GROUP_ID: int | str
     WHITELISTED_BOT_IDS: str = "" # Comma-separated IDs (or usernames)
     ANONYMOUS_ADMIN_ID: int = 1087968824  # Telegram anonymous group admin bot ID
+
+    # Bot IDs that belong to US — never scan, validate, scrape, or broadcast about these.
+    # Comma-separated bot IDs (numeric only, no tokens).
+    # Add any bot you own here even if its token isn't in MONITOR_BOT_TOKEN.
+    # E.g. "8737065943,1209926912,8445005877,8367748717"
+    PROTECTED_BOT_IDS: str = ""
 
     # Telegram Client (For Scraping)
     TELEGRAM_API_ID: int
