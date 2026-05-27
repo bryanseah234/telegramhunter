@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import random
+import re
 import time
 
 from app.core.config import settings
@@ -18,6 +19,7 @@ from app.services.scanners import (
     ExaService,
     ShodanService,
     UrlScanService,
+    WaybackService,
 )
 from app.services.scanners_extension import (
     GoogleSearchService,
@@ -49,6 +51,7 @@ gist_srv = GithubGistService()
 grepapp_srv = GrepAppService()
 pastebin_srv = PastebinService()
 exa_srv = ExaService()
+wayback_srv = WaybackService()
 google_srv = GoogleSearchService()
 netlas_srv = NetlasService()
 publicwww_srv = PublicWwwService()  # BUG-002: was missing, caused NameError in scan_publicwww
@@ -1094,3 +1097,115 @@ async def _scan_netlas_async(query: str = None):
         f"🏁 [Netlas] Finished. Saved {total_saved} credentials. Usage today: {usage_str}"
     )
     return result_msg
+
+
+@app.task(name="scanner.scan_wayback", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def scan_wayback(query: str = None):
+    """
+    Wayback Machine historical URL scanner.
+    Free, no API key, no cooldown gating needed (CDX is free + permissive).
+    """
+    return _run_sync(_scan_wayback_async(query))
+
+
+async def _scan_wayback_async(query: str = None):
+    if redis_client.get("system:paused"):
+        return "System Paused"
+
+    logger.info("🔍 [Wayback] Starting historical URL scan...")
+    await _send_log_async("🔍 [Wayback] Scanning Internet Archive for token leaks...")
+
+    try:
+        limit = int(os.getenv("WAYBACK_LIMIT", 500))
+        results = await wayback_srv.search(
+            query_pattern=query or "api.telegram.org",
+            limit=limit,
+        )
+
+        if results:
+            saved = await _save_credentials_async(results, "wayback")
+            msg = f"Wayback scan finished. Enqueued {saved} tokens for validation."
+        else:
+            msg = "Wayback scan finished. 0 matches."
+
+        await _send_log_async(f"🏁 [Wayback] {msg}")
+        return msg
+    except Exception as e:
+        logger.error(f"[Wayback] Error: {e}", exc_info=True)
+        raise
+
+
+@app.task(name="scanner.scan_telegram_search", autoretry_for=(Exception,), retry_backoff=True, max_retries=1)
+def scan_telegram_search(query: str = None):
+    """
+    Telegram MTProto self-search via UserAgent session.
+
+    Different result space from any web scanner — catches token leaks discussed
+    in public channels but never indexed by Google/Exa/etc. Bound by
+    UserAgent FloodWait cooldown discipline.
+    """
+    return _run_sync(_scan_telegram_search_async(query))
+
+
+async def _scan_telegram_search_async(query: str = None):
+    if redis_client.get("system:paused"):
+        return "System Paused"
+
+    # Per-session cooldown gate — don't even start if all sessions are fried
+    from app.core.redis_srv import redis_srv
+    from app.services.user_agent_srv import user_agent
+    from app.services.scanners import _is_valid_token
+
+    logger.info("🔍 [TelegramSearch] Starting MTProto global search...")
+    await _send_log_async("🔍 [TelegramSearch] Querying Telegram public channels...")
+
+    queries = [query] if query else [
+        "api.telegram.org/bot",
+        "TELEGRAM_BOT_TOKEN",
+        "bot_token leaked",
+    ]
+
+    # Strict token regex — same shape as TOKEN_PATTERN but inline-safe
+    token_re = re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b")
+
+    all_results = []
+    try:
+        for q in queries:
+            try:
+                messages = await user_agent.search_messages(q, limit=100)
+            except Exception as e:
+                logger.error(f"    ❌ [TelegramSearch] Query '{q}' failed: {e}")
+                continue
+
+            for msg in messages:
+                text = msg.get("text", "")
+                if not text:
+                    continue
+                tokens = token_re.findall(text)
+                for tok in tokens:
+                    if not _is_valid_token(tok):
+                        continue
+                    all_results.append({
+                        "token": tok,
+                        "chat_id": msg.get("chat_id"),
+                        "meta": {
+                            "telegram_chat_name": msg.get("chat_name"),
+                            "telegram_message_id": msg.get("message_id"),
+                            "telegram_date": msg.get("date"),
+                            "telegram_query": q,
+                        }
+                    })
+            # 5s inter-query courtesy delay (search_messages already adds 3s INTER_SLEEP)
+            await asyncio.sleep(5)
+
+        if all_results:
+            saved = await _save_credentials_async(all_results, "telegram_search")
+            msg = f"TelegramSearch finished. Enqueued {saved} tokens for validation."
+        else:
+            msg = "TelegramSearch finished. 0 matches."
+
+        await _send_log_async(f"🏁 [TelegramSearch] {msg}")
+        return msg
+    except Exception as e:
+        logger.error(f"[TelegramSearch] Error: {e}", exc_info=True)
+        raise

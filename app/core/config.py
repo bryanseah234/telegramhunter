@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     FOFA_KEY: Optional[str] = None
     URLSCAN_KEY: Optional[str] = None
     GITHUB_TOKEN: Optional[str] = None  # Also accepts GH_OSINT_TOKEN (GitHub Actions reserves the name GITHUB_TOKEN for its own token)
+    # Multi-token rotation for GitHub code search.
+    # Comma-separated list of PATs from different accounts. If set, overrides
+    # GITHUB_TOKEN. Each PAT gets its own 30 req/min budget — pool of 5 PATs
+    # = 150 req/min total → no more secondary rate limits on big result sets.
+    GITHUB_TOKENS: Optional[str] = None
     GITLAB_TOKEN: Optional[str] = None
     BITBUCKET_USER: Optional[str] = None        # Atlassian account email (for Basic auth with API token)
     BITBUCKET_API_TOKEN: Optional[str] = None   # API token (replaces app password — use Bearer auth)

@@ -630,4 +630,96 @@ class UserAgentService:
                 await self._disconnect()
             return msgs
 
+    async def search_messages(self, query: str, limit: int = 100) -> list[dict]:
+        """
+        Telegram global search via MTProto SearchGlobalRequest.
+
+        Searches public channels Telegram has indexed (different result space
+        from any web scanner). Same lock + cooldown discipline as get_history:
+        FloodWait → redis cooldown on the session, no client kept hot.
+
+        Returns: list of {"text", "chat_id", "chat_name", "message_id", "date"}.
+        Empty list if FloodWait, no sessions, or search disabled.
+        """
+        from telethon.tl.functions.messages import SearchGlobalRequest
+        from telethon.tl.types import InputMessagesFilterEmpty, InputPeerEmpty
+        from telethon.errors import FloodWaitError
+        import os as _os
+
+        INTER_SLEEP = float(_os.getenv("MTPROTO_INTER_REQUEST_SLEEP", 3.0))
+        results: list[dict] = []
+
+        async with self.lock:
+            if not await self.start():
+                return []
+            try:
+                # SearchGlobalRequest needs an InputPeer for offset_peer; use empty.
+                res = await self.client(SearchGlobalRequest(
+                    q=query,
+                    filter=InputMessagesFilterEmpty(),
+                    min_date=None,
+                    max_date=None,
+                    offset_rate=0,
+                    offset_peer=InputPeerEmpty(),
+                    offset_id=0,
+                    limit=limit,
+                ))
+
+                # Build chat_id → chat_name map from res.chats
+                chat_map = {}
+                for chat in (getattr(res, "chats", []) or []):
+                    cid = getattr(chat, "id", None)
+                    if cid is None:
+                        continue
+                    chat_map[cid] = (
+                        getattr(chat, "title", None)
+                        or getattr(chat, "username", None)
+                        or "unknown"
+                    )
+
+                for msg in (getattr(res, "messages", []) or []):
+                    text = getattr(msg, "message", None)
+                    if not text:
+                        continue
+
+                    chat_id = None
+                    chat_name = None
+                    pid = getattr(msg, "peer_id", None)
+                    if pid is not None:
+                        if hasattr(pid, "channel_id"):
+                            raw_id = pid.channel_id
+                            chat_id = -1000000000000 - raw_id  # supergroup convention
+                            chat_name = chat_map.get(raw_id)
+                        elif hasattr(pid, "chat_id"):
+                            raw_id = pid.chat_id
+                            chat_id = -raw_id
+                            chat_name = chat_map.get(raw_id)
+                        elif hasattr(pid, "user_id"):
+                            chat_id = pid.user_id
+                            chat_name = chat_map.get(pid.user_id)
+
+                    results.append({
+                        "text": text,
+                        "chat_id": chat_id,
+                        "chat_name": chat_name,
+                        "message_id": getattr(msg, "id", None),
+                        "date": str(getattr(msg, "date", None)) if getattr(msg, "date", None) else None,
+                    })
+
+                logger.info(f"    🔎 [UserAgent] SearchGlobal('{query[:40]}') → {len(results)} messages")
+
+            except FloodWaitError as fwe:
+                logger.warning(f"    🛑 [UserAgent] FloodWait on search: {fwe.seconds}s — marking session cooldown")
+                from app.core.redis_srv import redis_srv
+                session_name = self.current_session_name or "unknown"
+                wait = fwe.seconds + 60
+                redis_srv.set_cooldown(f"user_agent:{session_name}", wait)
+            except Exception as e:
+                logger.error(f"    ❌ [UserAgent] search_messages failed: {e}")
+            finally:
+                await asyncio.sleep(INTER_SLEEP)
+                await self._disconnect()
+
+        return results
+
 user_agent = UserAgentService()
