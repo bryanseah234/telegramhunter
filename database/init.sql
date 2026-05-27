@@ -88,7 +88,10 @@ SELECT
     created_at,
     source,
     status,
-    meta
+    meta,
+    -- Bundle 4: surface scoring/sizing as top-level int columns for fast sort
+    confidence_score,
+    chat_member_count
 FROM discovered_credentials;
 
 -- Grant SELECT on view to anon

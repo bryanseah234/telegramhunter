@@ -9,6 +9,9 @@ export interface Credential {
   id: string;
   created_at: string;
   source: string;
+  // Bundle 4: surfaced as top-level int columns from the DB view (generated columns)
+  confidence_score?: number | null;
+  chat_member_count?: number | null;
   meta?: {
     chat_title?: string;
     bot_username?: string;

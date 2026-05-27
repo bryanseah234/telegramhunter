@@ -43,12 +43,53 @@ async def get_stats(x_monitor_key: str | None = Header(None)):
 
 
 @router.get("/credentials", response_model=List[CredentialOut])
-async def list_credentials(limit: int = 100, x_monitor_key: str | None = Header(None)):
-    """List recent credentials. Requires X-Monitor-Key header if MONITOR_API_KEY is configured."""
+async def list_credentials(
+    limit: int = 100,
+    sort_by: str = "created_at",
+    order: str = "desc",
+    x_monitor_key: str | None = Header(None),
+):
+    """List recent credentials.
+
+    Args:
+        limit: 1-1000 (clamped). Default 100.
+        sort_by: one of 'created_at' (default), 'updated_at', 'confidence_score',
+                 'chat_member_count'. The latter two read from meta jsonb.
+        order: 'desc' (default) or 'asc'.
+
+    Requires X-Monitor-Key header if MONITOR_API_KEY is configured.
+    """
     _check_monitor_auth(x_monitor_key)
-    limit = max(1, min(limit, 1000))  # Clamp to [1, 1000]
+    limit = max(1, min(limit, 1000))
+    desc = order.lower() != "asc"
+
+    # Whitelist sort keys — never trust user input as a column reference.
+    # confidence_score and chat_member_count are STORED generated columns
+    # (see migration 004) so sorts are real INT, not jsonb-string lex sort.
+    allowed_sorts = {"created_at", "updated_at", "confidence_score", "chat_member_count"}
+    sort_expr = sort_by if sort_by in allowed_sorts else "created_at"
+
     try:
-        res = db.table("discovered_credentials").select("*").order("created_at", desc=True).limit(limit).execute()
+        q = db.table("discovered_credentials").select("*")
+        if sort_expr in ("confidence_score", "chat_member_count"):
+            try:
+                # nullslast keeps unscored legacy rows out of the way on desc.
+                res = q.order(sort_expr, desc=desc, nullsfirst=not desc).limit(limit).execute()
+            except Exception as e:
+                # Migration 004 not applied yet — column doesn't exist. Fall back.
+                msg = str(e).lower()
+                if "confidence_score" in msg or "chat_member_count" in msg or "column" in msg:
+                    res = (
+                        db.table("discovered_credentials")
+                        .select("*")
+                        .order("created_at", desc=True)
+                        .limit(limit)
+                        .execute()
+                    )
+                else:
+                    raise
+        else:
+            res = q.order(sort_expr, desc=desc).limit(limit).execute()
         return res.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

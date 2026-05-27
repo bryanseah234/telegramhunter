@@ -30,6 +30,43 @@ logger = logging.getLogger(__name__)
 
 PIVOT_DEDUP_TTL = 7 * 86400  # 7 days
 
+# ---- Global pivot rate limit: anti-cascade ----
+# A high-yield token can spawn 3 pivots, each can validate 50+ new tokens,
+# each of those can spawn 3 more pivots — geometric explosion. Cap the
+# global pivot fan-out via a Redis token bucket. If exhausted, the pivot
+# is dropped entirely (NOT retried — that would just defer the cascade).
+PIVOT_BUDGET_KEY = "rate_limit:pivot_budget"
+PIVOT_BUDGET_MAX = int(os.getenv("PIVOT_BUDGET_MAX", "60"))   # max pivots/window
+PIVOT_BUDGET_WINDOW = int(os.getenv("PIVOT_BUDGET_WINDOW", "300"))  # 5 min
+
+
+def _consume_pivot_budget(seed_type: str) -> bool:
+    """Atomic INCR + EXPIRE-on-first. Returns False if window budget exhausted.
+
+    Drop semantics chosen on purpose: a pivot we skip now is functionally
+    equivalent to "never discovered" — the next scheduled scanner will catch
+    the same surface. Better to lose 5% of pivots than triple our GitHub
+    PAT spend during a high-yield burst.
+    """
+    try:
+        pipe = redis_client.pipeline()
+        pipe.incr(PIVOT_BUDGET_KEY)
+        pipe.ttl(PIVOT_BUDGET_KEY)
+        count, ttl = pipe.execute()
+        if ttl is None or ttl < 0:
+            redis_client.expire(PIVOT_BUDGET_KEY, PIVOT_BUDGET_WINDOW)
+        if count > PIVOT_BUDGET_MAX:
+            logger.warning(
+                f"[Pivot] budget exhausted ({count}/{PIVOT_BUDGET_MAX} in "
+                f"{PIVOT_BUDGET_WINDOW}s window) — dropping {seed_type}"
+            )
+            return False
+        return True
+    except Exception:
+        # Redis down: fail OPEN to keep pivots flowing, since failure mode is
+        # transient and pivots are recoverable on next scan anyway.
+        return True
+
 
 def _pivot_already_done(seed_type: str, seed_value: str) -> bool:
     """Returns True if we've pivoted on this seed in the last 7 days."""
@@ -57,6 +94,8 @@ def search_github_user(username: str):
     if _pivot_already_done("gh_user", username):
         logger.info(f"[Pivot] gh_user={username} already pivoted in last 7d, skipping")
         return f"skipped:{username}"
+    if not _consume_pivot_budget("gh_user"):
+        return f"budget-drop:{username}"
     return _run_sync(_search_github_user_async(username))
 
 
@@ -97,6 +136,8 @@ def search_bot_username(username: str):
     if _pivot_already_done("bot_username", username):
         logger.info(f"[Pivot] bot_username={username} already pivoted, skipping")
         return f"skipped:{username}"
+    if not _consume_pivot_budget("bot_username"):
+        return f"budget-drop:{username}"
     return _run_sync(_search_bot_username_async(username))
 
 
@@ -157,6 +198,8 @@ def search_webhook_host(webhook_url: str):
     if _pivot_already_done("webhook_host", host):
         logger.info(f"[Pivot] webhook_host={host} already pivoted, skipping")
         return f"skipped:{host}"
+    if not _consume_pivot_budget("webhook_host"):
+        return f"budget-drop:{host}"
     return _run_sync(_search_webhook_host_async(host))
 
 
