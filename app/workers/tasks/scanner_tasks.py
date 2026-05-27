@@ -65,15 +65,37 @@ def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _is_own_bot_token(token: str) -> bool:
+    """Returns True if token belongs to one of our own monitor bots.
+
+    Checked at scanner output — prevents own tokens from ever being
+    enqueued for validation, regardless of where they were found.
+    Hard-fail safe: if settings can't load, returns False (don't block).
+    """
+    try:
+        from app.core.config import settings
+        from app.services.scraper_srv import scraper_service
+        return scraper_service.is_monitor_bot(token)
+    except Exception:
+        return False
+
+
 def _token_already_validated(token: str) -> bool:
     """
     Cross-source soft dedup: returns True if this token was enqueued for
     validation within the last 24h. Saves Telegram getMe quota when multiple
     scanners (and pivots) find the same token in the same hour.
 
+    Also returns True for own monitor bot tokens — these are filtered at
+    source so they never reach the validation queue.
+
     SOFT layer: this only checks Redis. The DB-level dedup still happens
     inside validate_token. This gate prevents the queue fanout itself.
     """
+    # Own-bot fast-path: drop before Redis/queue touch
+    if _is_own_bot_token(token):
+        return True
+
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     key = f"validated:recent:{token_hash[:16]}"
     try:
