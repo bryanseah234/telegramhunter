@@ -61,6 +61,25 @@ def _calculate_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _token_already_validated(token: str) -> bool:
+    """
+    Cross-source soft dedup: returns True if this token was enqueued for
+    validation within the last 24h. Saves Telegram getMe quota when multiple
+    scanners (and pivots) find the same token in the same hour.
+
+    SOFT layer: this only checks Redis. The DB-level dedup still happens
+    inside validate_token. This gate prevents the queue fanout itself.
+    """
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    key = f"validated:recent:{token_hash[:16]}"
+    try:
+        # SET NX EX = atomic check-and-set with 24h TTL
+        was_new = redis_client.set(key, "1", nx=True, ex=86400)
+        return not was_new  # if set was rejected, key already existed
+    except Exception:
+        return False  # Redis down — fall through, validate anyway
+
+
 async def _save_credentials_async(results, source_name: str):
     """
     Enqueue each token for async validation on the dedicated `validation` queue.
@@ -81,17 +100,23 @@ async def _save_credentials_async(results, source_name: str):
     from app.workers.tasks.validation_tasks import validate_token
 
     enqueued = 0
+    skipped_dedup = 0
     for item in results:
         token = item.get("token")
         if not token or token == "MANUAL_REVIEW_REQUIRED":
+            continue
+        # Cross-source soft dedup — skip if same token was enqueued in last 24h
+        if _token_already_validated(token):
+            skipped_dedup += 1
             continue
         # Fire-and-forget — validation worker handles dedup, getMe, save
         validate_token.delay(item, source_name)
         enqueued += 1
 
-    if enqueued:
+    if enqueued or skipped_dedup:
         logger.info(
             f"🔍 [Enqueue] {enqueued}/{len(results)} tokens from {source_name} "
+            f"(soft-deduped {skipped_dedup}) "
             f"queued for async validation"
         )
     return enqueued

@@ -175,6 +175,45 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
             bot_username = bot_info.get("username", "unknown")
             logger.info(f"[Validate] ✅ @{bot_username} (id={bot_info.get('id')})")
 
+            # ---- Bundle 1.4: getWebhookInfo (capture C2 host if set) ----
+            webhook_url = None
+            try:
+                wh_res = await client.get(f"{base_url}/getWebhookInfo", timeout=5.0)
+                if wh_res.status_code == 200:
+                    wh_data = wh_res.json()
+                    if wh_data.get("ok"):
+                        webhook_url = (wh_data.get("result") or {}).get("url") or None
+                        if webhook_url:
+                            logger.info(f"[Validate] 🪝 webhook → {webhook_url[:80]}")
+            except Exception:
+                pass  # webhook info is bonus; never block the main path
+
+            # ---- Bundle 1: Pivot fan-out (fire-and-forget) ----
+            try:
+                from app.workers.tasks.pivot_tasks import (
+                    search_github_user,
+                    search_bot_username,
+                    search_webhook_host,
+                )
+                # Seed 1: GitHub owner (if source meta carries repo)
+                meta_in = item.get("meta") or {}
+                repo = meta_in.get("repo")  # format "owner/repo"
+                if repo and "/" in repo:
+                    owner = repo.split("/")[0]
+                    if owner:
+                        search_github_user.apply_async(args=[owner], queue="validation")
+
+                # Seed 2: Bot @username (always available from getMe)
+                if bot_username and bot_username != "unknown":
+                    search_bot_username.apply_async(args=[bot_username], queue="validation")
+
+                # Seed 3: Webhook host (only if set)
+                if webhook_url:
+                    search_webhook_host.apply_async(args=[webhook_url], queue="validation")
+            except Exception as e:
+                # Pivot failure must NEVER block the main validation pipeline
+                logger.debug(f"[Validate] Pivot fan-out failed (non-fatal): {e}")
+
             # Step 4: Resolve chat_id (extracted > getUpdates > none)
             chat_id = extracted_chat_id
             chat_name = None
@@ -216,6 +255,8 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
                 "last_seen_source": source_name,
                 "last_verified_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
+            if webhook_url:
+                merged_meta["webhook_url"] = webhook_url
             update_data = {
                 "chat_id": chat_id,
                 "status": "active",
@@ -258,6 +299,7 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
                 "bot_id": bot_info.get("id"),
                 "chat_name": chat_name,
                 "chat_type": chat_type,
+                **({"webhook_url": webhook_url} if webhook_url else {}),
             },
         }
         res = await async_execute(db.table("discovered_credentials").insert(new_data))
