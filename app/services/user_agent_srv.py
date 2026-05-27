@@ -87,7 +87,7 @@ class UserAgentService:
                         if os.path.exists(rel_path):
                             new_sessions.add(os.path.abspath(rel_path))
         except Exception as e:
-            pass
+            logger.warning(f"[UserAgent] DB session discovery failed: {e}")
 
         # Fallback to default if nothing found (legacy support)
         if not new_sessions:

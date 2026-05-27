@@ -507,7 +507,8 @@ async def _broadcast_logic():
                                 bot_id = decrypted.split(":")[0]
                                 meta["bot_id"] = bot_id
                                 topic_name = f"@unknown / {bot_id}"
-                     except: pass
+                     except Exception as e_dec:
+                                logger.debug(f"[Broadcast] Could not decrypt token for legacy bot_id extraction: {e_dec}")
 
                 # Ensure Topic
                 thread_id = await broadcaster.ensure_topic(group_id, topic_name)
@@ -581,8 +582,8 @@ async def _broadcast_logic():
                 await async_execute(db.table("exfiltrated_messages").update({
                     "broadcast_claimed_at": None
                 }).eq("id", msg_id))
-            except Exception:
-                pass  # Best effort cleanup — do not raise during error handling
+            except Exception as e_claim:
+                logger.error(f"Failed to clear broadcast claim for msg {msg_id}: {e_claim} — message may be stuck until stale-claim TTL expires")
             continue
     
     result = f"Broadcasted {sent_count}/{len(messages)} messages"

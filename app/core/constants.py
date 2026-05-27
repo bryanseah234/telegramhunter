@@ -17,3 +17,6 @@ MAX_ERRORS_BUFFER = 100
 
 # Session file permissions: owner read/write only
 SESSION_FILE_PERMISSIONS = 0o600
+
+# Telegram system account IDs (fixed by Telegram, not secrets)
+TELEGRAM_SERVICE_NOTIFICATIONS_ID = 777000  # Official Telegram service notifications sender
