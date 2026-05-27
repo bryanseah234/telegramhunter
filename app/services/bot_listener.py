@@ -774,51 +774,62 @@ async def _run_bot(token: str, is_primary: bool = False):
     application = _build_application(token)
     lock_renew_task = None
     watchdog_task = None
-    
+
     try:
-        async with application:
-            bot_info = await application.bot.get_me()
-            bot_username = bot_info.username or f"bot_{bot_info.id}"
-            _bot_usernames[token] = bot_username
-            logger.info(f"🤖 Bot @{bot_username} starting polling...")
+        await application.initialize()
+        bot_info = await application.bot.get_me()
+        bot_username = bot_info.username or f"bot_{bot_info.id}"
+        _bot_usernames[token] = bot_username
+        logger.info(f"🤖 Bot @{bot_username} starting polling...")
 
-            if lock_key:
-                lock_renew_task = asyncio.create_task(_renew_poll_lock(lock_key))
+        if lock_key:
+            lock_renew_task = asyncio.create_task(_renew_poll_lock(lock_key))
 
-            # Retry start_polling up to 3 times on Conflict — another instance
-            # may still be releasing its long-poll connection.
-            for attempt in range(3):
-                try:
-                    await application.updater.start_polling(drop_pending_updates=False)
-                    break
-                except Conflict as e:
-                    if attempt < 2:
-                        logger.warning(f"⚠️ Polling conflict for @{bot_username} (attempt {attempt+1}/3), retrying in 10s: {e}")
-                        await asyncio.sleep(10)
-                    else:
-                        logger.error(f"⚠️ Polling conflict for @{bot_username} after 3 attempts, giving up: {e}")
-                        return
+        # Retry start_polling up to 3 times on Conflict — another instance
+        # may still be releasing its long-poll connection.
+        for attempt in range(3):
+            try:
+                await application.updater.start_polling(drop_pending_updates=False)
+                break
+            except Conflict as e:
+                if attempt < 2:
+                    logger.warning(f"⚠️ Polling conflict for @{bot_username} (attempt {attempt+1}/3), retrying in 10s: {e}")
+                    await asyncio.sleep(10)
+                else:
+                    logger.error(f"⚠️ Polling conflict for @{bot_username} after 3 attempts, giving up: {e}")
+                    return
 
-            if is_primary:
-                watchdog_task = asyncio.create_task(watchdog_loop(application.bot))
-                logger.info(f"🐶 Watchdog attached to primary bot @{bot_username}")
+        # MUST call application.start() so the update queue processor runs.
+        # async with application: only calls initialize/shutdown — handlers
+        # are never dispatched without start().
+        await application.start()
 
-            logger.info(f"🚀 Bot @{bot_username} Started and Polling...")
+        if is_primary:
+            watchdog_task = asyncio.create_task(watchdog_loop(application.bot))
+            logger.info(f"🐶 Watchdog attached to primary bot @{bot_username}")
 
-            heartbeat_count = 0
-            while not stop_event.is_set():
-                await asyncio.sleep(10)
-                heartbeat_count += 1
-                if heartbeat_count % 30 == 0:
-                    logger.info(f"💓 Bot @{bot_username} polling heartbeat (Event loop active)")
+        logger.info(f"🚀 Bot @{bot_username} Started and Polling...")
 
-            logger.info(f"Stopping bot @{bot_username}...")
+        heartbeat_count = 0
+        while not stop_event.is_set():
+            await asyncio.sleep(10)
+            heartbeat_count += 1
+            if heartbeat_count % 30 == 0:
+                logger.info(f"💓 Bot @{bot_username} polling heartbeat (Event loop active)")
+
+        logger.info(f"Stopping bot @{bot_username}...")
 
     finally:
         if watchdog_task:
             watchdog_task.cancel()
         if lock_renew_task:
             lock_renew_task.cancel()
+        try:
+            await application.updater.stop()
+            await application.stop()
+        except Exception:
+            pass
+        await application.shutdown()
         await _release_poll_lock(lock_key)
 
 async def main():
