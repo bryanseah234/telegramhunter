@@ -108,6 +108,7 @@ app.conf.update(
         "app.workers.tasks.audit_tasks",
         "app.workers.tasks.import_tasks",   # MISSING-001: CSV import pipeline
         "app.workers.tasks.validation_tasks",  # async token validation (off scanner critical path)
+        "app.workers.tasks.pivot_tasks",       # Bundle 1: pivot fan-out from validator
     ],
     # ============================================
     # QUEUE SEGREGATION
