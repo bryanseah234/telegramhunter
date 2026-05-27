@@ -390,6 +390,31 @@ async def schedule_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, me
     
     asyncio.create_task(delete_task())
 
+
+async def _wipe_conversation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, bot_message_ids: list):
+    """
+    Wipe all tracked bot messages + the user's incoming messages from this session.
+    Runs silently — delete errors are suppressed (message may already be gone).
+    Also attempts to delete the user's /starthunter command itself.
+
+    Telegram only allows bots to delete their OWN messages in private chats
+    unless the bot is an admin. In a DM the bot is always the sender for its
+    own messages so those deletions succeed. User messages can only be deleted
+    by the bot if it has delete_messages permission — in a private chat this
+    is NOT granted, so user-side messages will silently fail and that is fine.
+    """
+    ids_to_delete = list(bot_message_ids or [])
+
+    async def _do_wipe():
+        await asyncio.sleep(1)  # tiny delay so final ACK from Telegram is processed
+        for msg_id in ids_to_delete:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass  # already deleted or no permission — both are fine
+
+    asyncio.create_task(_do_wipe())
+
 async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the login flow. Open to any user — no admin check."""
     if update.effective_chat.type != "private":
@@ -408,14 +433,9 @@ async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         "Reply /cancel at any time to abort."
     )
     sent_msg = await update.message.reply_text(msg)
-    
-    # Track state in context (LoginState object for that user_id)
-    context.user_data['login_state'] = "WAITING_FOR_PHONE"
-    
-    # Schedule deletion of user's command if possible
-    await schedule_deletion(context, update.effective_chat.id, update.message.message_id)
-    
-    context.user_data['bot_messages'] = [sent_msg.message_id]
+
+    # Track both the user's /starthunter command and our reply for full wipe
+    context.user_data['bot_messages'] = [update.message.message_id, sent_msg.message_id]
     
     return WAIT_PHONE
 
@@ -423,8 +443,8 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     phone = update.message.text.strip()
     chat_id = update.effective_chat.id
     
-    # Delete the user's message containing the phone number
-    await schedule_deletion(context, chat_id, update.message.message_id)
+    # Track user's phone message for wipe
+    context.user_data.setdefault('bot_messages', []).append(update.message.message_id)
 
     # Initialize a temporary client
     import tempfile
@@ -465,9 +485,11 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     except Exception as e:
         logger.error(f"Error requesting code: {e}")
-        await update.message.reply_text(f"❌ Error requesting code: {str(e)}\nPlease try again with /starthunter")
+        err_msg = await update.message.reply_text(f"❌ Error requesting code: {str(e)}\nPlease try again with /starthunter")
+        context.user_data.setdefault('bot_messages', []).append(err_msg.message_id)
         if 'client' in context.user_data:
             await context.user_data['client'].disconnect()
+        await _wipe_conversation(context, update.effective_chat.id, context.user_data.get('bot_messages', []))
         return ConversationHandler.END
 
 async def handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -475,7 +497,7 @@ async def handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     chat_id = update.effective_chat.id
     
     # Always schedule deletion of the code
-    await schedule_deletion(context, chat_id, update.message.message_id)
+    context.user_data.setdefault('bot_messages', []).append(update.message.message_id)
 
     # Sanitize code
     code = raw_code.replace(" ", "").replace("-", "").replace(",", "").strip()
@@ -485,7 +507,9 @@ async def handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     phone_code_hash = context.user_data.get('phone_code_hash')
 
     if not client or not client.is_connected():
-        await update.message.reply_text("❌ Session expired. Please start over with /starthunter")
+        err = await update.message.reply_text("❌ Session expired. Please start over with /starthunter")
+        context.user_data.setdefault('bot_messages', []).append(err.message_id)
+        await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
         return ConversationHandler.END
 
     try:
@@ -501,8 +525,10 @@ async def handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return WAIT_PASSWORD
     except Exception as e:
         logger.error(f"Error signing in: {e}")
-        await update.message.reply_text(f"❌ Login failed: {str(e)}\nPlease try again with /starthunter")
+        err = await update.message.reply_text(f"❌ Login failed: {str(e)}\nPlease try again with /starthunter")
+        context.user_data.setdefault('bot_messages', []).append(err.message_id)
         await client.disconnect()
+        await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
         return ConversationHandler.END
 
 async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -510,12 +536,14 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = update.effective_chat.id
     
     # Always schedule deletion of password
-    await schedule_deletion(context, chat_id, update.message.message_id)
+    context.user_data.setdefault('bot_messages', []).append(update.message.message_id)
 
     client = context.user_data.get('client')
     
     if not client or not client.is_connected():
-        await update.message.reply_text("❌ Session expired. Please start over with /starthunter")
+        err = await update.message.reply_text("❌ Session expired. Please start over with /starthunter")
+        context.user_data.setdefault('bot_messages', []).append(err.message_id)
+        await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
         return ConversationHandler.END
 
     try:
@@ -523,8 +551,10 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return await finalize_login(update, context)
     except Exception as e:
         logger.error(f"Error with 2FA password: {e}")
-        await update.message.reply_text(f"❌ Incorrect password or error: {str(e)}\nPlease try again with /starthunter")
+        err = await update.message.reply_text(f"❌ Incorrect password or error: {str(e)}\nPlease try again with /starthunter")
+        context.user_data.setdefault('bot_messages', []).append(err.message_id)
         await client.disconnect()
+        await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
         return ConversationHandler.END
 
 async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -550,11 +580,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         final_path = os.path.join(sessions_dir, filename + ".session")
         
         # Delete bot messages we sent during the flow (Footprint Cleanup)
-        for msg_id in context.user_data.get('bot_messages', []):
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-            except Exception:
-                pass
+        await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
 
         # Use the USER account to clear history (Footprint Cleanup)
         try:
@@ -681,34 +707,36 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await schedule_deletion(context, chat_id, sent_msg.message_id, delay=30)
             return ConversationHandler.END
 
-        # Session saved successfully
+        # Session saved successfully — silent, no confirmation message.
+        # The entire conversation is wiped immediately for OPSEC.
         current_token = context.bot_data.get('_bot_token', '')
         if current_token:
             _locked_bots.discard(current_token)
-        
+
         try:
             os.remove(temp_session_path + ".session")
         except Exception:
             pass
 
-        success_msg = f"✅ Successfully logged in as {me.first_name} (@{me.username or 'No Username'}).\nSession saved to {filename}.session"
-        sent_msg = await update.message.reply_text(success_msg)
-        await schedule_deletion(context, chat_id, sent_msg.message_id, delay=30)
+        # Wipe entire conversation history with this user for OPSEC
+        await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
         return ConversationHandler.END
 
     except Exception as e:
         logger.error(f"Error finalizing login: {e}")
-        await update.message.reply_text(f"❌ Error finalizing login: {str(e)}")
+        err = await update.message.reply_text(f"❌ Error finalizing login: {str(e)}")
+        context.user_data.setdefault('bot_messages', []).append(err.message_id)
         await client.disconnect()
+        await _wipe_conversation(context, update.effective_chat.id, context.user_data.get('bot_messages', []))
         return ConversationHandler.END
 
 async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels and ends the conversation."""
+    """Cancels and ends the conversation — silent wipe for OPSEC."""
     client = context.user_data.get('client')
     if client:
         await client.disconnect()
-    
-    await update.message.reply_text('Login process cancelled.')
+    chat_id = update.effective_chat.id
+    await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
     return ConversationHandler.END
 
 async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
