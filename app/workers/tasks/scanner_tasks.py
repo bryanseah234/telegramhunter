@@ -20,6 +20,8 @@ from app.services.scanners import (
     ShodanService,
     UrlScanService,
     WaybackService,
+    CommonCrawlService,
+    SourcegraphService,
 )
 from app.services.scanners_extension import (
     GoogleSearchService,
@@ -52,6 +54,8 @@ grepapp_srv = GrepAppService()
 pastebin_srv = PastebinService()
 exa_srv = ExaService()
 wayback_srv = WaybackService()
+commoncrawl_srv = CommonCrawlService()
+sourcegraph_srv = SourcegraphService()
 google_srv = GoogleSearchService()
 netlas_srv = NetlasService()
 publicwww_srv = PublicWwwService()  # BUG-002: was missing, caused NameError in scan_publicwww
@@ -1233,4 +1237,53 @@ async def _scan_telegram_search_async(query: str = None):
         return msg
     except Exception as e:
         logger.error(f"[TelegramSearch] Error: {e}", exc_info=True)
+        raise
+
+
+@app.task(name="scanner.scan_commoncrawl", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def scan_commoncrawl():
+    return _run_sync(_scan_commoncrawl_async())
+
+
+async def _scan_commoncrawl_async():
+    if redis_client.get("system:paused"):
+        return "System Paused"
+    logger.info("🔍 [CommonCrawl] starting...")
+    await _send_log_async("🔍 [CommonCrawl] querying latest crawl index...")
+    try:
+        limit = int(os.getenv("COMMONCRAWL_LIMIT", 500))
+        results = await commoncrawl_srv.search(limit=limit)
+        if results:
+            saved = await _save_credentials_async(results, "commoncrawl")
+            msg = f"CommonCrawl: enqueued {saved} tokens"
+        else:
+            msg = "CommonCrawl: 0 matches"
+        await _send_log_async(f"🏁 [CommonCrawl] {msg}")
+        return msg
+    except Exception as e:
+        logger.error(f"[CommonCrawl] {e}", exc_info=True)
+        raise
+
+
+@app.task(name="scanner.scan_sourcegraph", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def scan_sourcegraph():
+    return _run_sync(_scan_sourcegraph_async())
+
+
+async def _scan_sourcegraph_async():
+    if redis_client.get("system:paused"):
+        return "System Paused"
+    logger.info("🔍 [Sourcegraph] starting...")
+    await _send_log_async("🔍 [Sourcegraph] streaming search across public repos...")
+    try:
+        results = await sourcegraph_srv.search()
+        if results:
+            saved = await _save_credentials_async(results, "sourcegraph")
+            msg = f"Sourcegraph: enqueued {saved} tokens"
+        else:
+            msg = "Sourcegraph: 0 matches"
+        await _send_log_async(f"🏁 [Sourcegraph] {msg}")
+        return msg
+    except Exception as e:
+        logger.error(f"[Sourcegraph] {e}", exc_info=True)
         raise
