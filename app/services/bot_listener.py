@@ -753,7 +753,12 @@ async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     user = update.effective_user
-    text = update.message.text if update.message else "No text"
+    # update.message.text is None for photo/sticker/voice/document updates.
+    # Fall back to caption (photos), then "No text".
+    if update.message:
+        text = update.message.text or update.message.caption or "No text"
+    else:
+        text = "No text"
     logger.info(f"🔄 Update from {user.id if user else 'Unknown'} in {chat_id}: {text}")
 
 def _build_application(token: str) -> Application:
@@ -849,9 +854,17 @@ async def _run_bot(token: str, is_primary: bool = False):
         logger.info(f"🚀 Bot @{bot_username} Started and Polling...")
 
         heartbeat_count = 0
+        _ALIVE_FILE = "/tmp/bot_alive"
         while not stop_event.is_set():
             await asyncio.sleep(10)
             heartbeat_count += 1
+            # Touch the liveness file every iteration so the Docker healthcheck
+            # can assert the file was modified within the last 60 seconds.
+            try:
+                import pathlib
+                pathlib.Path(_ALIVE_FILE).touch()
+            except Exception:
+                pass
             if heartbeat_count % 30 == 0:
                 logger.info(f"💓 Bot @{bot_username} polling heartbeat (Event loop active)")
 

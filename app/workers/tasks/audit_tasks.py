@@ -1,4 +1,4 @@
-from app.workers.celery_app import app
+from app.workers.celery_app import app, _run_sync
 from app.core.database import db
 from app.core.config import settings
 from app.workers.tasks.flow_tasks import async_execute, get_broadcaster, _broadcast_logic
@@ -9,11 +9,7 @@ from telegram.error import TelegramError
 logger = logging.getLogger("audit.tasks")
 logger.setLevel(logging.INFO)
 
-
-def _run_sync(coro):
-    """Helper to run async code in sync Celery task using persistent worker loop (BUG-008)."""
-    from app.workers.celery_app import get_worker_loop
-    return get_worker_loop().run_until_complete(coro)
+# _run_sync is now canonical in celery_app — imported above, local copy removed.
 
 
 @app.task(name="audit.audit_active_topics")

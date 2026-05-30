@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request, Header
+from fastapi import APIRouter, HTTPException, Header
 from app.schemas.models import ScanRequest
 from app.workers.celery_app import app as celery_app
 from app.core.config import settings
@@ -50,11 +50,3 @@ async def trigger_scan(request: ScanRequest, x_monitor_key: str | None = Header(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to queue task: {str(e)}")
 
-
-@router.get("/trigger-dev/{source}")
-def trigger_scan_dev(source: str, request: Request):
-    """Dev GET endpoint — disabled. Use POST /scan/trigger instead."""
-    raise HTTPException(
-        status_code=403,
-        detail="GET triggering is disabled. Use authenticated POST /scan/trigger."
-    )

@@ -144,15 +144,19 @@ class UserAgentService:
             
             # Update local reference
             self.current_index = global_idx
-            
+
             # 2. Check Cooldown for THIS session
-            cooldown_key = f"user_agent:{session_name}"
+            # Use distinct key namespaces: cooldown vs lock.
+            # Previously both used `user_agent:{session_name}` which caused
+            # release_lock() to also clear the cooldown — meaning FloodWait
+            # cooldowns were silently wiped on every disconnect.
+            cooldown_key = f"user_agent:cooldown:{session_name}"
             if redis_srv.is_on_cooldown(cooldown_key):
                  ttl = redis_srv.get_cooldown_remaining(cooldown_key)
                  logger.info(f"    ⏳ [UserAgent] Session '{session_name}' on cooldown ({ttl}s). Rotating...")
                  continue
 
-            lock_key = f"user_agent:{session_name}"
+            lock_key = f"user_agent:lock:{session_name}"
             if not redis_srv.acquire_lock(lock_key, 600):
                 logger.info(f"    🔒 [UserAgent] Session '{session_name}' locked by another worker. Rotating...")
                 continue
@@ -162,7 +166,7 @@ class UserAgentService:
                 if self._session_lock_key:
                     redis_srv.release_lock(self._session_lock_key)
                     self._session_lock_key = None
-                continue
+
 
             # 3. Check if already connected is THIS session
             if self.client and self.client.is_connected():
@@ -442,7 +446,8 @@ class UserAgentService:
         from app.core.redis_srv import redis_srv
         wait_seconds = e.seconds
         current_session = getattr(self, 'current_session_name', 'unknown')
-        cooldown_key = f"user_agent:{current_session}"
+        # Must use the same namespace as the cooldown check in start()
+        cooldown_key = f"user_agent:cooldown:{current_session}"
         if wait_seconds > 300:
             logger.warning(f"\n🛑 [UserAgent] SEVERE FLOOD WAIT for '{current_session}': {wait_seconds}s.")
             redis_srv.set_cooldown(cooldown_key, wait_seconds + 60)
@@ -686,7 +691,7 @@ class UserAgentService:
                 logger.warning(f"    🛑 [UserAgent] FloodWait in get_history for {group_id}: {fwe.seconds}s")
                 from app.core.redis_srv import redis_srv
                 session_name = self.current_session_name or "unknown"
-                cooldown_key = f"user_agent:{session_name}"
+                cooldown_key = f"user_agent:cooldown:{session_name}"
                 wait = fwe.seconds + 60  # buffer
                 if wait > 3600:
                     logger.error(f"    🛑 [UserAgent] SEVERE FLOOD WAIT for '{session_name}': {wait}s.")
@@ -783,7 +788,7 @@ class UserAgentService:
                 from app.core.redis_srv import redis_srv
                 session_name = self.current_session_name or "unknown"
                 wait = fwe.seconds + 60
-                redis_srv.set_cooldown(f"user_agent:{session_name}", wait)
+                redis_srv.set_cooldown(f"user_agent:cooldown:{session_name}", wait)
             except Exception as e:
                 logger.error(f"    ❌ [UserAgent] search_messages failed: {e}")
             finally:
