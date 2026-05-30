@@ -695,6 +695,13 @@ async def _rescrape_active_logic():
     # so they don't all hit the UserAgent simultaneously and trigger FloodWait.
     # Default: 50 tasks over 300s = one task every 6s.
     SPREAD_SECONDS = int(os.getenv("RESCRAPE_SPREAD_SECONDS", 300))
+    # Backpressure threshold: skip queueing if the scrape queue already has this
+    # many pending tasks.  exfiltrate_chat routes to the 'scrape' queue and each
+    # task can hold a session lock for 30-300s.  Piling on more tasks while the
+    # previous batch is still draining causes the session-acquisition retry loop
+    # to spin at 0% CPU useful work and inflates scrape queue depth unboundedly.
+    # Default: 2 × BATCH_SIZE (allow one overlap batch in flight, then gate).
+    BACKPRESSURE_THRESHOLD = int(os.getenv("RESCRAPE_BACKPRESSURE_THRESHOLD", BATCH_SIZE * 2))
     CURSOR_KEY = "rescrape:cursor:last_id"
 
     broadcaster = get_broadcaster()
@@ -718,6 +725,24 @@ async def _rescrape_active_logic():
 
     if not ua_sessions_available:
         msg = "⏳ **Re-scrape**: All UserAgent sessions on FloodWait cooldown — skipping this run to avoid task noise."
+        logger.info(msg)
+        await broadcaster.send_log(msg)
+        return msg
+
+    # Backpressure gate: don't pile new tasks onto an already-deep scrape queue.
+    # exfiltrate_chat routes to the 'scrape' queue.  Each task can hold a session
+    # lock for 30-300s, so a backlog of tasks just spins the session-acquisition
+    # retry loop without making progress.
+    try:
+        scrape_queue_depth = redis_client.llen("scrape")
+    except Exception:
+        scrape_queue_depth = 0  # fail open — don't block rescrape on Redis errors
+
+    if scrape_queue_depth >= BACKPRESSURE_THRESHOLD:
+        msg = (
+            f"⏸️ **Re-scrape**: Skipping — scrape queue has {scrape_queue_depth} pending tasks "
+            f"(threshold: {BACKPRESSURE_THRESHOLD}).  Waiting for existing tasks to drain."
+        )
         logger.info(msg)
         await broadcaster.send_log(msg)
         return msg
