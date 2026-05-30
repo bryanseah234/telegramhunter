@@ -440,3 +440,124 @@ async def _cleanup_general_topic_async():
     except Exception as e:
         logger.error(f"    ❌ [General Cleanup] Error: {e}")
         return f"Cleanup failed: {e}"
+
+
+@app.task(name="audit.prune_audit_logs")
+def prune_audit_logs():
+    """
+    Weekly pruning of audit_logs table — deletes entries older than 90 days.
+
+    TOKEN_DECRYPTED events fire on every broadcast run (hundreds/day) so the
+    table grows quickly without pruning. 90-day window retains enough history
+    for incident investigation without unbounded growth.
+    """
+    return _run_sync(_prune_audit_logs_async())
+
+
+async def _prune_audit_logs_async():
+    try:
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+
+        # Count before delete for the log message
+        count_res = await async_execute(
+            db.table("audit_logs")
+            .select("id", count="exact")
+            .lt("created_at", cutoff)
+        )
+        to_delete = count_res.count if hasattr(count_res, "count") else 0
+
+        if to_delete == 0:
+            logger.info("[AuditPrune] No audit_logs entries older than 90 days.")
+            return "Prune: nothing to delete."
+
+        # Supabase REST delete — no LIMIT on deletes so this clears the full batch
+        await async_execute(
+            db.table("audit_logs")
+            .delete()
+            .lt("created_at", cutoff)
+        )
+        msg = f"[AuditPrune] Deleted {to_delete} audit_logs entries older than 90 days."
+        logger.info(msg)
+
+        broadcaster = get_broadcaster()
+        await broadcaster.send_log(f"🧹 **Audit Prune**: {msg}")
+        return msg
+    except Exception as e:
+        logger.error(f"    ❌ [AuditPrune] Error: {e}")
+        return f"Prune failed: {e}"
+
+
+@app.task(name="audit.cleanup_matkap_bots")
+def cleanup_matkap_bots():
+    """
+    Hourly audit: scan Redis for matkap:pending_cleanup:* sentinel keys.
+
+    Each key represents a victim bot that was invited to the monitor group
+    by the Matkap scraping strategy but whose worker died before kicking it out.
+    This task finds those lingering bots and removes them to prevent opsec leaks.
+
+    The inviting code writes: matkap:pending_cleanup:{victim_username}:{dest_chat_id}
+    with a 3600s TTL as a safety net. This task provides the active eviction path.
+    """
+    return _run_sync(_cleanup_matkap_bots_async())
+
+
+async def _cleanup_matkap_bots_async():
+    try:
+        import redis as _redis_sync
+        from app.core.config import settings as _s
+        rc = _redis_sync.from_url(_s.REDIS_URL, decode_responses=True)
+
+        keys = rc.keys("matkap:pending_cleanup:*")
+        if not keys:
+            logger.debug("[MatkapCleanup] No pending cleanup sentinels found.")
+            return "No pending Matkap bots."
+
+        from app.services.user_agent_srv import user_agent
+        cleaned = 0
+        failed = 0
+
+        for key in keys:
+            # key format: matkap:pending_cleanup:{victim_username}:{dest_chat_id}
+            parts = key.split(":", 4)
+            if len(parts) < 5:
+                logger.warning(f"[MatkapCleanup] Malformed sentinel key: {key} — deleting")
+                rc.delete(key)
+                continue
+
+            victim_username = parts[3]
+            dest_chat_id_raw = parts[4]
+            try:
+                dest_chat_id = int(dest_chat_id_raw)
+            except ValueError:
+                logger.warning(f"[MatkapCleanup] Invalid chat_id in key: {key} — deleting")
+                rc.delete(key)
+                continue
+
+            logger.info(f"[MatkapCleanup] Evicting lingering bot @{victim_username} from {dest_chat_id}")
+            try:
+                kicked = await user_agent.kick_bot_from_group(victim_username, dest_chat_id)
+                if kicked:
+                    rc.delete(key)
+                    cleaned += 1
+                    logger.info(f"[MatkapCleanup] ✅ Evicted @{victim_username} from {dest_chat_id}")
+                else:
+                    # Bot may have already left/been kicked — delete key anyway
+                    rc.delete(key)
+                    cleaned += 1
+                    logger.info(f"[MatkapCleanup] ℹ️ @{victim_username} already absent from {dest_chat_id}, key cleared.")
+            except Exception as e_kick:
+                failed += 1
+                logger.error(f"[MatkapCleanup] ❌ Could not evict @{victim_username}: {e_kick}")
+
+        msg = f"[MatkapCleanup] Done: {cleaned} evicted, {failed} failed."
+        logger.info(msg)
+        if cleaned or failed:
+            broadcaster = get_broadcaster()
+            await broadcaster.send_log(f"🔒 **Matkap Cleanup**: {msg}")
+        return msg
+
+    except Exception as e:
+        logger.error(f"    ❌ [MatkapCleanup] Error: {e}")
+        return f"Matkap cleanup failed: {e}"

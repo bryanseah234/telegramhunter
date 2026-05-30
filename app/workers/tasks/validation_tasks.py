@@ -67,8 +67,11 @@ async def _acquire_rate_token() -> None:
         pipe.ttl(RATE_LIMIT_KEY)
         count, ttl = pipe.execute()
 
-        # First call in window — set TTL
-        if ttl < 0:
+        # Set TTL on first call in window (count==1) OR if TTL is missing.
+        # Pipeline executes INCR then TTL atomically, but TTL is read BEFORE
+        # INCR takes effect in the same pipeline batch — so first-call detection
+        # via count==1 is more reliable than ttl<0 alone.
+        if count == 1 or ttl < 0:
             redis_client.expire(RATE_LIMIT_KEY, RATE_WINDOW_SECONDS)
             ttl = RATE_WINDOW_SECONDS
 
