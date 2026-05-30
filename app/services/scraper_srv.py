@@ -264,6 +264,20 @@ class ScraperService:
                                     await user_agent.invite_bot_to_group(
                                         victim_username, dest_chat_id
                                     )
+
+                                    # CLEANUP GUARD: Record that victim bot is now in the
+                                    # monitor group. If this worker dies before the kick below,
+                                    # the audit.cleanup_matkap_bots task will evict it.
+                                    # TTL: 3600s — if not cleared in 1h, audit task will clean up.
+                                    try:
+                                        from app.core.config import settings as _s
+                                        import redis as _redis_mod
+                                        _rc = _redis_mod.from_url(_s.REDIS_URL, decode_responses=True)
+                                        _cleanup_key = f"matkap:pending_cleanup:{victim_username}:{dest_chat_id}"
+                                        _rc.setex(_cleanup_key, 3600, "1")
+                                    except Exception as _e_redis:
+                                        logger.warning(f"    ⚠️ [Scraper] Could not set matkap cleanup key: {_e_redis}")
+
                     except Exception as e_invite:
                         logger.warning(f"    ⚠️ [Scraper] Auto-invite failed (skipping): {e_invite}")
 
@@ -283,8 +297,17 @@ class ScraperService:
                         if victim_username:
                             await user_agent.kick_bot_from_group(victim_username, dest_chat_id)
                             logger.info(f"    🧹 [Scraper] Kicked @{victim_username} from monitor group after Matkap.")
+                            # Clear the pending-cleanup sentinel — kick succeeded, no audit needed
+                            try:
+                                from app.core.config import settings as _s2
+                                import redis as _redis_mod2
+                                _rc2 = _redis_mod2.from_url(_s2.REDIS_URL, decode_responses=True)
+                                _rc2.delete(f"matkap:pending_cleanup:{victim_username}:{dest_chat_id}")
+                            except Exception:
+                                pass  # non-fatal — cleanup key will expire via TTL
                     except Exception as e_kick:
                         logger.warning(f"    ⚠️ [Scraper] Post-Matkap kick failed (non-fatal): {e_kick}")
+
             except Exception as e:
                 logger.error(f"❌ [Scraper] Forwarding failed: {e}")
 

@@ -3,8 +3,12 @@
 # Bot listener distributed lock TTL (seconds)
 LOCK_TTL_SECONDS = 120
 
-# Broadcast claim timeout — claims older than this are considered stale (minutes)
-CLAIM_TIMEOUT_MINUTES = 5
+# Broadcast claim timeout — claims older than this are considered stale (minutes).
+# A single broadcast batch processes up to 500 messages at 1.5s/msg = 750s worst case.
+# The timeout must exceed this so a slow-but-alive worker's early claims are not
+# reclaimed by a concurrent broadcaster while still in progress.
+# 15 minutes (900s) gives safe headroom over the 750s worst case.
+CLAIM_TIMEOUT_MINUTES = 15
 
 # Worker heartbeat timeout — alert if worker silent longer than this (seconds)
 WORKER_HEARTBEAT_TIMEOUT_SECONDS = 45 * 60

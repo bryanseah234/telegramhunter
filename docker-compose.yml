@@ -114,7 +114,7 @@ services:
     restart: always
     init: true
     env_file: .env
-    command: celery -A app.workers.celery_app worker -Q scrape --loglevel=info --concurrency=2
+    command: celery -A app.workers.celery_app worker -Q scrape --loglevel=info --concurrency=1
     depends_on:
       redis:
         condition: service_healthy

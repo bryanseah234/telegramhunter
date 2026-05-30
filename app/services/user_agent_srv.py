@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("user_agent")
 
-# MTProto conflict backoff (seconds) — kept short since connections are brief
+# MTProto conflict backoff (seconds) -- kept short since connections are brief
 _MTPROTO_CONFLICT_BACKOFF = 10
 _MTPROTO_MAX_RETRIES = 3
 
@@ -22,6 +22,47 @@ SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
 SESSION_NAME = os.getenv("USER_SESSION_NAME", "user_session")
 SESSION_FILE = os.path.join(BASE_DIR, f"{SESSION_NAME}.session")
 
+
+def _is_session_file_healthy(path: str) -> bool:
+    """
+    Lightweight integrity check for a Telethon .session file (SQLite database).
+
+    Telethon sessions are SQLite files. A corrupt or partial file will cause
+    TelegramClient to raise struct.unpack / DatabaseError on first use, crashing
+    the worker process. This check opens the file as SQLite and reads the sessions
+    table, which is enough to confirm the file is not corrupt.
+
+    On failure, renames the file to .session.corrupt.{timestamp} so it won't
+    be picked up on subsequent scans, and logs a warning.
+    """
+    import sqlite3
+    import time as _time
+
+    if not os.path.exists(path):
+        return False
+
+    try:
+        conn = sqlite3.connect(path, timeout=5)
+        cursor = conn.cursor()
+        # Telethon writes a 'sessions' table; reading it verifies file integrity
+        cursor.execute("SELECT dc_id FROM sessions LIMIT 1")
+        conn.close()
+        return True
+    except Exception as e:
+        # Corrupt / truncated / not a Telethon session file
+        logger.warning(
+            f"    [UserAgent] Session file appears corrupt: {path} ({e}) -- "
+            f"renaming to .corrupt and skipping."
+        )
+        try:
+            corrupt_path = f"{path}.corrupt.{int(_time.time())}"
+            os.rename(path, corrupt_path)
+            logger.warning(f"    [UserAgent] Moved corrupt session to: {corrupt_path}")
+        except Exception as e_rename:
+            logger.error(f"    [UserAgent] Could not rename corrupt session {path}: {e_rename}")
+        return False
+
+
 class UserAgentService:
     """
     Service acting as a real Telegram User (not a bot).
@@ -32,7 +73,7 @@ class UserAgentService:
         self.api_hash = settings.TELEGRAM_API_HASH
         self.client = None
         self.lock = asyncio.Lock()
-        
+
         # Rotation Logic
         self.sessions = [] # List of session paths
         self.current_index = 0
@@ -71,7 +112,8 @@ class UserAgentService:
                     if f.startswith("bot_"):
                         continue
                     full_path = os.path.abspath(os.path.join(SESSIONS_DIR, f))
-                    new_sessions.add(full_path)
+                    if _is_session_file_healthy(full_path):
+                        new_sessions.add(full_path)
         except Exception as e:
             logger.error(f"    ❌ [UserAgent] Directory scan failed for {SESSIONS_DIR}: {e}")
 
@@ -148,7 +190,7 @@ class UserAgentService:
             # 2. Check Cooldown for THIS session
             # Use distinct key namespaces: cooldown vs lock.
             # Previously both used `user_agent:{session_name}` which caused
-            # release_lock() to also clear the cooldown — meaning FloodWait
+            # release_lock() to also clear the cooldown -- meaning FloodWait
             # cooldowns were silently wiped on every disconnect.
             cooldown_key = f"user_agent:cooldown:{session_name}"
             if redis_srv.is_on_cooldown(cooldown_key):
@@ -285,7 +327,7 @@ class UserAgentService:
             current_holder = row.get("locked_by")
             current_until = row.get("locked_until")
             if current_holder == self._instance_id and current_until:
-                # We already hold it — just refresh the TTL
+                # We already hold it -- just refresh the TTL
                 lease_until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
                 await asyncio.to_thread(
                     lambda: db.table("telegram_accounts")
@@ -332,7 +374,7 @@ class UserAgentService:
             self._current_phone = None
 
     async def stop(self):
-        """Graceful shutdown — disconnect and cancel background tasks."""
+        """Graceful shutdown -- disconnect and cancel background tasks."""
         async with self.lock:
             await self._disconnect()
             if self._refresher_task and not self._refresher_task.done():
@@ -687,7 +729,7 @@ class UserAgentService:
                         "media_type": media_type, "file_meta": file_meta, "chat_id": entity.id if hasattr(entity, 'id') else group_id
                     })
             except FloodWaitError as fwe:
-                # Surface FloodWait so caller and logs know — swallowing it hides the signal
+                # Surface FloodWait so caller and logs know -- swallowing it hides the signal
                 logger.warning(f"    🛑 [UserAgent] FloodWait in get_history for {group_id}: {fwe.seconds}s")
                 from app.core.redis_srv import redis_srv
                 session_name = self.current_session_name or "unknown"
@@ -711,7 +753,7 @@ class UserAgentService:
 
         Searches public channels Telegram has indexed (different result space
         from any web scanner). Same lock + cooldown discipline as get_history:
-        FloodWait → redis cooldown on the session, no client kept hot.
+        FloodWait -> redis cooldown on the session, no client kept hot.
 
         Returns: list of {"text", "chat_id", "chat_name", "message_id", "date"}.
         Empty list if FloodWait, no sessions, or search disabled.
@@ -740,7 +782,7 @@ class UserAgentService:
                     limit=limit,
                 ))
 
-                # Build chat_id → chat_name map from res.chats
+                # Build chat_id -> chat_name map from res.chats
                 chat_map = {}
                 for chat in (getattr(res, "chats", []) or []):
                     cid = getattr(chat, "id", None)
@@ -781,10 +823,10 @@ class UserAgentService:
                         "date": str(getattr(msg, "date", None)) if getattr(msg, "date", None) else None,
                     })
 
-                logger.info(f"    🔎 [UserAgent] SearchGlobal('{query[:40]}') → {len(results)} messages")
+                logger.info(f"    🔎 [UserAgent] SearchGlobal('{query[:40]}') -> {len(results)} messages")
 
             except FloodWaitError as fwe:
-                logger.warning(f"    🛑 [UserAgent] FloodWait on search: {fwe.seconds}s — marking session cooldown")
+                logger.warning(f"    🛑 [UserAgent] FloodWait on search: {fwe.seconds}s -- marking session cooldown")
                 from app.core.redis_srv import redis_srv
                 session_name = self.current_session_name or "unknown"
                 wait = fwe.seconds + 60

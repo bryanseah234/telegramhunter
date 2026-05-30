@@ -4,7 +4,7 @@ import os
 import sys
 
 from celery import Celery
-from celery.signals import worker_ready, worker_shutdown
+from celery.signals import worker_ready, worker_shutdown, task_failure
 from celery.schedules import crontab
 
 from app.core.config import settings
@@ -90,6 +90,51 @@ def on_worker_shutdown(**kwargs):
     if _worker_loop and not _worker_loop.is_closed():
         _worker_loop.close()
         logger.info("[Worker] Persistent event loop closed.")
+
+
+@task_failure.connect
+def on_task_failure(task_id, exception, traceback, einfo, args, kwargs, **extra):
+    """
+    Fires when a task exhausts all retries and is permanently failed.
+    Logs to audit_logs so failures are visible without a dead-letter queue.
+    Non-blocking: uses a fire-and-forget thread so the Celery signal handler
+    never blocks the worker event loop.
+    """
+    task_name = extra.get("sender", {})
+    if hasattr(task_name, "name"):
+        task_name = task_name.name
+    else:
+        task_name = str(task_name)
+
+    exc_str = str(exception)[:500]  # cap to avoid huge audit rows
+    logger.error(
+        f"[DeadLetter] Task {task_name}[{task_id}] permanently failed: {exc_str}"
+    )
+
+    # Persist to audit_logs asynchronously — don't block the Celery signal thread.
+    def _persist():
+        try:
+            from app.core.audit import log_event
+            import asyncio as _aio
+            loop = get_worker_loop()
+            loop.call_soon_threadsafe(
+                lambda: loop.create_task(
+                    log_event(
+                        event_type="task_permanent_failure",
+                        actor="celery_worker",
+                        details={
+                            "task_name": task_name,
+                            "task_id": task_id,
+                            "exception": exc_str,
+                        },
+                    )
+                )
+            )
+        except Exception as e:
+            logger.warning(f"[DeadLetter] Could not persist failure to audit_logs: {e}")
+
+    import threading
+    threading.Thread(target=_persist, daemon=True).start()
 
 
 # ==============================================
@@ -287,7 +332,19 @@ app.conf.update(
             "task": "system.cleanup_general_topic",
             "schedule": crontab(minute=30),
         },
-        # ============================================
+        # Prune audit_logs entries older than 90 days — weekly, Sunday 03:30 UTC.
+        # TOKEN_DECRYPTED fires on every broadcast run so table grows fast without this.
+        "prune-audit-logs-weekly": {
+            "task": "audit.prune_audit_logs",
+            "schedule": crontab(minute=30, hour=3, day_of_week=0),
+        },
+        # Evict any Matkap victim bots left in monitor group after worker crash.
+        # Runs hourly; silent if no pending sentinels exist.
+        "cleanup-matkap-bots-hourly": {
+            "task": "audit.cleanup_matkap_bots",
+            "schedule": crontab(minute=45),
+        },
+
         # CSV IMPORT PIPELINE (MISSING-001)
         # ============================================
         "import-csv-5min": {
