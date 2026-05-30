@@ -23,9 +23,8 @@ import os
 
 import httpx
 
-from app.workers.celery_app import app
+from app.workers.celery_app import app, _run_sync
 from app.workers.tasks.scanner_tasks import (
-    _run_sync,
     _save_credentials_async,
     _send_log_async,
 )

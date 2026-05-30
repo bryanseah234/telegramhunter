@@ -21,8 +21,17 @@ import os
 # ---------------------------------------------------------------------------
 
 # We parse the source file directly so we don't need a running environment.
+# Query constants were extracted from scanner_tasks.py into _scanner/queries.py
+# during the monolith split; we concatenate both sources so extraction helpers
+# see the same content regardless of which file holds the constants.
 _SCANNER_TASKS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "app", "workers", "tasks", "scanner_tasks.py"
+)
+_QUERIES_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "app", "workers", "tasks", "_scanner", "queries.py"
+)
+_QUERIES_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "app", "workers", "tasks", "_scanner", "queries.py"
 )
 _BACKGROUND_JS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "extension", "background.js"
@@ -170,8 +179,11 @@ def _extract_base_query_template(js_src: str) -> str:
 # Load sources once
 # ---------------------------------------------------------------------------
 
-_scanner_src = _read_source(_SCANNER_TASKS_PATH)
+# Concatenate scanner_tasks.py + _scanner/queries.py so extraction helpers
+# find constants regardless of which file holds them after the monolith split.
+_scanner_src = _read_source(_SCANNER_TASKS_PATH) + "\n" + _read_source(_QUERIES_PATH)
 _js_src = _read_source(_BACKGROUND_JS_PATH)
+
 
 _shodan_default = _extract_shodan_default_queries(_scanner_src)
 _c2_queries = _extract_c2_queries(_scanner_src)

@@ -434,20 +434,22 @@ async def _broadcast_logic():
 
     broadcaster = get_broadcaster()
 
-    # Claim timeout - if a claim is older than this, consider it stale (worker crashed)
-    CLAIM_TIMEOUT_MINUTES = 5
+    from app.core.constants import CLAIM_TIMEOUT_MINUTES
     stale_threshold = datetime.now(timezone.utc) - timedelta(minutes=CLAIM_TIMEOUT_MINUTES)
 
-    # Increased from 100 to 500 — at 1.5s/msg this is 750s per run,
-    # enough throughput to drain a 23k backlog in ~48 minutes.
+    # Batch size: env-configurable. Default 200 (200 × 1.5s = 300s per run,
+    # fits inside CLAIM_TIMEOUT_MINUTES=15 with headroom).
+    # Raise via BROADCAST_BATCH_SIZE=500 if you have enough bot credentials
+    # in the rotation pool to sustain the higher send rate without flood-wait.
+    BROADCAST_BATCH_SIZE = int(os.getenv("BROADCAST_BATCH_SIZE", 200))
     response = await async_execute(
         db.table("exfiltrated_messages")
         .select("*, discovered_credentials!inner(meta)")
         .eq("is_broadcasted", False)
         .order("telegram_msg_id", desc=False)
-        .limit(500)
+        .limit(BROADCAST_BATCH_SIZE)
     )
-    
+
     messages = response.data
     if not messages:
         # Only log periodically or if verbose debug needed? 
@@ -709,7 +711,6 @@ async def _rescrape_active_logic():
     # Guard: if ALL UserAgent sessions are on cooldown, skip this run entirely.
     # Queueing tasks when the UA is fully restricted just wastes worker slots and
     # causes noisy "All sessions failed" log spam.
-    from app.workers.tasks.scanner_tasks import _run_sync
     ua_sessions_available = False
     try:
         import os.path as _osp
