@@ -71,6 +71,8 @@ class MetricsCollector:
         self._metrics: Dict[str, MetricData] = defaultdict(MetricData)
         # Track counts added since last flush so flush uses INCRBY not SET
         self._pending_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        # Cached Redis client — initialised once on first flush/get_all_metrics call
+        self._redis_client = None
 
     def track(self, metric_name: str):
         """
@@ -149,9 +151,10 @@ class MetricsCollector:
         if not self._pending_counts:
             return True
         try:
-            from app.core.config import settings
-            import redis as _redis
-            r = _redis.from_url(settings.REDIS_URL, decode_responses=True)
+            r = self._get_redis()
+            if r is None:
+                logger.warning("[Metrics] Redis client unavailable — flush skipped")
+                return False
             pipe = r.pipeline()
             for metric_name, counters in list(self._pending_counts.items()):
                 for counter_key, delta in counters.items():
@@ -165,23 +168,34 @@ class MetricsCollector:
             logger.warning(f"[Metrics] Redis flush failed (non-fatal): {e}")
             return False
 
+    def _get_redis(self):
+        """Returns cached Redis client, initialised once."""
+        if self._redis_client is None:
+            try:
+                from app.core.config import settings
+                import redis as _redis
+                self._redis_client = _redis.from_url(settings.REDIS_URL, decode_responses=True)
+            except Exception as e:
+                logger.warning(f"[Metrics] Could not create Redis client: {e}")
+                return None
+        return self._redis_client
+
     def get_all_metrics(self) -> Dict[str, dict]:
         """Get all metrics as dict — merges in-memory + Redis persisted totals."""
         # Try to load Redis totals and merge
         redis_totals: Dict[str, Dict[str, int]] = {}
         try:
-            from app.core.config import settings
-            import redis as _redis
-            r = _redis.from_url(settings.REDIS_URL, decode_responses=True)
-            keys = r.keys("metrics:counter:*")
-            for key in keys:
-                # key format: metrics:counter:<name>:<field>
-                parts = key.split(":", 3)
-                if len(parts) == 4:
-                    _, _, name, field_name = parts
-                    val = r.get(key)
-                    if val:
-                        redis_totals.setdefault(name, {})[field_name] = int(val)
+            r = self._get_redis()
+            if r:
+                keys = r.keys("metrics:counter:*")
+                for key in keys:
+                    # key format: metrics:counter:<name>:<field>
+                    parts = key.split(":", 3)
+                    if len(parts) == 4:
+                        _, _, name, field_name = parts
+                        val = r.get(key)
+                        if val:
+                            redis_totals.setdefault(name, {})[field_name] = int(val)
         except Exception:
             pass  # Redis unavailable — show in-memory only
 

@@ -358,7 +358,9 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
         if "23505" in err_str or "duplicate key" in err_str.lower():
             logger.debug(f"[Validate] Duplicate token (raced): {token[:10]}... — first writer won")
             return 0
-        logger.error(f"[Validate] Error processing token: {e}", exc_info=True)
+        # Log without exc_info to avoid embedding the raw exception chain which
+        # may reference the local `token` variable in some Python traceback frames.
+        logger.error(f"[Validate] Error processing token {token[:10]}...: {err_str}")
 
     return 0
 

@@ -217,6 +217,16 @@ services:
     init: true
     env_file: .env
     command: python -m app.services.bot_listener
+    healthcheck:
+      # The bot loop touches /tmp/bot_alive every 10 seconds.
+      # We check that the file exists AND was modified within the last 60s.
+      # If the polling loop stalls silently, this file goes stale and the
+      # container is marked unhealthy — triggering a restart.
+      test: ["CMD", "sh", "-c", "test -f /tmp/bot_alive && [ $(( $(date +%s) - $(date -r /tmp/bot_alive +%s) )) -le 60 ]"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     depends_on:
       redis:
         condition: service_healthy

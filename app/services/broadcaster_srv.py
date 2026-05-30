@@ -101,17 +101,6 @@ class BroadcasterService:
                             logger.error(f"❌ General fallback send failed: {fallback_e}")
                     logger.error(f"❌ Bot send failed: {e}")
 
-            elif identity["type"] == "user":
-                # Ensure we pick a fresh session for each "user" slot
-                logger.info(f"📤 [Broadcaster] Sending via User Account placeholder: {identity['id']}")
-                success = await user_agent.send_message(
-                    target=group_id,
-                    message=to_send_text,
-                    thread_id=thread_id if thread_id != 1 else None
-                )
-                if success: return
-                logger.warning("⚠️ User account send failed. Rotating...")
-
         logger.error("❌ All identities failed to send message.")
 
     async def send_log(self, message: str):
@@ -129,7 +118,6 @@ class BroadcasterService:
     async def ensure_topic(self, group_id: int | str, topic_name: str) -> int:
         """Ensures a forum topic exists."""
         try:
-            from app.services.user_agent_srv import user_agent
             existing_id = await user_agent.find_topic_id(group_id, topic_name)
             if existing_id: return existing_id
         except Exception: pass

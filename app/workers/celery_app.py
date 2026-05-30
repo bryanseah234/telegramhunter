@@ -48,6 +48,18 @@ def get_worker_loop() -> asyncio.AbstractEventLoop:
     return _worker_loop
 
 
+def _run_sync(coro):
+    """
+    Run an async coroutine synchronously on the worker's persistent event loop.
+
+    This is the canonical single definition — imported by scanner_tasks,
+    audit_tasks, firehose_tasks, pivot_tasks, and validation_tasks.
+    All local copies of this function in individual task modules should import
+    from here instead of redefining it.
+    """
+    return get_worker_loop().run_until_complete(coro)
+
+
 # ==============================================
 # WORKER LIFECYCLE SIGNALS
 # ==============================================

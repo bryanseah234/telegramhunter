@@ -54,6 +54,11 @@ def _consume_pivot_budget(seed_type: str) -> bool:
         pipe.ttl(PIVOT_BUDGET_KEY)
         count, ttl = pipe.execute()
         if ttl is None or ttl < 0:
+            # First call in window (or key was evicted by allkeys-lru).
+            # Eviction resets the count to 1 — same as a fresh window start.
+            # This is the SAFE eviction behavior: we never go negative, and a
+            # cache miss under memory pressure just opens a fresh pivot window
+            # rather than blocking pivots entirely.
             redis_client.expire(PIVOT_BUDGET_KEY, PIVOT_BUDGET_WINDOW)
         if count > PIVOT_BUDGET_MAX:
             logger.warning(

@@ -72,7 +72,31 @@ def _get_monitor_group_ids() -> set[str]:
 
 
 def _is_monitor_group(chat_id) -> bool:
-    """True if chat_id (any form) refers to our monitor/hub group."""
+    """True if chat_id (any form) refers to our monitor/hub group.
+
+    SAFE to call from sync contexts only. From async contexts, use:
+        monitor_ids = await _resolve_monitor_group_ids_async()
+        if str(chat_id) in monitor_ids: ...
+
+    Raises RuntimeError if called from inside a running event loop (cold-cache
+    case would block the loop via httpx.get). Warm-cache calls (after first
+    resolution) return immediately and are safe from any context.
+    """
+    global _MONITOR_GROUP_IDS_RESOLVED
+    if not _MONITOR_GROUP_IDS_RESOLVED:
+        # Cold cache — the sync resolver will make an httpx.get call.
+        # If we're inside an async event loop this would block it.
+        try:
+            asyncio.get_running_loop()
+            # There IS a running loop — refuse to block it.
+            raise RuntimeError(
+                "_is_monitor_group() called with cold cache from async context. "
+                "Use `await _resolve_monitor_group_ids_async()` instead."
+            )
+        except RuntimeError as exc:
+            if "_is_monitor_group" in str(exc):
+                raise
+            # RuntimeError from get_running_loop means no loop — safe to proceed sync
     return str(chat_id) in _get_monitor_group_ids()
 
 
