@@ -37,7 +37,10 @@ FROM base AS final
 COPY . .
 
 # Required directories + ownership
-RUN mkdir -p /app/imports/processed && \
+# /app/beat is used by celery beat for schedule persistence (named volume mounted at runtime).
+# The volume is created by Docker as root — pre-create the dir here so the chown covers it
+# before the volume is mounted. At runtime the entrypoint also creates it defensively.
+RUN mkdir -p /app/imports/processed /app/beat && \
     chown -R celery:celery /app
 
 # Fix line endings (Windows CRLF → LF) and make entrypoint executable

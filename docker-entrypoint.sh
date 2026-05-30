@@ -7,8 +7,12 @@ set -e
 
 echo "🚀 [Entrypoint] Starting Telegram Hunter..."
 
-# Create required directories
-mkdir -p /app/imports/processed /app/sessions
+# Create required directories and fix ownership for named volumes.
+# Docker named volumes are created as root at first mount — chown here ensures
+# the celery user can write to /app/beat (beat schedule) and /app/sessions.
+mkdir -p /app/imports/processed /app/sessions /app/beat
+# Only chown if we can (entrypoint runs as celery user, but volume dirs may be root-owned)
+chown celery:celery /app/beat /app/sessions 2>/dev/null || true
 
 # Process any CSV files dropped into imports/
 CSV_FILES=()
