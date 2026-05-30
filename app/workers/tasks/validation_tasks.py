@@ -14,11 +14,17 @@ Why:
     secondary rate limits that cascaded into bot_restricted cooldowns.
 
 Rate limiter:
-    Redis key `rate_limit:telegram_getMe` — incremented atomically.
-    If TTL is unset (first call in window), set to RATE_WINDOW_SECONDS.
-    If counter > RATE_MAX_CALLS, sleep until window expires + retry.
-    Default: 30 calls / 10 seconds = ~3 calls/sec (well below Telegram's
-    ~30 calls/sec per-IP soft limit but high enough not to bottleneck).
+    Redis key `rate_limit:telegram_getMe` — incremented atomically by every
+    worker that calls _acquire_rate_token().  Shared across ALL validator workers
+    (processes) because the key lives in Redis, not in process memory.
+    If counter > RATE_MAX_CALLS within the window, the calling coroutine sleeps
+    until the window expires and retries.
+    Default: 30 calls / 10 seconds = ~3 calls/sec sustained.
+
+    There is NO Celery-level rate_limit on validate_token.  A per-worker Celery
+    cap would allow each of the N concurrency workers to independently consume
+    up to the cap, multiplying burst throughput by N and defeating the Redis gate.
+    The Redis bucket is the single, process-global rate control.
 """
 import asyncio
 import hashlib
@@ -104,7 +110,12 @@ def _calculate_hash(token: str) -> str:
     autoretry_for=(httpx.RequestError,),
     retry_backoff=True,
     max_retries=3,
-    rate_limit="60/m",  # belt-and-braces: Celery-side per-worker cap
+    # NOTE: NO Celery rate_limit here.
+    # Throughput is governed entirely by the Redis token bucket in _acquire_rate_token()
+    # (key: rate_limit:telegram_getMe, default 30 calls / 10s).
+    # A Celery rate_limit="60/m" would be a PER-WORKER cap — with concurrency=4 that
+    # allows 4 × 60 = 240 calls/min to escape the Redis gate simultaneously, defeating
+    # the global limit entirely.  The Redis bucket is the single source of truth.
 )
 def validate_token(item: dict, source_name: str):
     """
