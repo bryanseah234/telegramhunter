@@ -23,6 +23,9 @@ from hypothesis import strategies as st
 _SCANNER_TASKS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "app", "workers", "tasks", "scanner_tasks.py"
 )
+_QUERIES_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "app", "workers", "tasks", "_scanner", "queries.py"
+)
 
 
 def _read_source(path: str) -> str:
@@ -145,7 +148,9 @@ def _get_netlas_query_list(src: str, query: str) -> list:
 # Load source once
 # ---------------------------------------------------------------------------
 
-_scanner_src = _read_source(_SCANNER_TASKS_PATH)
+# Concatenate scanner_tasks.py + _scanner/queries.py so extraction helpers
+# find constants regardless of which file holds them after the monolith split.
+_scanner_src = _read_source(_SCANNER_TASKS_PATH) + "\n" + _read_source(_QUERIES_PATH)
 _c2_queries = _extract_c2_queries(_scanner_src)
 _netlas_queries = _extract_netlas_queries(_scanner_src)
 _fofa_queries = _extract_fofa_queries(_scanner_src)

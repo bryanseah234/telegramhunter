@@ -395,7 +395,7 @@ def refresh_pending_tokens():
     Some bot owners activate dormant bots later — re-validating periodically
     recovers chat_id resolution for free.
     """
-    from app.workers.tasks.scanner_tasks import _run_sync
+    from app.workers.celery_app import _run_sync
     return _run_sync(_refresh_pending_tokens_async())
 
 
@@ -611,7 +611,7 @@ def backfill_scoring(batch_size: int = 50):
     Does NOT call getMe (token already confirmed live).
     Runs in batches — safe to call repeatedly via beat or manually.
     """
-    from app.workers.tasks.scanner_tasks import _run_sync
+    from app.workers.celery_app import _run_sync
     return _run_sync(_backfill_scoring_async(batch_size))
 
 

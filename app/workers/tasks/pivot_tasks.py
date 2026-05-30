@@ -22,8 +22,8 @@ import hashlib
 import logging
 import os
 
-from app.workers.celery_app import app
-from app.workers.tasks.scanner_tasks import _run_sync, _save_credentials_async
+from app.workers.celery_app import app, _run_sync
+from app.workers.tasks.scanner_tasks import _save_credentials_async
 from app.workers.tasks.flow_tasks import redis_client
 
 logger = logging.getLogger(__name__)
