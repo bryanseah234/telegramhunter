@@ -33,18 +33,45 @@ async def _audit_active_topics_async():
     await broadcaster.send_log("🛡️ **Audit**: Starting Topic Integrity Check...")
 
     # Cap to AUDIT_BATCH_SIZE (default 100) — 100 × 0.2s Telegram ping = ~20s minimum.
-    # Full sweep happens across successive hourly runs.
+    # Full sweep advances via a Redis cursor so successive hourly runs cover ALL credentials,
+    # not just the first 100 that Postgres happens to return.
     AUDIT_BATCH_SIZE = int(os.getenv("AUDIT_BATCH_SIZE", 100))
 
+    # Cursor: created_at of last-seen credential (ISO string stored in Redis)
+    CURSOR_KEY = "audit:topics:cursor"
     try:
-        response = await async_execute(
+        from app.core.config import settings as _s
+        import redis as _redis
+        _r = _redis.from_url(_s.REDIS_URL, decode_responses=True)
+        cursor_val = _r.get(CURSOR_KEY)  # ISO timestamp or None
+    except Exception:
+        cursor_val = None
+
+    try:
+        q = (
             db.table("discovered_credentials")
-            .select("id, meta, chat_id, status")
+            .select("id, meta, chat_id, status, created_at")
             .in_("status", ["active", "pending"])
+            .order("created_at", desc=False)
             .limit(AUDIT_BATCH_SIZE)
         )
+        if cursor_val:
+            q = q.gt("created_at", cursor_val)
+        response = await async_execute(q)
         creds = response.data or []
-        logger.info(f"    [Audit] Checking {len(creds)} credentials (batch cap: {AUDIT_BATCH_SIZE})...")
+
+        # Advance or reset cursor
+        try:
+            if creds:
+                _r.set(CURSOR_KEY, creds[-1]["created_at"])
+            else:
+                # End of table — reset cursor for next full sweep
+                _r.delete(CURSOR_KEY)
+                logger.info("    [Audit] Full sweep complete, cursor reset.")
+        except Exception:
+            pass
+
+        logger.info(f"    [Audit] Checking {len(creds)} credentials (batch cap: {AUDIT_BATCH_SIZE}, cursor: {cursor_val or 'start'})...")
     except Exception as e:
         logger.error(f"    ❌ [Audit] DB Fetch failed: {e}")
         return f"DB Fetch failed: {e}"
@@ -184,31 +211,41 @@ async def _system_self_heal_async():
     # This happens when the kickstart flow adds a victim bot to the monitor group and
     # getUpdates returns monitor group messages as the "discovered" chat.
     try:
-        monitor_id = settings.MONITOR_GROUP_ID
-        if monitor_id:
-            contaminated = await async_execute(
-                db.table("discovered_credentials")
-                .select("id")
-                .eq("chat_id", str(monitor_id))
-                .neq("source", "multi_chat")  # skip sibling records (they legitimately could differ)
-            )
-            if contaminated.data:
-                ids_to_reset = [r["id"] for r in contaminated.data]
+        # Resolve all forms of the monitor group ID (username + numeric)
+        # before querying — MONITOR_GROUP_ID may be "@theprawnhunter" but
+        # chat_id in DB is the numeric form (e.g. -1003588166404).
+        from app.services.scraper_srv import _resolve_monitor_group_ids_async
+        monitor_ids = await _resolve_monitor_group_ids_async()
+
+        if monitor_ids:
+            contaminated_ids: list[str] = []
+            for mid in monitor_ids:
+                res = await async_execute(
+                    db.table("discovered_credentials")
+                    .select("id")
+                    .eq("chat_id", mid)
+                    .neq("source", "multi_chat")
+                )
+                if res.data:
+                    contaminated_ids.extend([r["id"] for r in res.data])
+            # Deduplicate in case multiple ID forms matched same rows
+            contaminated_ids = list(set(contaminated_ids))
+            if contaminated_ids:
                 logger.warning(
-                    f"    🧹 [Self-Heal] Resetting {len(ids_to_reset)} contaminated credential(s) "
+                    f"    🧹 [Self-Heal] Resetting {len(contaminated_ids)} contaminated credential(s) "
                     f"(chat_id == monitor group)."
                 )
                 await async_execute(
                     db.table("discovered_credentials")
                     .update({"chat_id": None, "status": "pending"})
-                    .in_("id", ids_to_reset)
+                    .in_("id", contaminated_ids)
                 )
                 # Re-enrich them so they discover their real chats
                 from app.workers.tasks.flow_tasks import enrich_credential
-                for cid in ids_to_reset:
+                for cid in contaminated_ids:  # F13: was ids_to_reset (NameError from old code)
                     enrich_credential.delay(cid)
                 await broadcaster.send_log(
-                    f"🧹 **Self-Heal**: Reset {len(ids_to_reset)} contaminated credential(s) → re-enriching."
+                    f"🧹 **Self-Heal**: Reset {len(contaminated_ids)} contaminated credential(s) → re-enriching."
                 )
     except Exception as e:
         logger.error(f"    ❌ [Self-Heal] Decontamination failed: {e}")
@@ -216,11 +253,40 @@ async def _system_self_heal_async():
 
     try:
         import os
-        SELF_HEAL_BATCH = int(os.getenv("SELF_HEAL_BATCH_SIZE", 500))
-        response = await async_execute(
-            db.table("discovered_credentials").select("*").eq("status", "active").limit(SELF_HEAL_BATCH)
+        SELF_HEAL_BATCH = int(os.getenv("SELF_HEAL_BATCH_SIZE", 200))
+
+        # Cursor-based pagination — advances through all active credentials across 6h runs
+        # instead of always fetching the same first-N rows (which may never cycle through).
+        HEAL_CURSOR_KEY = "self_heal:cursor"
+        try:
+            from app.core.config import settings as _sh_s
+            import redis as _redis
+            _rh = _redis.from_url(_sh_s.REDIS_URL, decode_responses=True)
+            heal_cursor = _rh.get(HEAL_CURSOR_KEY)
+        except Exception:
+            heal_cursor = None
+
+        q = (
+            db.table("discovered_credentials")
+            .select("*")
+            .eq("status", "active")
+            .order("created_at", desc=False)
+            .limit(SELF_HEAL_BATCH)
         )
+        if heal_cursor:
+            q = q.gt("created_at", heal_cursor)
+        response = await async_execute(q)
         credentials = response.data or []
+
+        # Advance or reset cursor
+        try:
+            if credentials:
+                _rh.set(HEAL_CURSOR_KEY, credentials[-1]["created_at"])
+            else:
+                _rh.delete(HEAL_CURSOR_KEY)
+                logger.info("    [Self-Heal] Full sweep complete, cursor reset.")
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"    ❌ [Self-Heal] DB Error: {e}")
         return f"DB Error: {e}"
