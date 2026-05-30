@@ -148,33 +148,39 @@ class TestBotUsernameHelpers(unittest.TestCase):
 
 
 class TestBroadcasterTokenCycling(unittest.TestCase):
-    """Test that BroadcasterService cycles through multiple tokens."""
+    """Test that BroadcasterService builds a rotation pool from all tokens."""
 
     @patch("app.services.broadcaster_srv.settings")
     def test_round_robin_cycling(self, mock_settings):
-        """Bot property should cycle through tokens in round-robin order."""
+        """Pool should contain one entry per token; _cycle produces round-robin order."""
         mock_settings.bot_tokens = [
             "111111111:AAAA",
             "222222222:BBBB",
-            "333333333:CCCC"
+            "333333333:CCCC",
         ]
-        
+
         from app.services.broadcaster_srv import BroadcasterService
         broadcaster = BroadcasterService()
-        
-        # Get 6 bots (2 full cycles)
-        tokens_seen = []
-        for _ in range(6):
-            bot = broadcaster.bot
-            tokens_seen.append(bot.token)
-        
-        # Should cycle: 111, 222, 333, 111, 222, 333
+
+        # Pool has one entry per token
+        self.assertEqual(len(broadcaster._pool), 3)
+        pool_ids = [entry["id"] for entry in broadcaster._pool]
+        self.assertIn("111111111:AAAA", pool_ids)
+        self.assertIn("222222222:BBBB", pool_ids)
+        self.assertIn("333333333:CCCC", pool_ids)
+
+        # _cycle is an itertools.cycle -- advance it and verify round-robin order
+        tokens_seen = [next(broadcaster._cycle)["id"] for _ in range(6)]
         self.assertEqual(tokens_seen[0], "111111111:AAAA")
         self.assertEqual(tokens_seen[1], "222222222:BBBB")
         self.assertEqual(tokens_seen[2], "333333333:CCCC")
         self.assertEqual(tokens_seen[3], "111111111:AAAA")
         self.assertEqual(tokens_seen[4], "222222222:BBBB")
         self.assertEqual(tokens_seen[5], "333333333:CCCC")
+
+        # _get_bot_instance returns a Bot object for any token in the pool
+        bot = broadcaster._get_bot_instance("111111111:AAAA")
+        self.assertIsNotNone(bot)
 
 
 if __name__ == "__main__":

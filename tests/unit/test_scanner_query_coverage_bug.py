@@ -456,24 +456,33 @@ class TestFofaQueries:
     """Validates: Requirements 1.11–1.14 / 2.10–2.13"""
 
     def test_tier2_at_least_one_payload_entry_present(self):
-        """At least one Tier 2 /start payload= entry must be present in FOFA syntax."""
-        assert any(
-            "/start payload=" in q and "api.telegram.org/bot" in q
+        """FOFA Tier-2 /start payload= queries were intentionally removed after
+        7+ hours of zero results across all runs — FOFA does not index live C2
+        body content matching these patterns with status_code=200.
+        Instead, verify the replacement Tier-2 bot UI fingerprint queries are present."""
+        tier2_present = any(
+            "sendMessage" in q and "chat_id" in q
             for q in _fofa_queries
-        ), (
-            "MISSING Tier 2 FOFA entry: no '/start payload=' + 'api.telegram.org/bot' "
-            f"entry found.\nCurrent FOFA queries: {_fofa_queries}"
+        ) or any(
+            'title="Telegram Bot"' in q
+            for q in _fofa_queries
+        )
+        assert tier2_present, (
+            "FOFA Tier-2 bot UI fingerprint queries missing. "
+            f"Current queries: {_fofa_queries}"
         )
 
     def test_tier3_at_least_one_malware_keyword_entry_present(self):
-        """At least one Tier 3 malware keyword entry must be present in FOFA syntax."""
-        tier3_found = any(
-            any(kw in q for kw in TIER3_KEYWORDS) and "api.telegram.org/bot" in q
+        """FOFA Tier-3 malware-keyword queries were intentionally removed after
+        7+ hours of zero results — FOFA does not index such body content with
+        status_code=200. Instead, verify at least one t.me URL pattern is present."""
+        tier3_present = any(
+            "t.me" in q or "/start" in q
             for q in _fofa_queries
         )
-        assert tier3_found, (
-            "MISSING Tier 3 FOFA entry: no malware keyword + 'api.telegram.org/bot' "
-            f"entry found.\nCurrent FOFA queries: {_fofa_queries}"
+        assert tier3_present, (
+            "FOFA Tier-3 t.me / /start URL pattern queries missing. "
+            f"Current queries: {_fofa_queries}"
         )
 
     def test_all_fofa_queries_have_status_code_200(self):
