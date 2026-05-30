@@ -1,0 +1,275 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1020" width="1400" height="1020">
+  <defs>
+    <style>
+      text { font-family: "JetBrains Mono", "Fira Code", monospace; }
+      .title { font-size:13px; font-weight:700; fill:#e2e8f0; }
+      .sub   { font-size:10px; fill:#94a3b8; }
+      .label { font-size:9px;  fill:#64748b; }
+      .badge { font-size:8px; fill:#f1f5f9; font-weight:600; }
+    </style>
+    <marker id="arr" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <polygon points="0 0,7 3.5,0 7" fill="#475569"/>
+    </marker>
+    <marker id="arrG" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <polygon points="0 0,7 3.5,0 7" fill="#22c55e"/>
+    </marker>
+    <marker id="arrB" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <polygon points="0 0,7 3.5,0 7" fill="#3b82f6"/>
+    </marker>
+    <marker id="arrY" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <polygon points="0 0,7 3.5,0 7" fill="#f59e0b"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="1020" fill="#0f172a"/>
+  <text x="700" y="28" text-anchor="middle" font-size="15" font-weight="700" font-family="monospace" fill="#e2e8f0">TelegramHunter -- System Architecture (May 2026)</text>
+  <text x="700" y="44" text-anchor="middle" font-size="9" font-family="monospace" fill="#64748b">FastAPI . Celery . Supabase . Redis . PTB . Telethon . 14-source scanner pipeline</text>
+
+  <!-- Zone borders -->
+  <rect x="14" y="54" width="340" height="260" rx="8" fill="none" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="22" y="68" font-size="9" font-family="monospace" fill="#334155">EXTERNAL SOURCES</text>
+  <rect x="370" y="54" width="300" height="260" rx="8" fill="none" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="378" y="68" font-size="9" font-family="monospace" fill="#334155">INGESTION &amp; VALIDATION</text>
+  <rect x="686" y="54" width="350" height="260" rx="8" fill="none" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="694" y="68" font-size="9" font-family="monospace" fill="#334155">CORE PIPELINE</text>
+  <rect x="1052" y="54" width="330" height="260" rx="8" fill="none" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="1060" y="68" font-size="9" font-family="monospace" fill="#334155">OUTPUT &amp; BROADCAST</text>
+  <rect x="14" y="330" width="1368" height="200" rx="8" fill="none" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="22" y="344" font-size="9" font-family="monospace" fill="#334155">INFRASTRUCTURE -- Docker Compose (Pattern B, image-baked)</text>
+  <rect x="14" y="546" width="1368" height="160" rx="8" fill="none" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="22" y="560" font-size="9" font-family="monospace" fill="#334155">PERSISTENCE</text>
+  <rect x="14" y="722" width="1368" height="284" rx="8" fill="none" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="22" y="736" font-size="9" font-family="monospace" fill="#334155">OPERATIONS &amp; SAFETY</text>
+
+  <!-- EXTERNAL -->
+  <rect x="24" y="76" width="145" height="46" rx="5" fill="#1e293b" stroke="#334155"/>
+  <text x="96" y="94" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">GitHub Events</text>
+  <text x="96" y="107" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">firehose (30s poll)</text>
+  <rect x="178" y="76" width="168" height="228" rx="5" fill="#1a1f2e" stroke="#334155"/>
+  <text x="262" y="92" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">14 Scanners</text>
+  <text x="262" y="105" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">worker-scanners</text>
+  <text x="195" y="121" font-size="9" font-family="monospace" fill="#64748b">GitHub . Bitbucket . GitLab</text>
+  <text x="195" y="134" font-size="9" font-family="monospace" fill="#64748b">SourceGraph . Grepapp . Shodan</text>
+  <text x="195" y="147" font-size="9" font-family="monospace" fill="#64748b">Netlas . Wayback . CommonCrawl</text>
+  <text x="195" y="160" font-size="9" font-family="monospace" fill="#64748b">PublicWWW . Ahmia . Pastebin</text>
+  <text x="195" y="173" font-size="9" font-family="monospace" fill="#64748b">GrayhatWF . ZoomEye</text>
+  <rect x="189" y="183" width="144" height="15" rx="3" fill="#1e3a2e" stroke="#22c55e" stroke-width="0.5"/>
+  <text x="261" y="194" text-anchor="middle" font-size="8" font-family="monospace" fill="#22c55e" font-weight="600">pivot_tasks budget gate (INCR/evict-safe)</text>
+  <rect x="189" y="202" width="144" height="15" rx="3" fill="#2d1f1f" stroke="#ef4444" stroke-width="0.5"/>
+  <text x="261" y="213" text-anchor="middle" font-size="8" font-family="monospace" fill="#ef4444" font-weight="600">rate_limit:telegram_getMe (count==1 TTL fix)</text>
+  <rect x="189" y="221" width="144" height="15" rx="3" fill="#1e293b" stroke="#475569" stroke-width="0.5"/>
+  <text x="261" y="232" text-anchor="middle" font-size="8" font-family="monospace" fill="#94a3b8">dedup: validated:recent:{sha256-64}</text>
+  <rect x="24" y="134" width="145" height="60" rx="5" fill="#1e293b" stroke="#334155"/>
+  <text x="96" y="153" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">Telegram API</text>
+  <text x="96" y="166" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">4x MTProto sessions</text>
+  <text x="96" y="179" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">scraper_srv.py</text>
+  <rect x="24" y="206" width="145" height="42" rx="5" fill="#1e293b" stroke="#334155"/>
+  <text x="96" y="224" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">Bot API</text>
+  <text x="96" y="237" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">getUpdates / getMe / fwd</text>
+
+  <!-- INGESTION -->
+  <rect x="380" y="76" width="140" height="64" rx="5" fill="#1a1f2e" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="450" y="96" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#93c5fd">validate_token</text>
+  <text x="450" y="109" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">worker-validators (x4)</text>
+  <text x="450" y="122" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">rate . dedup . score cap 100</text>
+  <rect x="380" y="152" width="140" height="64" rx="5" fill="#1a1f2e" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="450" y="172" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#c4b5fd">scrape_history</text>
+  <text x="450" y="185" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">worker-scrape (x1 serialised)</text>
+  <text x="450" y="198" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">Strat 1-4 . Matkap . kick guard</text>
+  <rect x="380" y="228" width="280" height="16" rx="3" fill="#1e3a2e" stroke="#22c55e" stroke-width="0.5"/>
+  <text x="520" y="240" text-anchor="middle" font-size="8" font-family="monospace" fill="#22c55e" font-weight="600">_is_session_file_healthy() -- SQLite check on boot, corrupt -&gt; .session.corrupt.{ts}</text>
+  <rect x="380" y="248" width="280" height="16" rx="3" fill="#2d1f1f" stroke="#ef4444" stroke-width="0.5"/>
+  <text x="520" y="260" text-anchor="middle" font-size="8" font-family="monospace" fill="#ef4444" font-weight="600">own-bot guard: MONITOR_BOT_TOKEN + PROTECTED_BOT_IDS (2 layers)</text>
+
+  <!-- CORE -->
+  <rect x="700" y="76" width="145" height="50" rx="5" fill="#1a1f2e" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="772" y="97" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#fcd34d">enrich_credential</text>
+  <text x="772" y="110" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">worker-core (x4)</text>
+  <rect x="700" y="138" width="145" height="50" rx="5" fill="#1a1f2e" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="772" y="159" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#fcd34d">exfiltrate_chat</text>
+  <text x="772" y="172" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">async . monitor guard</text>
+  <rect x="856" y="76" width="165" height="72" rx="5" fill="#1a1f2e" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="938" y="96" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#fca5a5">Circular Scrape Guard</text>
+  <text x="938" y="109" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">_is_monitor_group()</text>
+  <text x="938" y="122" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">async resolver cached</text>
+  <text x="938" y="135" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">no event-loop block</text>
+  <rect x="700" y="198" width="320" height="50" rx="5" fill="#1a2033" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="860" y="218" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#d8b4fe">Matkap Strategy 4 -- OPSEC Cleanup</text>
+  <text x="860" y="231" text-anchor="middle" font-size="9" font-family="monospace" fill="#94a3b8">BEFORE invite: SET matkap:pending_cleanup:{victim}:{chat} TTL=3600s</text>
+  <text x="860" y="244" text-anchor="middle" font-size="9" font-family="monospace" fill="#94a3b8">AFTER kick: DEL sentinel . hourly audit.cleanup_matkap_bots scan</text>
+  <rect x="700" y="258" width="320" height="40" rx="5" fill="#1a1f2e" stroke="#475569"/>
+  <text x="860" y="275" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">broadcast_claimed_at</text>
+  <text x="860" y="288" text-anchor="middle" font-size="9" font-family="monospace" fill="#94a3b8">CLAIM_TIMEOUT=15min (was 5 -- too short for 750s worst-case batch)</text>
+
+  <!-- OUTPUT -->
+  <rect x="1064" y="76" width="155" height="64" rx="5" fill="#1a1f2e" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="1141" y="97" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#86efac">broadcast_pending</text>
+  <text x="1141" y="110" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">every 1 min . batch 500</text>
+  <text x="1141" y="123" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">1.5s/msg . lock renew 90s</text>
+  <rect x="1234" y="76" width="138" height="64" rx="5" fill="#1e293b" stroke="#22c55e"/>
+  <text x="1303" y="96" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#86efac">The Prawn Hunter</text>
+  <text x="1303" y="109" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">-1003588166404</text>
+  <text x="1303" y="122" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">bot-only . per-cred topics</text>
+  <rect x="1064" y="152" width="155" height="50" rx="5" fill="#1a1f2e" stroke="#334155"/>
+  <text x="1141" y="172" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">broadcaster_srv</text>
+  <text x="1141" y="185" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">bots-only pool</text>
+  <text x="1141" y="198" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">MTProto removed from rotation</text>
+  <rect x="1064" y="214" width="155" height="36" rx="5" fill="#1a1f2e" stroke="#f59e0b" stroke-width="0.8"/>
+  <text x="1141" y="230" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#fcd34d">prune_audit_logs</text>
+  <text x="1141" y="243" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">weekly Sun 03:30 UTC . 90d</text>
+  <rect x="1234" y="152" width="138" height="96" rx="5" fill="#1a1f2e" stroke="#334155"/>
+  <text x="1303" y="172" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">bot_listener.py</text>
+  <text x="1303" y="185" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">telehunter234bot</text>
+  <text x="1303" y="198" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">PTB polling . /starthunter</text>
+  <text x="1303" y="211" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">touch /tmp/bot_alive 10s</text>
+  <text x="1303" y="224" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">healthcheck file-freshness</text>
+
+  <!-- INFRA -->
+  <rect x="24" y="354" width="220" height="162" rx="5" fill="#1a1f2e" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="134" y="374" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#fca5a5">Redis :6379</text>
+  <text x="134" y="387" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">256 MB . allkeys-lru . save 60 1</text>
+  <text x="40" y="403" font-size="9" font-family="monospace" fill="#64748b">queues:     celery(6) scrape(18)</text>
+  <text x="40" y="416" font-size="9" font-family="monospace" fill="#64748b">dedup:      validated:recent:{sha256}</text>
+  <text x="40" y="429" font-size="9" font-family="monospace" fill="#64748b">lock:       user_agent:lock:{session}</text>
+  <text x="40" y="442" font-size="9" font-family="monospace" fill="#64748b">cooldown:   user_agent:cooldown:{session}</text>
+  <text x="40" y="455" font-size="9" font-family="monospace" fill="#64748b">bcast lock: broadcast_lock:* renew 90s</text>
+  <text x="40" y="468" font-size="9" font-family="monospace" fill="#64748b">matkap:     matkap:pending_cleanup:*</text>
+  <text x="40" y="481" font-size="9" font-family="monospace" fill="#64748b">rate limit: rate_limit:telegram_getMe</text>
+  <text x="40" y="494" font-size="9" font-family="monospace" fill="#64748b">pivot:      pivot_tasks:budget INCR</text>
+
+  <rect x="256" y="354" width="225" height="162" rx="5" fill="#1a1f2e" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="368" y="374" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#fcd34d">Celery Beat</text>
+  <text x="368" y="387" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">/app/beat/celerybeat-schedule</text>
+  <text x="272" y="403" font-size="9" font-family="monospace" fill="#64748b">broadcast-every-minute</text>
+  <text x="272" y="416" font-size="9" font-family="monospace" fill="#64748b">rescrape-active-hourly</text>
+  <text x="272" y="429" font-size="9" font-family="monospace" fill="#64748b">audit-topics-hourly</text>
+  <text x="272" y="442" font-size="9" font-family="monospace" fill="#64748b">cleanup-matkap-bots-hourly  (NEW)</text>
+  <text x="272" y="455" font-size="9" font-family="monospace" fill="#64748b">prune-audit-logs-weekly     (NEW)</text>
+  <text x="272" y="468" font-size="9" font-family="monospace" fill="#64748b">firehose-github-events-30s</text>
+  <text x="272" y="481" font-size="9" font-family="monospace" fill="#64748b">self-heal-6h . scanners . heartbeat</text>
+  <text x="272" y="494" font-size="9" font-family="monospace" fill="#64748b">named vol -- no task storm on restart</text>
+
+  <rect x="493" y="354" width="218" height="162" rx="5" fill="#1a1f2e" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="602" y="374" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#93c5fd">Celery Workers</text>
+  <text x="602" y="387" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">task_acks_late=True</text>
+  <text x="509" y="403" font-size="9" font-family="monospace" fill="#64748b">worker-core       q=celery    x4</text>
+  <text x="509" y="416" font-size="9" font-family="monospace" fill="#64748b">worker-scrape     q=scrape    x1  (serialised)</text>
+  <text x="509" y="429" font-size="9" font-family="monospace" fill="#64748b">worker-scanners   q=scanners  x2</text>
+  <text x="509" y="442" font-size="9" font-family="monospace" fill="#64748b">worker-validators q=validation x4</text>
+  <text x="509" y="455" font-size="9" font-family="monospace" fill="#64748b">_run_sync() canonical: celery_app.py</text>
+  <rect x="509" y="468" width="190" height="14" rx="3" fill="#2d1f1f" stroke="#ef4444" stroke-width="0.5"/>
+  <text x="604" y="479" text-anchor="middle" font-size="8" font-family="monospace" fill="#ef4444" font-weight="600">task_failure signal -&gt; audit_logs dead-letter</text>
+  <rect x="509" y="486" width="190" height="14" rx="3" fill="#1e3a2e" stroke="#22c55e" stroke-width="0.5"/>
+  <text x="604" y="497" text-anchor="middle" font-size="8" font-family="monospace" fill="#22c55e" font-weight="600">all 8 images built + healthy</text>
+
+  <rect x="723" y="354" width="218" height="100" rx="5" fill="#1a1f2e" stroke="#334155"/>
+  <text x="832" y="374" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">API :8011 / Frontend :3000</text>
+  <text x="832" y="387" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">FastAPI . CORS explicit allowlist</text>
+  <text x="832" y="400" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">EXTRA_CORS_ORIGINS env hatch</text>
+  <text x="832" y="413" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">/health . /monitor . /scan . /creds</text>
+  <rect x="723" y="462" width="218" height="44" rx="5" fill="#1a1f2e" stroke="#475569"/>
+  <text x="832" y="480" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">Pattern B: image-baked source</text>
+  <text x="832" y="493" text-anchor="middle" font-size="10" font-family="monospace" fill="#94a3b8">every .py change -&gt; compose build</text>
+
+  <rect x="953" y="354" width="232" height="162" rx="5" fill="#1a1f2e" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="1069" y="374" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#86efac">Healthchecks (all 9)</text>
+  <text x="969" y="390" font-size="9" font-family="monospace" fill="#64748b">api              HTTP /health</text>
+  <text x="969" y="403" font-size="9" font-family="monospace" fill="#64748b">redis            redis-cli ping</text>
+  <text x="969" y="416" font-size="9" font-family="monospace" fill="#64748b">worker-core      redis-cli ping</text>
+  <text x="969" y="429" font-size="9" font-family="monospace" fill="#64748b">worker-scrape    redis-cli ping</text>
+  <text x="969" y="442" font-size="9" font-family="monospace" fill="#64748b">worker-scanners  redis-cli ping</text>
+  <text x="969" y="455" font-size="9" font-family="monospace" fill="#64748b">worker-validators redis-cli ping</text>
+  <text x="969" y="468" font-size="9" font-family="monospace" fill="#64748b">bot              /tmp/bot_alive freshness &lt;=60s</text>
+  <text x="969" y="481" font-size="9" font-family="monospace" fill="#64748b">beat             schedule file celery:celery</text>
+  <rect x="969" y="490" width="200" height="14" rx="3" fill="#1e3a2e" stroke="#22c55e" stroke-width="0.5"/>
+  <text x="1069" y="501" text-anchor="middle" font-size="8" font-family="monospace" fill="#22c55e" font-weight="600">CURRENT STATUS: all healthy / starting</text>
+
+  <rect x="1197" y="354" width="178" height="162" rx="5" fill="#1a1f2e" stroke="#334155"/>
+  <text x="1286" y="374" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">docker-entrypoint.sh</text>
+  <text x="1213" y="390" font-size="9" font-family="monospace" fill="#64748b">mkdir -p /app/beat /app/sessions</text>
+  <text x="1213" y="403" font-size="9" font-family="monospace" fill="#64748b">chown celery /app/beat</text>
+  <text x="1213" y="416" font-size="9" font-family="monospace" fill="#64748b">clear stale session leases (DB)</text>
+  <text x="1213" y="429" font-size="9" font-family="monospace" fill="#64748b">exec celery worker / beat</text>
+  <text x="1213" y="450" font-size="9" font-family="monospace" fill="#64748b">startup.bat (Windows autostart)</text>
+  <text x="1213" y="463" font-size="9" font-family="monospace" fill="#64748b">-&gt; docker compose up -d</text>
+  <text x="1213" y="476" font-size="9" font-family="monospace" fill="#64748b">-&gt; post_startup.py</text>
+
+  <!-- PERSISTENCE -->
+  <rect x="24" y="566" width="800" height="124" rx="5" fill="#1a1f2e" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="424" y="586" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#93c5fd">Supabase PostgreSQL -- finjklyfedduvtzqjqad</text>
+  <text x="44" y="602" font-size="8.5" font-family="monospace" fill="#64748b">discovered_credentials  id . bot_token_enc . status CHECK(pending/active/revoked/cold) . source . chat_id . topic_id . score . meta(jsonb)</text>
+  <text x="44" y="615" font-size="8.5" font-family="monospace" fill="#64748b">exfiltrated_messages    id . cred_id . content . is_broadcasted . broadcast_claimed_at . topic_id . telegram_msg_id</text>
+  <text x="44" y="628" font-size="8.5" font-family="monospace" fill="#64748b">telegram_accounts       id . session_path . status . locked_by . locked_until</text>
+  <text x="44" y="641" font-size="8.5" font-family="monospace" fill="#64748b">audit_logs              id . event_type . actor . details(jsonb, tokens REDACTED) . created_at  [pruned weekly 90d]</text>
+  <text x="44" y="654" font-size="8.5" font-family="monospace" fill="#64748b">pivot_relationships . keepalive_log . groups / topics</text>
+  <text x="44" y="670" font-size="8.5" font-family="monospace" fill="#64748b">Indexes: idx_msgs_broadcast_queue(is_broadcasted=F partial) . idx_msgs_claimed_at . idx_creds_source . idx_exfilt_claimed + status CHECK</text>
+
+  <rect x="836" y="566" width="540" height="124" rx="5" fill="#1a1f2e" stroke="#475569"/>
+  <text x="1106" y="586" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#e2e8f0">Docker Named Volumes</text>
+  <text x="856" y="602" font-size="9" font-family="monospace" fill="#64748b">sessions      /app/sessions   Telethon .session files (SQLite integrity-checked on boot)</text>
+  <text x="856" y="615" font-size="9" font-family="monospace" fill="#64748b">redis_data    /data           Redis RDB snapshots (save 60 1)</text>
+  <text x="856" y="628" font-size="9" font-family="monospace" fill="#64748b">beat_schedule /app/beat       celerybeat-schedule (celery:celery owned, Dockerfile mkdir)</text>
+  <text x="856" y="641" font-size="9" font-family="monospace" fill="#64748b">imports       /app/imports    CSV import pipeline drop-zone</text>
+  <text x="856" y="657" font-size="9" font-family="monospace" fill="#64748b">All prefixed: ${COMPOSE_PROJECT_NAME:-telegramhunter}_*</text>
+  <text x="856" y="670" font-size="9" font-family="monospace" fill="#64748b">beat vol prevents task storm on restart (lost /tmp was root cause of all scanners firing at once)</text>
+
+  <!-- OPS -->
+  <rect x="24" y="742" width="338" height="248" rx="5" fill="#1a1f2e" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="193" y="762" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#fcd34d">Audit &amp; Safety Layers</text>
+  <text x="40" y="778" font-size="9" font-family="monospace" fill="#64748b">Token redaction:  _redact_details() strips Telegram token pattern</text>
+  <text x="40" y="791" font-size="9" font-family="monospace" fill="#64748b">                  from audit_log details before DB write + log()</text>
+  <text x="40" y="808" font-size="9" font-family="monospace" fill="#64748b">Own-bot guard:    2 layers -- scanner output + validator entry</text>
+  <text x="40" y="821" font-size="9" font-family="monospace" fill="#64748b">                  IDs: 8737065943 . 1209926912 . 8445005877 . 8367748717</text>
+  <text x="40" y="838" font-size="9" font-family="monospace" fill="#64748b">CORS:             explicit allowlist, EXTRA_CORS_ORIGINS env escape</text>
+  <text x="40" y="855" font-size="9" font-family="monospace" fill="#64748b">Dead-letter:      task_failure signal -&gt; audit_logs thread</text>
+  <text x="40" y="868" font-size="9" font-family="monospace" fill="#64748b">                  event: task_permanent_failure</text>
+  <text x="40" y="885" font-size="9" font-family="monospace" fill="#64748b">Session health:   SQLite check on scan; corrupt -&gt; .corrupt.{ts}</text>
+  <text x="40" y="898" font-size="9" font-family="monospace" fill="#64748b">Lock/cooldown:    user_agent:lock:{n} != user_agent:cooldown:{n}</text>
+  <text x="40" y="911" font-size="9" font-family="monospace" fill="#64748b">                  (was same key -- release_lock silently cleared cooldown)</text>
+  <text x="40" y="928" font-size="9" font-family="monospace" fill="#64748b">Rate limiter:     TTL set on count==1 OR ttl&lt;0 (pipeline-race fix)</text>
+  <text x="40" y="941" font-size="9" font-family="monospace" fill="#64748b">Broadcast pool:   bots only -- MTProto restricted to admin ops</text>
+  <text x="40" y="958" font-size="9" font-family="monospace" fill="#64748b">Async guard:      _is_monitor_group() raises RuntimeError if called</text>
+  <text x="40" y="971" font-size="9" font-family="monospace" fill="#64748b">                  from running event loop (forces callers to async path)</text>
+
+  <rect x="374" y="742" width="338" height="248" rx="5" fill="#1a1f2e" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="543" y="762" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#fca5a5">Failure Recovery</text>
+  <text x="390" y="778" font-size="9" font-family="monospace" fill="#64748b">Stale claim:    CLAIM_TIMEOUT=15min (was 5 -- shorter than 750s batch)</text>
+  <text x="390" y="791" font-size="9" font-family="monospace" fill="#64748b">                reclaim: .lt(broadcast_claimed_at, stale_iso)</text>
+  <text x="390" y="808" font-size="9" font-family="monospace" fill="#64748b">Bcast lock:     threading.Event + lock.reacquire() every 90s</text>
+  <text x="390" y="821" font-size="9" font-family="monospace" fill="#64748b">                lock never expires mid 750s worst-case batch</text>
+  <text x="390" y="838" font-size="9" font-family="monospace" fill="#64748b">Matkap crash:   sentinel key TTL=3600s survives worker death</text>
+  <text x="390" y="851" font-size="9" font-family="monospace" fill="#64748b">                cleanup_matkap_bots hourly scan + evict</text>
+  <text x="390" y="868" font-size="9" font-family="monospace" fill="#64748b">Session lease:  entrypoint clears locked_by/locked_until on start</text>
+  <text x="390" y="881" font-size="9" font-family="monospace" fill="#64748b">                WORKER_INSTANCE_ID stable across fork + recreate</text>
+  <text x="390" y="898" font-size="9" font-family="monospace" fill="#64748b">Beat persist:   named volume -- no task storm on container restart</text>
+  <text x="390" y="911" font-size="9" font-family="monospace" fill="#64748b">Poll conflict:  3-retry loop 10s backoff on PTB Conflict</text>
+  <text x="390" y="928" font-size="9" font-family="monospace" fill="#64748b">Topic drift:    hourly audit_active_topics + self_heal 6h</text>
+  <text x="390" y="941" font-size="9" font-family="monospace" fill="#64748b">scan_retry:     retryable=true + last_gate_at&lt;6h (no full cold scan)</text>
+  <text x="390" y="958" font-size="9" font-family="monospace" fill="#64748b">Session corrupt: renamed .session.corrupt.{ts}, excluded from pool</text>
+  <text x="390" y="971" font-size="9" font-family="monospace" fill="#64748b">task_acks_late: message re-queued if worker dies mid-task</text>
+
+  <rect x="724" y="742" width="654" height="248" rx="5" fill="#1a1f2e" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="1051" y="762" text-anchor="middle" font-size="12" font-weight="700" font-family="monospace" fill="#d8b4fe">Remaining Known Issues (deferred by design)</text>
+  <text x="740" y="782" font-size="9" font-family="monospace" fill="#64748b">MUST  -- getMe rate limit key is per-worker-process. count==1 TTL fix applied but at scale</text>
+  <text x="740" y="795" font-size="9" font-family="monospace" fill="#64748b">         2+ validator workers they use different Redis keys, losing the per-IP rate window</text>
+  <text x="740" y="808" font-size="9" font-family="monospace" fill="#64748b">         Fix: shared key across all workers (single namespace, no per-process prefix)</text>
+  <text x="740" y="825" font-size="9" font-family="monospace" fill="#64748b">SHOULD -- user_agent busy-wait under load (196 tasks / 4 sessions). worker-scrape=1</text>
+  <text x="740" y="838" font-size="9" font-family="monospace" fill="#64748b">          serialises tasks but no backpressure on session acquisition retry loops</text>
+  <text x="740" y="855" font-size="9" font-family="monospace" fill="#64748b">SHOULD -- Flood control errors in broadcast log (visible above). 1 bot token at 1.5s/msg</text>
+  <text x="740" y="868" font-size="9" font-family="monospace" fill="#64748b">          floods are expected under large backlogs. Fix: add more credentials or reduce batch</text>
+  <text x="740" y="885" font-size="9" font-family="monospace" fill="#64748b">LOW   -- scanner_tasks.py 1313 lines / scraper_srv.py 1063 lines</text>
+  <text x="740" y="898" font-size="9" font-family="monospace" fill="#64748b">          Split deferred: skill telegramhunter-refactor-monoliths saved, safe as-is</text>
+  <text x="740" y="915" font-size="9" font-family="monospace" fill="#64748b">LOW   -- _run_sync() in both celery_app.py (canonical) and scanner_tasks.py (compat)</text>
+  <text x="740" y="928" font-size="9" font-family="monospace" fill="#64748b">          Consolidate during monolith split</text>
+  <text x="740" y="945" font-size="9" font-family="monospace" fill="#64748b">INFO  -- All 26 May 2026 audit items + 13 blocker items resolved</text>
+  <text x="740" y="958" font-size="9" font-family="monospace" fill="#64748b">          2 commits: b93f734 (26-item) + 2fbf923 (13-item blocker)</text>
+  <text x="740" y="971" font-size="9" font-family="monospace" fill="#64748b">          Next planned: telegramhunter-refactor-monoliths (dedicated session)</text>
+
+  <!-- FLOW ARROWS -->
+  <line x1="178" y1="100" x2="376" y2="100" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrB)"/>
+  <line x1="178" y1="185" x2="376" y2="185" stroke="#8b5cf6" stroke-width="1.5" marker-end="url(#arrB)"/>
+  <line x1="96" y1="122" x2="96" y2="134" stroke="#475569" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="524" y1="100" x2="696" y2="100" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrY)"/>
+  <line x1="524" y1="185" x2="696" y2="185" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrY)"/>
+  <line x1="1024" y1="100" x2="1060" y2="100" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrG)"/>
+  <line x1="1219" y1="108" x2="1234" y2="108" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrG)"/>
+</svg>

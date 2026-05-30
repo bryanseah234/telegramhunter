@@ -24,6 +24,7 @@ os.environ["MONITOR_BOT_TOKEN"] = "123:ABC,456:DEF,789:GHI"
 os.environ["MONITOR_GROUP_ID"] = "-100123"
 os.environ["TELEGRAM_API_ID"] = "12345"
 os.environ["TELEGRAM_API_HASH"] = "abc"
+os.environ["MONITOR_API_KEY"] = "test-monitor-key-for-pytest"
 
 from app.api.main import app
 
