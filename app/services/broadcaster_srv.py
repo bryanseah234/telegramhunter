@@ -16,17 +16,14 @@ class BroadcasterService:
         self._bots = {} # token -> Bot instance
         self._failed_tokens: set = set()
 
-        # Combine bots and user sessions into a rotation pool
-        # We use placeholders for user sessions to trigger UserAgentService
+        # Rotation pool: bots ONLY for broadcast messages.
+        # MTProto user sessions are reserved exclusively for admin operations
+        # (topic creation, group management, Matkap scraping).
+        # Sending broadcasts via a real user account is an OPSEC risk — real
+        # phone numbers are visible to group admins in the member list.
         self._pool = []
         for token in self.bot_tokens:
             self._pool.append({"type": "bot", "id": token})
-        
-        # User accounts are handled dynamically via UserAgentService
-        # We add 2 placeholders if user sessions exist to increase rotation frequency
-        user_agent._discover_sessions()
-        for i in range(len(user_agent.sessions)):
-             self._pool.append({"type": "user", "id": f"session_{i}"})
 
         self._cycle = itertools.cycle(self._pool)
         self._last_send_time = 0

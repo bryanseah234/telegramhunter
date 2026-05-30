@@ -390,6 +390,53 @@ class UserAgentService:
             finally:
                 await self._disconnect()
 
+    async def kick_bot_from_group(self, bot_username: str, group_id: int | str) -> bool:
+        """
+        Kicks/bans then unbans a bot from the monitor group.
+        Used after Matkap-style forwarding to remove the victim bot
+        so it cannot see further group messages (OPSEC cleanup).
+        """
+        async with self.lock:
+            if not await self.start():
+                return False
+            try:
+                bot_entity = await self.client.get_entity(bot_username)
+                if str(group_id).lstrip("-").isdigit():
+                    target = int(group_id)
+                else:
+                    target = group_id
+                group_entity = await self.client.get_entity(target)
+
+                from telethon.tl.functions.channels import EditBannedRequest
+                from telethon.tl.types import ChatBannedRights
+                from datetime import datetime, timezone, timedelta
+
+                # Ban (kicks non-admin bots immediately)
+                await self.client(EditBannedRequest(
+                    channel=group_entity,
+                    participant=bot_entity,
+                    banned_rights=ChatBannedRights(
+                        until_date=datetime.now(timezone.utc) + timedelta(seconds=30),
+                        view_messages=True,
+                    )
+                ))
+                # Unban so the bot can be re-invited in the future if needed
+                await self.client(EditBannedRequest(
+                    channel=group_entity,
+                    participant=bot_entity,
+                    banned_rights=ChatBannedRights(until_date=None)
+                ))
+                logger.info(f"    ✅ [UserAgent] Kicked @{bot_username} from group (ban+unban).")
+                return True
+            except errors.FloodWaitError as e:
+                await self._handle_flood_error(e)
+                return False
+            except Exception as e:
+                logger.warning(f"    ⚠️ [UserAgent] kick_bot_from_group failed for @{bot_username}: {e}")
+                return False
+            finally:
+                await self._disconnect()
+
     async def _handle_flood_error(self, e):
         """Logs and sets persistent cooldown for FloodWaitError (Per Session)."""
         from app.core.redis_srv import redis_srv

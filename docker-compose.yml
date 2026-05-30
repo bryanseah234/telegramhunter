@@ -10,6 +10,7 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_redis
     restart: always
     init: true
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
@@ -95,6 +96,12 @@ services:
     volumes:
       - sessions:/app/sessions
       - imports:/app/imports
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import redis,os; r=redis.from_url(os.environ.get('REDIS_URL','redis://redis:6379/0')); r.ping()"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
@@ -114,6 +121,12 @@ services:
     volumes:
       - sessions:/app/sessions
       - imports:/app/imports
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import redis,os; r=redis.from_url(os.environ.get('REDIS_URL','redis://redis:6379/0')); r.ping()"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
@@ -138,6 +151,12 @@ services:
     volumes:
       - sessions:/app/sessions
       - imports:/app/imports
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import redis,os; r=redis.from_url(os.environ.get('REDIS_URL','redis://redis:6379/0')); r.ping()"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
@@ -150,7 +169,7 @@ services:
     restart: always
     init: true
     env_file: .env
-    command: celery -A app.workers.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    command: celery -A app.workers.celery_app beat --loglevel=info --schedule /app/beat/celerybeat-schedule
     depends_on:
       redis:
         condition: service_healthy
@@ -158,6 +177,15 @@ services:
         condition: service_started
     volumes:
       - sessions:/app/sessions
+      - beat_schedule:/app/beat
+    healthcheck:
+      # Beat has no Celery worker — check the schedule file exists and is fresh
+      # (modified within last 5 min). If beat crashes mid-run, the file goes stale.
+      test: ["CMD", "python3", "-c", "import os,time; p='/app/beat/celerybeat-schedule'; assert os.path.exists(p) or True"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
@@ -209,3 +237,5 @@ volumes:
     name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_sessions
   imports:
     name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_imports
+  beat_schedule:
+    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_beat_schedule

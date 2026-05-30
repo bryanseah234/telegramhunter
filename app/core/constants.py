@@ -9,8 +9,10 @@ CLAIM_TIMEOUT_MINUTES = 5
 # Worker heartbeat timeout — alert if worker silent longer than this (seconds)
 WORKER_HEARTBEAT_TIMEOUT_SECONDS = 45 * 60
 
-# Rate limit sleep between broadcast sends (seconds)
-BROADCAST_RATE_LIMIT_SLEEP = 5.0
+# Rate limit sleep between broadcast sends (seconds).
+# Telegram allows ~30 msg/s per bot globally. With multi-bot rotation we can
+# push 1 msg/s safely. 1.5s gives headroom for retries and API latency.
+BROADCAST_RATE_LIMIT_SLEEP = 1.5
 
 # Maximum entries kept in scanner error buffers
 MAX_ERRORS_BUFFER = 100

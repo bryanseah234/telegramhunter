@@ -97,7 +97,9 @@ def _token_already_validated(token: str) -> bool:
         return True
 
     token_hash = hashlib.sha256(token.encode()).hexdigest()
-    key = f"validated:recent:{token_hash[:16]}"
+    # Use full 64-char hash as Redis key suffix — truncating to 16 chars halved
+    # the collision space to 64-bit, which is borderline for a key-space of 100k+ tokens.
+    key = f"validated:recent:{token_hash}"
     try:
         # SET NX EX = atomic check-and-set with 24h TTL
         was_new = redis_client.set(key, "1", nx=True, ex=86400)
