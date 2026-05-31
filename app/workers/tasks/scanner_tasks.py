@@ -14,8 +14,6 @@ from app.services.scanners import (
     FofaService,
     GithubService,
     GitlabService,
-    GrepAppService,
-    PastebinService,
     ExaService,
     ShodanService,
     UrlScanService,
@@ -27,8 +25,10 @@ from app.services.scanners_extension import (
     GoogleSearchService,
     BitbucketService,
     NetlasService,
-    GithubGistService,   # BUG-001: was incorrectly imported from scanners.py
-    PublicWwwService,    # BUG-002: needed for publicwww_srv instantiation
+    GithubGistService,
+    PublicWwwService,
+    GrepAppService,
+    PastebinService,
 )
 from app.workers.celery_app import app
 from app.workers.tasks.flow_tasks import (  # Import for triggering and DB

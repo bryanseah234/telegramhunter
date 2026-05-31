@@ -402,15 +402,36 @@ def refresh_pending_tokens():
 async def _refresh_pending_tokens_async():
     if redis_client.get("system:paused"):
         return "paused"
-    # Grab up to 500 oldest-validated pending tokens (no chat_id)
-    res = await async_execute(
+
+    # Cursor-based pagination — advances through ALL pending tokens across successive
+    # runs instead of re-processing the same oldest-500 every time.
+    # Key stores the last-seen `updated_at` ISO string; reset when batch is empty.
+    REFRESH_CURSOR_KEY = "refresh_pending:cursor"
+    REFRESH_BATCH_SIZE = int(os.getenv("REFRESH_PENDING_BATCH_SIZE", 500))
+    cursor_val = redis_client.get(REFRESH_CURSOR_KEY)
+
+    q = (
         db.table("discovered_credentials")
         .select("id, bot_token, meta")
         .is_("chat_id", "null")
         .order("updated_at", desc=False)
-        .limit(500)
+        .limit(REFRESH_BATCH_SIZE)
     )
+    if cursor_val:
+        q = q.gt("updated_at", cursor_val)
+    res = await async_execute(q)
     rows = res.data or []
+
+    # Advance or reset cursor
+    try:
+        if rows:
+            redis_client.set(REFRESH_CURSOR_KEY, rows[-1]["updated_at"], ex=86400 * 7)
+        else:
+            redis_client.delete(REFRESH_CURSOR_KEY)  # full pass done, restart
+            logger.info("[Refresh] Full pending sweep complete, cursor reset.")
+    except Exception:
+        pass
+
     enqueued = 0
     for row in rows:
         encrypted_token = row.get("bot_token")

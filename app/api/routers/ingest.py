@@ -154,9 +154,30 @@ async def ingest_extension_credentials(
             "meta": base_meta,
         }
 
+        # Guard: never persist our own monitor/protected bot tokens.
+        # The ingest endpoint bypasses the scanner->validate_token path so
+        # the own-bot check that lives in _is_own_bot_token() would be skipped
+        # without this explicit gate.
+        from app.workers.tasks.scanner_tasks import _is_own_bot_token
+        if _is_own_bot_token(token):
+            logger.warning(f"Ingest: rejected own-bot token {token[:10]}...")
+            skipped += 1
+            continue
+
         try:
-            await _exec(db.table("discovered_credentials").insert(new_data))
+            res = await _exec(db.table("discovered_credentials").insert(new_data))
             inserted += 1
+            # Trigger enrichment so confidence_score, member_count, and topic_id
+            # are populated — without this the credential appears in broadcast_pending
+            # with no topic and gets silently skipped.
+            if res.data:
+                new_id = res.data[0].get("id")
+                if new_id:
+                    try:
+                        from app.workers.tasks.flow_tasks import enrich_credential
+                        enrich_credential.delay(new_id)
+                    except Exception as _enrich_err:
+                        logger.warning(f"Could not enqueue enrich_credential for {new_id}: {_enrich_err}")
         except Exception as e:
             # Usually unique constraint on token_hash or other transient errors
             logger.warning(f"Supabase insert failed for token_hash {token_hash[:12]}...: {e}")
