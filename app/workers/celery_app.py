@@ -114,22 +114,23 @@ def on_task_failure(task_id, exception, traceback, einfo, args, kwargs, **extra)
     # Persist to audit_logs asynchronously — don't block the Celery signal thread.
     def _persist():
         try:
-            from app.core.audit import log_event
-            import asyncio as _aio
+            from app.core.database import db
+            import datetime
             loop = get_worker_loop()
-            loop.call_soon_threadsafe(
-                lambda: loop.create_task(
-                    log_event(
-                        event_type="task_permanent_failure",
-                        actor="celery_worker",
-                        details={
+            async def _insert():
+                await asyncio.to_thread(
+                    lambda: db.table("audit_logs").insert({
+                        "event_type": "task_permanent_failure",
+                        "actor": "celery_worker",
+                        "details": {
                             "task_name": task_name,
                             "task_id": task_id,
                             "exception": exc_str,
                         },
-                    )
+                        "created_at": datetime.datetime.utcnow().isoformat(),
+                    }).execute()
                 )
-            )
+            loop.call_soon_threadsafe(lambda: loop.create_task(_insert()))
         except Exception as e:
             logger.warning(f"[DeadLetter] Could not persist failure to audit_logs: {e}")
 
