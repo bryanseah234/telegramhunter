@@ -242,7 +242,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         state.isRunning &&
         !state.isPaused
     ) {
-        chrome.alarms.create("scrape_page", { delayInMinutes: 0.05 }); // ~3s
+        chrome.alarms.create("scrape_page", { delayInMinutes: 0.083 }); // ~5s — Vue needs time to hydrate after DOM complete
     }
 });
 
