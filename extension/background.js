@@ -266,6 +266,13 @@ function nextCountry() {
     state.countryIndex++;
     state.countriesDone++;
     saveState();
+
+    // Auto-upload every 10 countries to avoid losing data if scan stops
+    if (state.countriesDone > 0 && state.countriesDone % 10 === 0 && state.results.length > 0) {
+        console.log('[BG] Auto-upload checkpoint at country', state.countriesDone);
+        uploadToSupabase().catch(e => console.warn('[BG] Auto-upload failed:', e));
+    }
+
     processNextCountry();
 }
 
@@ -312,7 +319,21 @@ async function processNextCountry() {
     const encoded    = btoa(fullQuery);
     const targetUrl  = `https://${state.domain}/result?qbase64=${encoded}`;
 
-    await chrome.tabs.update(activeTabId, { url: targetUrl });
+    // Navigate the tracked tab — if it's dead, find a FOFA tab or bail clearly
+    try {
+        await chrome.tabs.update(activeTabId, { url: targetUrl });
+    } catch (e) {
+        // Tab is gone — try to find any open FOFA tab to take over
+        const fofaTabs = await chrome.tabs.query({ url: ['https://fofa.info/*','https://en.fofa.info/*'] });
+        if (fofaTabs.length) {
+            activeTabId = fofaTabs[0].id;
+            chrome.storage.local.set({ activeTabId });
+            await chrome.tabs.update(activeTabId, { url: targetUrl });
+        } else {
+            pauseScan('⚠️ FOFA tab was closed — reopen FOFA then click Resume');
+            return;
+        }
+    }
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -561,7 +582,7 @@ async function uploadToSupabase() {
 
     try {
         const controller = new AbortController();
-        const timeout    = setTimeout(() => controller.abort(), 20000);
+        const timeout    = setTimeout(() => controller.abort(), 60000); // 60s — large payloads need time
         const res = await fetch(`${apiUrl}/ingest/extension/credentials`, {
             method:  "POST",
             headers,
