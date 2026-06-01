@@ -1,28 +1,26 @@
 <!DOCTYPE html>
 <html>
-
 <head>
   <meta charset="UTF-8">
   <link rel="stylesheet" href="style.css">
 </head>
-
 <body>
   <div class="container">
     <h3>🦅 Fofa Scraper</h3>
-
     <div class="status-box">
       <div id="status">Ready</div>
-      <div>Countries: <span id="count-country">0</span></div>
-      <div>Found: <span id="count-found">0</span> <span style="font-size: 0.8em">(<span id="count-valid"
-            style="color: #4caf50">0</span> valid)</span></div>
+      <div>Countries: <span id="count-country">0</span> / <span id="count-total">48</span></div>
+      <div>Found: <span id="count-found">0</span> &nbsp;
+        <span style="font-size:0.8em">(<span id="count-valid" style="color:#4caf50">0</span> valid)</span>
+      </div>
     </div>
   </div>
 
   <div class="controls">
     <button id="btn-start">🚀 Start</button>
-    <button id="btn-stop" class="hidden">🛑 Stop</button>
+    <button id="btn-stop"   class="hidden">🛑 Stop</button>
     <button id="btn-resume" class="hidden">▶️ Resume</button>
-    <button id="btn-upload" disabled>⬆️ Upload to Supabase</button>
+    <button id="btn-upload" disabled>⬆️ Upload</button>
   </div>
 
   <div class="settings">
@@ -31,30 +29,24 @@
       <option value="en.fofa.info" selected>en.fofa.info (Global)</option>
       <option value="fofa.info">fofa.info (CN/Stable)</option>
     </select>
-    <div style="height: 10px;"></div>
+    <div style="height:8px"></div>
+
     <label>Query:</label>
-    <input type="text" id="input-query" value='body="api.telegram.org"'>
-    <div style="height: 10px;"></div>
-    <hr style="border-color: #333; margin: 4px 0;">
-    <label style="color: #aaa; font-size: 0.85em;">Supabase (stored locally, never in code)</label>
-    <div style="height: 4px;"></div>
-    <label>Project URL:</label>
-    <input type="text" id="input-supabase-url" placeholder="https://xxxx.supabase.co">
-    <div style="height: 6px;"></div>
-    <label>Anon Key:</label>
-    <input type="password" id="input-supabase-key" placeholder="eyJ...">
-    <div style="height: 6px;"></div>
-    <label>Write Secret (x-extension-secret):</label>
-    <input type="password" id="input-extension-secret" placeholder="your app.extension_write_secret value">
-    <div style="height: 6px;"></div>
-    <hr style="border-color: #333; margin: 4px 0;">
-    <label style="color: #aaa; font-size: 0.85em;">API Upload (recommended — encrypts tokens server-side)</label>
-    <div style="height: 4px;"></div>
-    <label>API URL (optional):</label>
+    <input type="text" id="input-query" value='body="api.telegram.org/bot"'>
+    <div style="height:10px"></div>
+
+    <hr style="border-color:#333;margin:4px 0">
+    <label style="color:#aaa;font-size:0.85em">API config (stored in Chrome sync — paste once)</label>
+    <div style="height:4px"></div>
+
+    <label>API URL:</label>
     <input type="text" id="input-api-url" placeholder="http://localhost:8011">
+    <div style="height:6px"></div>
+
+    <label>Monitor Key (X-Monitor-Key):</label>
+    <input type="password" id="input-monitor-key" placeholder="your MONITOR_API_KEY value">
   </div>
 
   <script src="popup.js"></script>
 </body>
-
 </html>

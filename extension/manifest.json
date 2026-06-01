@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Fofa Scraper",
-  "version": "1.0",
-  "description": "Automated Fofa Scraper with Country Rotation",
+  "version": "1.1",
+  "description": "Automated FOFA scraper for Telegram bot token hunting",
   "permissions": [
     "activeTab",
     "alarms",
@@ -14,24 +14,22 @@
     "https://fofa.info/*",
     "https://en.fofa.info/*",
     "https://api.telegram.org/*",
-    "https://*.supabase.co/*",
     "http://localhost/*",
-    "http://127.0.0.1/*",
-    "https://*/*"
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
     "128": "icons/icon128.png"
   },
   "action": {
     "default_popup": "ui/popup.html",
     "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
+      "16":  "icons/icon16.png",
+      "48":  "icons/icon48.png",
       "128": "icons/icon128.png"
     }
   },
@@ -41,9 +39,7 @@
         "https://fofa.info/*",
         "https://en.fofa.info/*"
       ],
-      "js": [
-        "content.js"
-      ]
+      "js": ["content.js"]
     }
   ]
 }
