@@ -113,7 +113,7 @@ async function startScraping() {
             el.scrollIntoView({ behavior: "smooth", block: "center" });
             el.click();
 
-            const content = await waitForPopupContent(6000);
+            const content = await waitForPopupContent(8000);
 
             if (content) {
                 const { tokens, chatId, allChatIds } = extractData(content);
@@ -134,7 +134,7 @@ async function startScraping() {
             el.style.border = "";
 
             if (shouldStop) break;
-            await delay(400); // slightly more generous than 300ms for slower connections
+            await delay(800); // XHR takes ~700-900ms; give dialog time to fully close
         }
     }
 
@@ -207,12 +207,32 @@ function getVisibleItems() {
 
 async function waitForPopupContent(timeout) {
     let elapsed = 0;
+    let dialogSeenAt = null;
+
     while (elapsed < timeout) {
         // Try each popup content selector in order
         for (const sel of POPUP_CONTENT_SELECTORS) {
             const el = document.querySelector(sel);
             if (el && el.innerText && el.innerText.length > 30) {
                 return decodeHTMLEntities(el.innerText);
+            }
+        }
+
+        // Track when the dialog first appeared (XHR has been dispatched)
+        const dialogOpen = document.querySelector(
+            '.el-overlay.el-modal-dialog, .el-dialog__wrapper:not([style*="display: none"])'
+        );
+        if (dialogOpen && dialogOpen.textContent.trim().length > 10) {
+            if (!dialogSeenAt) dialogSeenAt = elapsed;
+            // Dialog has been open for 2.5s but source-content still empty?
+            // This host has no indexed body content — bail early, don't waste 8s.
+            if (elapsed - dialogSeenAt > 2500) {
+                log("Dialog open but no source content after 2.5s — empty host, skipping");
+                // Close the empty dialog before returning
+                const cb = document.querySelector('.el-dialog__headerbtn, [aria-label="Close"]');
+                if (cb) cb.click();
+                else document.body.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',keyCode:27,bubbles:true}));
+                return null;
             }
         }
 
@@ -227,8 +247,8 @@ async function waitForPopupContent(timeout) {
             } catch (_) { /* cross-origin */ }
         }
 
-        await delay(400);
-        elapsed += 400;
+        await delay(300);
+        elapsed += 300;
     }
     return null;
 }
