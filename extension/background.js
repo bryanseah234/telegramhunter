@@ -22,6 +22,8 @@ let state = {
     status: "Ready",
     query: BASE_QUERY_TEMPLATE,
     domain: "en.fofa.info",
+    domainMode: "en",        // "en" | "cn" | "both"
+    domainPhase: 1,          // 1 = first domain, 2 = second domain (both mode only)
     countryIndex: 0,
     countriesDone: 0,
     resultsFound: 0,
@@ -42,7 +44,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse(serializeState(state));
             return false;
         case "START_SCAN":
-            startScan(msg.query, msg.domain);
+            startScan(msg.query, msg.domain, msg.domainMode);
             break;
         case "STOP_SCAN":
             stopScan("Stopped by user");
@@ -132,16 +134,22 @@ function serializeState(s) {
 
 // --- CORE LOGIC ---
 
-async function startScan(userQuery, userDomain) {
+async function startScan(userQuery, userDomain, userDomainMode) {
     if (state.isRunning) return;
 
     const shuffled = [...COUNTRY_CODES].sort(() => Math.random() - 0.5);
+
+    // Resolve domain from mode
+    const mode   = userDomainMode || "en";
+    const domain = mode === "cn" ? "fofa.info" : "en.fofa.info";
 
     state.isRunning      = true;
     state.isPaused       = false;
     state.status         = "Starting...";
     state.query          = userQuery || BASE_QUERY_TEMPLATE;
-    state.domain         = userDomain || "en.fofa.info";
+    state.domainMode     = mode;
+    state.domainPhase    = 1;
+    state.domain         = domain;
     state.countryIndex   = 0;
     state.countriesDone  = 0;
     state.resultsFound   = 0;
@@ -218,13 +226,32 @@ async function processNextCountry() {
     }
 
     if (state.countryIndex >= state.countryList.length) {
+        // "both" mode: after EN phase, automatically continue on CN (or vice versa)
+        if (state.domainMode === "both" && state.domainPhase === 1) {
+            const nextDomain = "fofa.info";
+            const shuffled   = [...COUNTRY_CODES].sort(() => Math.random() - 0.5);
+            state.domainPhase  = 2;
+            state.domain       = nextDomain;
+            state.countryIndex = 0;
+            state.countryList  = shuffled;
+            state.status = `✅ EN done — switching to CN (fofa.info)...`;
+            saveState();
+            broadcastState();
+            // Small pause so the user sees the transition message
+            await new Promise(r => setTimeout(r, 1500));
+            processNextCountry();
+            return;
+        }
         stopScan("✅ Scan Complete!");
         await uploadToSupabase();
         return;
     }
 
     const country = state.countryList[state.countryIndex];
-    state.status = `Scanning: ${country} (${state.countriesDone + 1}/${state.countryList.length})`;
+    const phaseLabel = state.domainMode === "both"
+        ? ` [${state.domainPhase === 1 ? "EN" : "CN"} ${state.countriesDone + 1}/${state.countryList.length}]`
+        : ` (${state.countriesDone + 1}/${state.countryList.length})`;
+    state.status = `Scanning: ${country}${phaseLabel}`;
     saveState();
     broadcastState();
 

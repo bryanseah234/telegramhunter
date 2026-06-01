@@ -4,7 +4,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const btnResume     = document.getElementById("btn-resume");
     const btnUpload     = document.getElementById("btn-upload");
     const inputQuery    = document.getElementById("input-query");
-    const selectDomain  = document.getElementById("select-domain");
+    const selectMode    = document.getElementById("select-domain-mode");
     const inputApiUrl   = document.getElementById("input-api-url");
     const inputMonKey   = document.getElementById("input-monitor-key");
     const elTotal       = document.getElementById("count-total");
@@ -42,9 +42,9 @@ document.addEventListener("DOMContentLoaded", () => {
     btnStart.onclick = () => {
         saveConfig();
         chrome.runtime.sendMessage({
-            action: "START_SCAN",
-            query:  inputQuery.value,
-            domain: selectDomain.value,
+            action:     "START_SCAN",
+            query:      inputQuery.value,
+            domainMode: selectMode.value,
         });
     };
 
@@ -63,17 +63,16 @@ document.addEventListener("DOMContentLoaded", () => {
         document.getElementById("count-found").innerText   = state.resultsFound  || 0;
         const validEl = document.getElementById("count-valid");
         if (validEl) validEl.innerText = state.resultsValid || 0;
-        // Show total countries if available
-        if (elTotal && state.countryList) elTotal.innerText = state.countryList.length;
-
-        if (!state.isRunning && state.domain) selectDomain.value = state.domain;
+        if (!state.isRunning && state.domainMode) selectMode.value = state.domainMode;
+        // Both mode = 48 countries × 2 domains = 96 total
+        if (elTotal) elTotal.innerText = state.domainMode === "both" ? "96" : (state.countryList ? state.countryList.length : 48);
 
         if (state.isRunning && !state.isPaused) {
             btnStart.classList.add("hidden");
             btnStop.classList.remove("hidden");
             btnResume.classList.add("hidden");
             inputQuery.disabled   = true;
-            selectDomain.disabled = true;
+            selectMode.disabled   = true;
         } else if (state.isPaused) {
             btnStop.classList.add("hidden");
             btnResume.classList.remove("hidden");
@@ -87,7 +86,7 @@ document.addEventListener("DOMContentLoaded", () => {
             btnResume.classList.add("hidden");
             btnStart.classList.remove("hidden");
             inputQuery.disabled   = false;
-            selectDomain.disabled = false;
+            selectMode.disabled   = false;
             document.getElementById("status").style.color = "#fb0";
 
             if (state.resultsFound > 0) {
