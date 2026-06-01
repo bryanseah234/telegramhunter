@@ -1,14 +1,38 @@
-// --- CONSTANTS ---
-const CLICK_SELECTOR = 'i.iconfont.icon-daima';  // Code view icon button
-const POPUP_CONTENT_SELECTOR = '.source-content';  // The div containing HTML source
-const POPUP_DIALOG_SELECTOR = '.el-dialog__body';  // Fallback: the dialog body
-const RESULT_ROW_SELECTOR = '.hsxa-host-table-body .hsxa-host-table-body-item, .host-table-body .host-table-body-item, [class*="result-item"], [class*="host-item"]';
+// --- SELECTORS ---
+// Multiple fallback selectors for each FOFA UI element.
+// FOFA updates its CSS class names periodically — fallbacks keep the extension
+// working when the primary selector breaks without any code change needed.
 
-// Token regex reused in multiple places
-const TOKEN_REGEX = /(\d{8,10}:AA[A-Za-z0-9_-]{33})/g;
+const CLICK_SELECTORS = [
+    'i.iconfont.icon-daima',          // primary: "view source" icon (current FOFA)
+    'i.iconfont.icon-code',           // alt class seen in some regions
+    '.hsxa-host-table-body-item .iconfont',  // broader table-item icon match
+    '[title="Source code"]',          // attribute-based fallback
+    '[class*="icon-daima"]',          // partial class match
+    '[class*="icon-code"]',
+];
+
+const POPUP_CONTENT_SELECTORS = [
+    '.source-content',                // primary: HTML source viewer
+    '.el-dialog__body pre',           // code in pre block
+    '.el-dialog__body code',
+    '.el-dialog__body .CodeMirror-code',  // CodeMirror editor
+    '.el-dialog__body',               // whole dialog body as last resort
+];
+
+const RESULT_ROW_SELECTORS = [
+    '.hsxa-host-table-body .hsxa-host-table-body-item',
+    '.host-table-body .host-table-body-item',
+    '[class*="result-item"]',
+    '[class*="host-item"]',
+];
+
+// Token regex: 8-10 digit bot_id + colon + 35-char secret starting with AA
+// Matches both quoted and unquoted forms in source code
+const TOKEN_REGEX = /['"` ]?(\d{8,10}:AA[A-Za-z0-9_-]{33})['"` \n\r]?/g;
 
 // --- STATE ---
-let isWorking = false;
+let isWorking  = false;
 let shouldStop = false;
 
 // --- LISTENERS ---
@@ -21,8 +45,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         shouldStop = false;
         startScraping();
     } else if (msg.action === "STOP_WORK") {
-        shouldStop = true;
-        isWorking = false;
+        shouldStop  = true;
+        isWorking   = false;
         log("Stopped by user.");
     }
 });
@@ -32,69 +56,86 @@ async function startScraping() {
     isWorking = true;
     log("Starting scraping on this page...");
 
-    // 1. Check for Captcha
+    // 1. Captcha check
     if (checkForCaptcha()) {
         chrome.runtime.sendMessage({ action: "CAPTCHA_DETECTED" });
         isWorking = false;
         return;
     }
 
-    // 2. Fast pass: scan the entire page text for tokens without clicking anything.
-    //    FOFA sometimes shows tokens in URLs, titles, or snippets directly.
+    // Collect all tokens found on this page (dedup by token string)
+    const pageTokenMap = new Map(); // token -> {token, chatId}
+
+    // 2. Fast pass: scan full page text + all visible URLs for tokens
     const fastTokens = extractTokensFromText(document.body.innerText);
-    if (fastTokens.length > 0) {
-        log(`Fast pass: found ${fastTokens.length} token(s) in page text`);
-        for (const token of fastTokens) {
-            if (shouldStop) break;
-            chrome.runtime.sendMessage({ action: "RESULT_FOUND", data: { token, chatId: "" } });
-        }
+    // Also scan all href/src attributes — tokens sometimes appear in URLs
+    document.querySelectorAll("a[href], script[src]").forEach((el) => {
+        const url = el.href || el.src || "";
+        extractTokensFromText(url).forEach((t) => fastTokens.push(t));
+    });
+
+    const uniqueFast = [...new Set(fastTokens)];
+    if (uniqueFast.length > 0) {
+        log(`Fast pass: ${uniqueFast.length} token(s) in page text/URLs`);
+        uniqueFast.forEach((token) => {
+            if (!pageTokenMap.has(token)) pageTokenMap.set(token, { token, chatId: "" });
+        });
     }
 
-    // 3. Click pass: open each result's source popup for deeper extraction.
-    //    Skip this if shouldStop is already set.
+    // 3. Click pass: open each result's source popup for deep extraction
     const items = getVisibleItems();
-    if (items.length === 0 || shouldStop) {
-        log(shouldStop ? "Aborted." : "No clickable items. Moving on.");
-        if (!shouldStop) chrome.runtime.sendMessage({ action: "PAGE_COMPLETE" });
-        isWorking = false;
-        return;
+
+    if (items.length === 0) {
+        // Distinguish "no results for this country" from "selector broke"
+        const hasResultContainer = !!document.querySelector(
+            RESULT_ROW_SELECTORS.map(s => s.split(' ')[0]).join(',')
+        );
+        if (hasResultContainer) {
+            log("Result container found but no clickable icons — FOFA selector may have changed");
+        } else {
+            log("No results for this country — moving on");
+        }
+    } else if (!shouldStop) {
+        log(`Click pass: ${items.length} item(s)...`);
+
+        for (let i = 0; i < items.length; i++) {
+            if (shouldStop) { log("Aborted mid-page."); break; }
+
+            const el = items[i];
+            el.style.border = "3px solid #f0f";
+            el.scrollIntoView({ behavior: "smooth", block: "center" });
+            el.click();
+
+            const content = await waitForPopupContent(6000);
+
+            if (content) {
+                const { tokens, chatId, allChatIds } = extractData(content);
+                log(`Popup: ${tokens.length} token(s), chatId=${chatId || "none"}`);
+                tokens.forEach((token, idx) => {
+                    // Use the chatId from the same popup; for multi-token popups
+                    // try to pair each token with the nearest chat_id match
+                    const cid = allChatIds[idx] || chatId || "";
+                    if (!pageTokenMap.has(token)) {
+                        pageTokenMap.set(token, { token, chatId: cid });
+                    }
+                });
+            } else {
+                log("Popup timed out — skipping item");
+            }
+
+            closePopup();
+            el.style.border = "";
+
+            if (shouldStop) break;
+            await delay(400); // slightly more generous than 300ms for slower connections
+        }
     }
 
-    log(`Click pass: processing ${items.length} item(s)...`);
-
-    for (let i = 0; i < items.length; i++) {
-        if (shouldStop) {
-            log("Aborted mid-page.");
-            isWorking = false;
-            return;
-        }
-
-        const el = items[i];
-
-        el.style.border = "3px solid #f0f";
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        el.click();
-
-        // Wait for popup — but bail out early if FOFA shows a timeout/error notice
-        const content = await waitForPopupContent(5000);
-
-        if (content) {
-            log(`Popup content (${content.length} chars)`);
-            const data = extractData(content);
-            log(`Extracted: token=${data.token ? 'YES' : 'NO'}, chatId=${data.chatId || 'NO'}`);
-            if (data.token) {
-                chrome.runtime.sendMessage({ action: "RESULT_FOUND", data: data });
-                el.style.background = "#0f0";
-            }
-        } else {
-            log("Popup timed out or empty — skipping");
-        }
-
-        closePopup();
-        el.style.border = "";
-
-        if (shouldStop) break;
-        await delay(300);
+    // Send all found tokens as a single batch to background.js
+    const batch = Array.from(pageTokenMap.values());
+    if (batch.length > 0) {
+        log(`Sending batch of ${batch.length} token(s) to background`);
+        chrome.runtime.sendMessage({ action: "RESULTS_FOUND", data: batch });
     }
 
     log("Page complete.");
@@ -112,110 +153,102 @@ function log(msg) {
 }
 
 function delay(ms) {
-    return new Promise(r => setTimeout(r, ms));
+    return new Promise((r) => setTimeout(r, ms));
 }
 
 function checkForCaptcha() {
     const text = document.body.innerText;
-    return text.includes("Human-machine verification") || text.includes("Slide to complete puzzle");
+    return (
+        text.includes("Human-machine verification") ||
+        text.includes("Slide to complete puzzle") ||
+        text.includes("请完成安全验证") ||
+        !!document.querySelector(".verify-wrap, #captcha, .nc-container")
+    );
 }
 
 function getVisibleItems() {
-    const all = document.querySelectorAll(CLICK_SELECTOR);
-    return Array.from(all).filter(el => {
-        return el.offsetParent !== null; // Visible check
-    });
+    for (const selector of CLICK_SELECTORS) {
+        const all = document.querySelectorAll(selector);
+        const visible = Array.from(all).filter((el) => el.offsetParent !== null);
+        if (visible.length > 0) {
+            log(`Using selector: ${selector} (${visible.length} items)`);
+            return visible;
+        }
+    }
+    return [];
 }
 
 async function waitForPopupContent(timeout) {
     let elapsed = 0;
     while (elapsed < timeout) {
-        // Try .source-content first (where HTML source is displayed)
-        let sourceDiv = document.querySelector(POPUP_CONTENT_SELECTOR);
-        if (sourceDiv && sourceDiv.innerText.length > 50) {
-            // Decode HTML entities (FOFA shows &lt; &gt; etc)
-            return decodeHTMLEntities(sourceDiv.innerText);
+        // Try each popup content selector in order
+        for (const sel of POPUP_CONTENT_SELECTORS) {
+            const el = document.querySelector(sel);
+            if (el && el.innerText && el.innerText.length > 30) {
+                return decodeHTMLEntities(el.innerText);
+            }
         }
 
-        // Fallback: try the dialog body directly
-        let dialogBody = document.querySelector(POPUP_DIALOG_SELECTOR);
-        if (dialogBody && dialogBody.innerText.length > 50) {
-            return decodeHTMLEntities(dialogBody.innerText);
-        }
-
-        // Also try iframes (some pages use them)
-        const iframes = document.querySelectorAll('.el-dialog__body iframe');
+        // Try iframes inside the dialog
+        const iframes = document.querySelectorAll(".el-dialog__body iframe");
         for (const iframe of iframes) {
             try {
                 const doc = iframe.contentDocument || iframe.contentWindow.document;
-                if (doc && doc.body && doc.body.innerText.length > 50) {
+                if (doc && doc.body && doc.body.innerText.length > 30) {
                     return doc.body.innerText;
                 }
-            } catch (e) { /* cross-origin, ignore */ }
+            } catch (_) { /* cross-origin */ }
         }
 
-        await delay(500);
-        elapsed += 500;
+        await delay(400);
+        elapsed += 400;
     }
     return null;
 }
 
-// Decode HTML entities like &lt; &gt; &amp;
 function decodeHTMLEntities(text) {
-    const textarea = document.createElement('textarea');
-    textarea.innerHTML = text;
-    return textarea.value;
+    const ta = document.createElement("textarea");
+    ta.innerHTML = text;
+    return ta.value;
+}
+
+function extractTokensFromText(text) {
+    const found = [];
+    let m;
+    const re = new RegExp(TOKEN_REGEX.source, "g");
+    while ((m = re.exec(text)) !== null) {
+        found.push(m[1]);
+    }
+    return found;
 }
 
 function extractData(rawText) {
-    // Token regex: matches Telegram bot tokens in various formats
-    // Handles: BOT_TOKEN: '...', token = "...", "token": "...", or raw token
-    // Format: 8-10 digit bot_id : 35 char secret starting with "AA"
-    // Example: 8514017233:AAEAPjYrm0bIUvYgvzP68IlmAU14CBOt94E
-    const tokenRegex = /["']?(\d{8,10}:AA[A-Za-z0-9_-]{33})["']?/g;
+    // Extract ALL tokens from the popup source (not just the first)
+    const tokens = extractTokensFromText(rawText);
 
-    // ChatId regex: handles various JavaScript patterns
-    // Matches: CHAT_ID: '6394582655', chat_id = "-100...", chatId: 123
-    const chatIdRegex = /(?:CHAT_ID|chat_id|chatId|chat|target|cid)\s*[=:]\s*["']?(-?\d{5,20})["']?/gi;
-
-    // Find all tokens (there might be multiple)
-    const tokens = [];
-    let tokenMatch;
-    while ((tokenMatch = tokenRegex.exec(rawText)) !== null) {
-        tokens.push(tokenMatch[1]);
+    // Chat ID patterns — try to find one per token (positional match)
+    // Covers: CHAT_ID = '...', chat_id: ..., chatId=..., target: -100..., cid=...
+    const chatIdRegex = /(?:CHAT_ID|chat_id|chatId|chat|target|cid)\s*[=:]\s*['"]?(-?\d{5,20})['"]?/gi;
+    const allChatIds  = [];
+    let cm;
+    while ((cm = chatIdRegex.exec(rawText)) !== null) {
+        allChatIds.push(cm[1]);
     }
+    const chatId = allChatIds[0] || "";
 
-    // Find chatId - try multiple patterns
-    let chatId = '';
-    const idMatches = rawText.match(chatIdRegex);
-    if (idMatches && idMatches.length > 0) {
-        // Extract just the number from the first matched pattern
-        const numMatch = idMatches[0].match(/-?\d{5,20}/);
-        if (numMatch) chatId = numMatch[0];
-    }
+    console.log("[TH Extract] tokens:", tokens, "chatIds:", allChatIds);
 
-    // Debug logging
-    console.log("[TH Extract] Found tokens:", tokens);
-    console.log("[TH Extract] Found chatId:", chatId);
-    console.log("[TH Extract] Raw text sample:", rawText.substring(0, 500));
-
-    // Return first token found (most common case)
-    return {
-        token: tokens.length > 0 ? tokens[0] : '',
-        chatId: chatId,
-        allTokens: tokens  // Include all tokens in case multiple found
-    };
+    return { tokens, chatId, allChatIds };
 }
 
 function closePopup() {
-    // Simulate Escape
-    const evt = new KeyboardEvent('keydown', {
-        key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true
-    });
-    document.body.dispatchEvent(evt);
-
-    // Also try clicking close buttons if any exist
-    // .el-dialog__headerbtn
-    const closeBtn = document.querySelector('.el-dialog__headerbtn');
+    // Escape key
+    document.body.dispatchEvent(
+        new KeyboardEvent("keydown", {
+            key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true,
+        })
+    );
+    // Close button
+    const closeBtn = document.querySelector(".el-dialog__headerbtn, [aria-label='Close'], .dialog-close");
     if (closeBtn) closeBtn.click();
 }
