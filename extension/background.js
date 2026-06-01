@@ -56,6 +56,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "CAPTCHA_DETECTED":
             pauseScan("⚠️ Captcha Detected!");
             break;
+        case "LOGIN_REQUIRED":
+            pauseScan("🔒 Login required — log into FOFA then click Resume");
+            break;
         case "RESULTS_FOUND":
             // Batch: msg.data is an array of {token, chatId} objects
             handleResults(msg.data || []);

@@ -78,8 +78,10 @@ document.addEventListener("DOMContentLoaded", () => {
             btnStop.classList.add("hidden");
             btnResume.classList.remove("hidden");
             btnStart.classList.add("hidden");
-            document.getElementById("status").innerText = "⚠️ PAUSED — solve captcha then Resume";
-            document.getElementById("status").style.color = "red";
+            const statusEl = document.getElementById("status");
+            // Show the actual pause reason from background (login wall vs captcha)
+            statusEl.innerText = state.status;
+            statusEl.style.color = "red";
         } else {
             btnStop.classList.add("hidden");
             btnResume.classList.add("hidden");
