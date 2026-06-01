@@ -98,7 +98,8 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         }
 
-        // Upload button: only active when there are valid results and not running
-        btnUpload.disabled = !(state.resultsValid > 0 && !state.isRunning);
+        // Upload button: active when there are ANY found results and not currently running
+        // Backend validates tokens itself — send everything found, not just pre-validated ones
+        btnUpload.disabled = !(state.resultsFound > 0 && !state.isRunning);
     }
 });
