@@ -51,6 +51,33 @@ chrome.storage.local.get(["activeTabId"], (r) => {
     }
 });
 
+// Re-entry after SW restart: if a scan was running, kick it back into action
+// Chrome kills the SW after ~30s idle; on next alarm/event it restarts cold.
+// State and activeTabId are restored from storage above — but alarms are gone.
+// We recreate the watchdog and re-trigger processing if no alarm is pending.
+chrome.storage.local.get(["activeTabId"], (r) => {
+    if (!state.isRunning || state.isPaused) return;
+    // Recreate watchdog alarm (idempotent — Chrome dedupes by name)
+    chrome.alarms.create("watchdog", { periodInMinutes: 2 });
+    // Check if scrape_page alarm is already pending; if not, fire next country
+    chrome.alarms.get("scrape_page", (alarm) => {
+        if (!alarm && r.activeTabId) {
+            // Give tab 1s to settle after SW restart, then check its state
+            setTimeout(() => {
+                chrome.tabs.get(r.activeTabId, (tab) => {
+                    if (chrome.runtime.lastError || !tab) return;
+                    if (tab.status === "complete") {
+                        // Page already loaded — send SCRAPE_PAGE directly
+                        chrome.tabs.sendMessage(r.activeTabId, { action: "SCRAPE_PAGE" })
+                            .catch(() => nextCountry());
+                    }
+                    // If tab is still loading, onUpdated will fire and create the alarm
+                });
+            }, 1000);
+        }
+    });
+});
+
 // --- LISTENERS ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.action) {
@@ -174,7 +201,15 @@ async function startScan(userQuery, userDomain, userDomainMode) {
 
     saveState();
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // Find the FOFA tab — prefer active tab if it's FOFA, otherwise find any FOFA tab
+    let tab = null;
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTab && (activeTab.url || "").includes("fofa.info")) {
+        tab = activeTab;
+    } else {
+        const fofaTabs = await chrome.tabs.query({ url: ["https://fofa.info/*", "https://en.fofa.info/*"] });
+        tab = fofaTabs[0] || activeTab; // fall back to active tab if no FOFA tab open
+    }
     if (!tab) { stopScan("No active tab found"); return; }
     activeTabId = tab.id;
     chrome.storage.local.set({ activeTabId: tab.id });
