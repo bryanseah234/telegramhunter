@@ -37,6 +37,20 @@ loadState();
 
 let activeTabId = null;
 
+// Restore activeTabId from storage on SW restart
+chrome.storage.local.get(["activeTabId"], (r) => {
+    if (r.activeTabId) {
+        activeTabId = r.activeTabId;
+        // Verify the tab still exists — clear if it doesn't
+        chrome.tabs.get(activeTabId, (tab) => {
+            if (chrome.runtime.lastError || !tab) {
+                activeTabId = null;
+                chrome.storage.local.remove("activeTabId");
+            }
+        });
+    }
+});
+
 // --- LISTENERS ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.action) {
@@ -163,6 +177,7 @@ async function startScan(userQuery, userDomain, userDomainMode) {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) { stopScan("No active tab found"); return; }
     activeTabId = tab.id;
+    chrome.storage.local.set({ activeTabId: tab.id });
 
     chrome.alarms.create("watchdog", { periodInMinutes: 2 });
 
@@ -175,9 +190,11 @@ function stopScan(reason) {
     state.isPaused  = false;
     state.status    = reason || "Stopped";
     chrome.alarms.clearAll();
+    chrome.storage.local.remove("activeTabId");
     if (activeTabId) {
         chrome.tabs.sendMessage(activeTabId, { action: "STOP_WORK" }).catch(() => {});
     }
+    activeTabId = null;
     saveState();
     broadcastState();
 }
@@ -200,6 +217,7 @@ function resumeScan() {
     chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
         if (tab) {
             activeTabId = tab.id;
+            chrome.storage.local.set({ activeTabId: tab.id });
             chrome.tabs.sendMessage(activeTabId, { action: "RESUME_WORK" }).catch(() => {
                 processNextCountry(false);
             });
