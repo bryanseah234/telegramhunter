@@ -63,6 +63,13 @@ async function startScraping() {
         return;
     }
 
+    // 2. Login-wall check (FOFA -3000: IP flagged as crawler, login required)
+    if (checkLoginWall()) {
+        chrome.runtime.sendMessage({ action: "LOGIN_REQUIRED" });
+        isWorking = false;
+        return;
+    }
+
     // Collect all tokens found on this page (dedup by token string)
     const pageTokenMap = new Map(); // token -> {token, chatId}
 
@@ -163,6 +170,26 @@ function checkForCaptcha() {
         text.includes("Slide to complete puzzle") ||
         text.includes("请完成安全验证") ||
         !!document.querySelector(".verify-wrap, #captcha, .nc-container")
+    );
+}
+
+// Detect FOFA's IP-ban / login-required wall (-3000 error).
+// Returns true if the page is showing the login prompt instead of results.
+// Strings cover both the EN and CN FOFA domains.
+function checkLoginWall() {
+    const text = document.body.innerText;
+    return (
+        text.includes("-3000")                                         ||
+        text.includes("IP access is abnormal")                        ||
+        text.includes("suspected to be a web crawler")                ||
+        text.includes("can be used after logging in")                 ||
+        text.includes("IP访问异常")                                    ||
+        text.includes("疑似为爬虫")                                    ||
+        text.includes("登录账号可用")                                  ||
+        // FOFA login page itself (redirected away from results)
+        !!document.querySelector(
+            ".login-form, #login-form, [class*='login-container'], [action*='/login']"
+        )
     );
 }
 
