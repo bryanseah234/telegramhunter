@@ -185,3 +185,156 @@ async def ingest_extension_credentials(
 
     return ExtensionIngestResponse(inserted=inserted, updated=updated, skipped=skipped)
 
+
+# ---------------------------------------------------------------------------
+# Simple token paste endpoint — no file, no CSV, no extension needed.
+# Accepts raw tokens as:
+#   - newline/comma-separated plain text  (Content-Type: text/plain)
+#   - JSON array of strings               (Content-Type: application/json)
+# Requires X-Monitor-Key header.
+# Usage:
+#   curl -X POST http://localhost:8011/ingest/tokens \
+#     -H "X-Monitor-Key: <key>" \
+#     -H "Content-Type: text/plain" \
+#     --data-binary @tokens.txt
+# ---------------------------------------------------------------------------
+
+from fastapi import Request
+
+
+class TokenPasteResponse(BaseModel):
+    received: int
+    inserted: int
+    updated: int
+    skipped: int
+    duplicate: int
+
+
+@router.post("/tokens", response_model=TokenPasteResponse)
+async def ingest_tokens(
+    request: Request,
+    x_monitor_key: str | None = Header(None),
+):
+    """
+    Paste-style ingest: accepts a plain list of bot tokens, one per line
+    OR a JSON array of strings. No file upload needed.
+    """
+    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
+
+    content_type = request.headers.get("content-type", "")
+    raw_body = await request.body()
+
+    raw_tokens: list[str] = []
+
+    if "application/json" in content_type:
+        import json as _json
+        try:
+            parsed = _json.loads(raw_body)
+            if isinstance(parsed, list):
+                raw_tokens = [str(t).strip() for t in parsed if t]
+            elif isinstance(parsed, dict) and "tokens" in parsed:
+                raw_tokens = [str(t).strip() for t in parsed["tokens"] if t]
+            else:
+                raise HTTPException(status_code=422, detail="JSON body must be an array of token strings or {tokens: [...]}")
+        except _json.JSONDecodeError as e:
+            raise HTTPException(status_code=422, detail=f"Invalid JSON: {e}")
+    else:
+        # Plain text: split on newlines and commas
+        text = raw_body.decode("utf-8", errors="ignore")
+        raw_tokens = [
+            t.strip()
+            for part in text.splitlines()
+            for t in part.split(",")
+            if t.strip()
+        ]
+
+    if not raw_tokens:
+        raise HTTPException(status_code=422, detail="No tokens found in request body")
+
+    inserted = updated = skipped = duplicate = 0
+    seen_hashes: set[str] = set()
+
+    from app.workers.tasks.scanner_tasks import _is_own_bot_token
+
+    for token in raw_tokens:
+        if not token or not _looks_like_bot_token(token):
+            skipped += 1
+            continue
+
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        if token_hash in seen_hashes:
+            duplicate += 1
+            continue
+        seen_hashes.add(token_hash)
+
+        if _is_own_bot_token(token):
+            logger.warning(f"ingest/tokens: rejected own-bot token {token[:10]}...")
+            skipped += 1
+            continue
+
+        try:
+            existing = await _exec(
+                db.table("discovered_credentials")
+                .select("id")
+                .eq("token_hash", token_hash)
+                .limit(1)
+            )
+        except Exception as e:
+            logger.warning(f"Supabase lookup failed: {e}")
+            skipped += 1
+            continue
+
+        enc_token = security.encrypt(token)
+        meta = {"ingested_via": "token_paste"}
+
+        if existing.data:
+            # Already exists — re-encrypt and mark for re-validation
+            cred_id = existing.data[0]["id"]
+            try:
+                await _exec(
+                    db.table("discovered_credentials")
+                    .update({"bot_token": enc_token, "meta": meta})
+                    .eq("id", cred_id)
+                )
+                updated += 1
+            except Exception as e:
+                logger.warning(f"Update failed for {cred_id}: {e}")
+                skipped += 1
+            continue
+
+        try:
+            res = await _exec(
+                db.table("discovered_credentials").insert({
+                    "bot_token":   enc_token,
+                    "token_hash":  token_hash,
+                    "source":      "manual_import",
+                    "status":      "pending",
+                    "meta":        meta,
+                })
+            )
+            inserted += 1
+            if res.data:
+                new_id = res.data[0].get("id")
+                if new_id:
+                    try:
+                        from app.workers.tasks.flow_tasks import enrich_credential
+                        enrich_credential.delay(new_id)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"Insert failed for token_hash {token_hash[:12]}...: {e}")
+            skipped += 1
+
+    logger.info(
+        f"[ingest/tokens] received={len(raw_tokens)} inserted={inserted} "
+        f"updated={updated} skipped={skipped} duplicate={duplicate}"
+    )
+    return TokenPasteResponse(
+        received=len(raw_tokens),
+        inserted=inserted,
+        updated=updated,
+        skipped=skipped,
+        duplicate=duplicate,
+    )
+
