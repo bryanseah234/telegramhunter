@@ -15,13 +15,17 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
+          if [[ -z "$SUPABASE_URL" ]]; then
+            echo "::error::SUPABASE_URL secret is not set."
+            exit 1
+          fi
+
           echo "Pinging Supabase at: $SUPABASE_URL"
 
           HTTP_STATUS=$(curl -s -o /tmp/supabase_response.json -w "%{http_code}" \
             --max-time 30 \
             --retry 3 \
             --retry-delay 5 \
-            --retry-connrefused \
             "$SUPABASE_URL/rest/v1/" \
             -H "apikey: $SUPABASE_ANON_KEY" \
             -H "Authorization: Bearer $SUPABASE_ANON_KEY")
@@ -29,10 +33,13 @@ jobs:
           echo "HTTP Status: $HTTP_STATUS"
           cat /tmp/supabase_response.json
 
-          if [[ "$HTTP_STATUS" == "200" ]]; then
+          # 200 = service_role key (full access)
+          # 401 = anon key rejected by this endpoint but Supabase IS alive and responding
+          # Anything else = paused, unreachable, or wrong URL
+          if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "401" ]]; then
             echo "✅ Supabase is alive (HTTP $HTTP_STATUS)"
           else
-            echo "❌ Supabase ping failed (HTTP $HTTP_STATUS) — DB may be paused or secrets are wrong"
+            echo "❌ Supabase ping failed (HTTP $HTTP_STATUS) — DB may be paused or URL is wrong"
             exit 1
           fi
 
