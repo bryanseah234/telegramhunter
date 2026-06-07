@@ -2,8 +2,8 @@ name: Supabase Keep Alive
 
 on:
   schedule:
-    - cron: "0 8 */3 * *"  # Every 3 days at 08:00 UTC — within 7-day pause window
-  workflow_dispatch:      # Allow manual trigger from GitHub Actions UI
+    - cron: "0 8 */3 * *" # Every 3 days at 08:00 UTC — within 7-day pause window
+  workflow_dispatch:
 
 jobs:
   ping:
@@ -17,43 +17,22 @@ jobs:
         run: |
           echo "Pinging Supabase at: $SUPABASE_URL"
 
-          # SELECT query to show database is alive
           HTTP_STATUS=$(curl -s -o /tmp/supabase_response.json -w "%{http_code}" \
             --max-time 30 \
             --retry 3 \
             --retry-delay 5 \
             --retry-connrefused \
-            "$SUPABASE_URL/rest/v1/keepalive_logs?select=id&limit=1" \
+            "$SUPABASE_URL/rest/v1/" \
             -H "apikey: $SUPABASE_ANON_KEY" \
             -H "Authorization: Bearer $SUPABASE_ANON_KEY")
 
-          echo "HTTP Status (SELECT): $HTTP_STATUS"
+          echo "HTTP Status: $HTTP_STATUS"
           cat /tmp/supabase_response.json
 
-          # INSERT query to create a keepalive record
-          HTTP_STATUS_INSERT=$(curl -s -o /tmp/supabase_insert.json -w "%{http_code}" \
-            --max-time 30 \
-            --retry 3 \
-            --retry-delay 5 \
-            --retry-connrefused \
-            "$SUPABASE_URL/rest/v1/keepalive_logs" \
-            -H "apikey: $SUPABASE_ANON_KEY" \
-            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"source": "github-actions"}')
-
-          echo "HTTP Status (INSERT): $HTTP_STATUS_INSERT"
-          cat /tmp/supabase_insert.json
-
-          # Check for acceptable status codes
-          if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "406" ]] && \
-             [[ "$HTTP_STATUS_INSERT" == "200" || "$HTTP_STATUS_INSERT" == "201" ]]; then
-            echo "✅ Supabase is alive (SELECT: HTTP $HTTP_STATUS, INSERT: HTTP $HTTP_STATUS_INSERT)"
-          elif [[ "$HTTP_STATUS" == "401" || "$HTTP_STATUS" == "403" ]]; then
-            echo "⚠️  Auth error (HTTP $HTTP_STATUS) — DB is alive but check your secrets"
-            exit 1
+          if [[ "$HTTP_STATUS" == "200" ]]; then
+            echo "✅ Supabase is alive (HTTP $HTTP_STATUS)"
           else
-            echo "❌ Supabase ping failed (SELECT: HTTP $HTTP_STATUS, INSERT: HTTP $HTTP_STATUS_INSERT)"
+            echo "❌ Supabase ping failed (HTTP $HTTP_STATUS) — DB may be paused or secrets are wrong"
             exit 1
           fi
 
