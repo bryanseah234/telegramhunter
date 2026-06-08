@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     GOOGLE_SEARCH_KEY: Optional[str] = None
     GOOGLE_CSE_ID: Optional[str] = None
     PUBLICWWW_KEY: Optional[str] = None
+    POSTMAN_API_KEY: Optional[str] = None
     # Netlas — two accounts, rotated automatically to stay within daily limits
     # Account 1: 50 req/day, 2500 search coins  Account 2: 100 req/day, 5000 search coins
     NETLAS_API_KEY_1: Optional[str] = None

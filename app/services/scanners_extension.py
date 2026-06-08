@@ -3,8 +3,10 @@ Extension scanner services: GithubGistService, GrepAppService, PublicWwwService,
 BitbucketService, PastebinService, GoogleSearchService.
 Imports shared utilities (TOKEN_PATTERN, _is_valid_token, _perform_active_deep_scan) from scanners.py.
 """
+import html as htmlmod
 import httpx
 import asyncio
+import re
 from typing import List, Dict, Any
 import logging
 from app.core.config import settings
@@ -16,7 +18,11 @@ logger = logging.getLogger("scanners")
 
 class GithubGistService:
     def __init__(self):
-        self.token = settings.GITHUB_TOKEN
+        pool = getattr(settings, "GITHUB_TOKENS", None)
+        if pool:
+            self.token = pool.split(",")[0].strip()
+        else:
+            self.token = settings.GITHUB_TOKEN
         self.base_url = "https://api.github.com/gists/public"
         
     async def search(self) -> List[Dict[str, Any]]:
@@ -80,35 +86,49 @@ class GithubGistService:
 
 
 class GrepAppService:
+    BOT_TOKEN_RE = re.compile(r"(\d{8,10}:[A-Za-z0-9_-]{35})")
+
     def __init__(self):
         self.base_url = "https://grep.app/api/search"
-        
+
+    def _strip_html(self, html: str) -> str:
+        return htmlmod.unescape(re.sub(r"<[^>]+>", "", html))
+
     async def search(self) -> List[Dict[str, Any]]:
-        # We can search using exactly the token regex!
-        # \b(\d{8,10}:[A-Za-z0-9_-]{35})\b is too broad for grep.app sometimes,
-        # but grep.app supports re2 regex. Let's search for telegram bot token patterns.
         query = r"api\.telegram\.org/bot\d{8,10}:[A-Za-z0-9_-]{35}"
-        
+
         try:
-            params = {"q": query, "regexp": "true"}
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.get(self.base_url, params=params)
-                res.raise_for_status()
-                data = res.json()
-                
+            from app.services.scanners import _is_valid_token
             results = []
-            from app.services.scanners import TOKEN_PATTERN, _is_valid_token
-            # Extracts from snippets
-            hits = data.get("hits", {}).get("hits", [])
-            for hit in hits:
-                content = hit.get("content", {}).get("snippet", "")
-                found = TOKEN_PATTERN.findall(content)
-                for t in found:
-                    if _is_valid_token(t):
-                        results.append({
-                            "token": t,
-                            "meta": {"source": "grep.app", "repo": hit.get("repo")}
-                        })
+            seen = set()
+
+            async with httpx.AsyncClient(timeout=30.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
+                for page in range(1, 6):
+                    params = {"q": query, "regexp": "true", "page": page}
+                    res = await client.get(self.base_url, params=params)
+                    if res.status_code == 429:
+                        logger.warning("    [grep.app] Rate limited, stopping pagination")
+                        break
+                    res.raise_for_status()
+                    data = res.json()
+
+                    hits = data.get("hits", {}).get("hits", [])
+                    if not hits:
+                        break
+
+                    for hit in hits:
+                        snippet = hit.get("content", {}).get("snippet", "")
+                        clean = self._strip_html(snippet)
+                        for t in self.BOT_TOKEN_RE.findall(clean):
+                            if t not in seen and _is_valid_token(t):
+                                seen.add(t)
+                                results.append({
+                                    "token": t,
+                                    "meta": {"source": "grep.app", "repo": hit.get("repo")}
+                                })
+
+                    await asyncio.sleep(1)
+
             return results
         except Exception as e:
             logger.error(f"    [grep.app] Error: {e}")
@@ -528,3 +548,293 @@ class NetlasService:
                 "remaining": max(0, limit - used),
             }
         return summary
+
+
+class ReplitService:
+    """
+    Replit public search — free, no API key required.
+    Searches public repls matching Telegram-related queries, then fetches
+    common entry-point files (main.py, bot.py, etc.) and extracts tokens.
+
+    Rate: undocumented; 2s/repl as courtesy.
+    """
+
+    SEARCH_URL = "https://replit.com/graphql"
+    REPL_RAW_BASE = "https://replit.com"
+
+    QUERIES = [
+        "telegram bot token",
+        "TELEGRAM_BOT_TOKEN",
+        "api.telegram.org",
+    ]
+
+    ENTRY_FILES = ("main.py", "index.js", "bot.py", "app.py", ".env", "config.py", "settings.py")
+
+    def __init__(self):
+        self.timeout = httpx.Timeout(20.0, connect=10.0)
+
+    async def search(self, query: str = None) -> List[Dict[str, Any]]:
+        from app.services.scanners import TOKEN_PATTERN, _is_valid_token
+        from app.workers.tasks.flow_tasks import redis_client
+        import hashlib
+
+        results: List[Dict[str, Any]] = []
+        queries = [query] if query else self.QUERIES
+
+        async with httpx.AsyncClient(
+            timeout=self.timeout,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+        ) as client:
+            for q in queries:
+                try:
+                    # Replit GraphQL search for public repls
+                    gql_payload = {
+                        "operationName": "ReplSearch",
+                        "query": """
+                            query ReplSearch($query: String!) {
+                                search(query: $query, categories: [Repls]) {
+                                    replResults {
+                                        results {
+                                            items {
+                                                ... on Repl {
+                                                    slug
+                                                    user { username }
+                                                    url
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        """,
+                        "variables": {"query": q},
+                    }
+                    r = await client.post(
+                        self.SEARCH_URL,
+                        json=gql_payload,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    if r.status_code != 200:
+                        logger.debug(f"[Replit] q='{q[:30]}' HTTP {r.status_code}")
+                        await asyncio.sleep(3)
+                        continue
+
+                    data = r.json()
+                    items = (
+                        ((data.get("data") or {}).get("search") or {})
+                        .get("replResults", {})
+                        .get("results", {})
+                        .get("items", [])
+                    )
+                except Exception as e:
+                    logger.warning(f"[Replit] search failed for '{q[:30]}': {e}")
+                    await asyncio.sleep(3)
+                    continue
+
+                for repl in items[:30]:
+                    user = (repl.get("user") or {}).get("username") or "unknown"
+                    slug = repl.get("slug")
+                    if not slug:
+                        continue
+                    repl_url = repl.get("url") or f"/@{user}/{slug}"
+
+                    # Dedupe by repl URL
+                    h = hashlib.sha256(f"{user}/{slug}".encode()).hexdigest()[:16]
+                    redis_key = f"replit:seen:{h}"
+                    try:
+                        if redis_client.exists(redis_key):
+                            continue
+                    except Exception:
+                        pass
+
+                    # Fetch common entry-point files
+                    for filename in self.ENTRY_FILES:
+                        raw_url = f"{self.REPL_RAW_BASE}/@{user}/{slug}/raw/{filename}"
+                        try:
+                            fr = await client.get(raw_url)
+                            if fr.status_code != 200 or not fr.text:
+                                continue
+                            tokens = set(TOKEN_PATTERN.findall(fr.text))
+                            for tok in tokens:
+                                if not _is_valid_token(tok):
+                                    continue
+                                results.append({
+                                    "token": tok,
+                                    "meta": {
+                                        "replit_url": f"{self.REPL_RAW_BASE}{repl_url}",
+                                        "replit_file": filename,
+                                        "replit_user": user,
+                                        "extracted_from": "body",
+                                    },
+                                })
+                        except Exception:
+                            pass
+                        await asyncio.sleep(1)
+
+                    try:
+                        redis_client.setex(redis_key, 7 * 86400, "1")
+                    except Exception:
+                        pass
+
+                    await asyncio.sleep(2)
+                await asyncio.sleep(3)
+
+        logger.info(f"[Replit] returned {len(results)} matches")
+        return results
+
+
+class PostmanService:
+    """
+    Postman public network search via proxy API + official collection fetch.
+    Requires POSTMAN_API_KEY (PMAK-...). Searches public workspaces/collections
+    for Telegram bot tokens, then fetches collection bodies for extraction.
+    """
+
+    PROXY_URL = "https://www.postman.com/_api/ws/proxy"
+    API_URL = "https://api.getpostman.com"
+
+    QUERIES = [
+        "telegram bot token",
+        "TELEGRAM_BOT_TOKEN",
+        "api.telegram.org/bot",
+    ]
+
+    DAILY_BUDGET = 250
+    REDIS_COUNTER_KEY = "postman:daily_requests"
+
+    def __init__(self):
+        self.api_key = settings.POSTMAN_API_KEY
+        self.timeout = httpx.Timeout(20.0, connect=10.0)
+
+    def _today_key(self) -> str:
+        from datetime import date
+        return f"{self.REDIS_COUNTER_KEY}:{date.today().isoformat()}"
+
+    def _check_budget(self, redis_client) -> bool:
+        try:
+            val = redis_client.get(self._today_key())
+            return int(val or 0) < self.DAILY_BUDGET
+        except Exception:
+            return True
+
+    def _increment(self, redis_client):
+        try:
+            key = self._today_key()
+            redis_client.incr(key)
+            redis_client.expire(key, 86400 * 2)
+        except Exception:
+            pass
+
+    async def search(self, query: str = None) -> List[Dict[str, Any]]:
+        from app.services.scanners import TOKEN_PATTERN, _is_valid_token
+        from app.workers.tasks.flow_tasks import redis_client
+        import hashlib
+
+        if not self.api_key:
+            logger.warning("[Postman] No POSTMAN_API_KEY configured")
+            return []
+
+        results: List[Dict[str, Any]] = []
+        queries = [query] if query else self.QUERIES
+        seen_tokens: set = set()
+
+        if not self._check_budget(redis_client):
+            logger.info("[Postman] Daily budget exhausted — skipping")
+            return []
+
+        headers = {
+            "X-Api-Key": self.api_key,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+        async with httpx.AsyncClient(
+            timeout=self.timeout, follow_redirects=True, headers=headers,
+        ) as client:
+            for q in queries:
+                if not self._check_budget(redis_client):
+                    break
+
+                # Step 1: Search public network via proxy (returns collections + workspaces)
+                collection_ids = []
+                try:
+                    payload = {
+                        "service": "search",
+                        "method": "POST",
+                        "path": "/search-all",
+                        "body": {"queryText": q},
+                    }
+                    r = await client.post(self.PROXY_URL, json=payload)
+                    self._increment(redis_client)
+
+                    if r.status_code != 200:
+                        logger.debug(f"[Postman] q='{q[:30]}' HTTP {r.status_code}")
+                        await asyncio.sleep(2)
+                        continue
+
+                    data = r.json().get("data", {})
+                    for col in data.get("collection", []):
+                        doc = col.get("document", {})
+                        cid = doc.get("id")
+                        if cid:
+                            collection_ids.append((cid, doc.get("name", "")))
+
+                    for req in data.get("request", []):
+                        doc = req.get("document", {})
+                        cid = doc.get("collectionId")
+                        if cid:
+                            collection_ids.append((cid, doc.get("name", "")))
+
+                except Exception as e:
+                    logger.warning(f"[Postman] search failed for '{q[:30]}': {e}")
+                    await asyncio.sleep(2)
+                    continue
+
+                # Step 2: Fetch each collection body via official API
+                for collection_id, col_name in collection_ids[:15]:
+                    h = hashlib.sha256(str(collection_id).encode()).hexdigest()[:16]
+                    redis_key = f"postman:seen:{h}"
+                    try:
+                        if redis_client.exists(redis_key):
+                            continue
+                    except Exception:
+                        pass
+
+                    if not self._check_budget(redis_client):
+                        break
+
+                    try:
+                        cr = await client.get(f"{self.API_URL}/collections/{collection_id}")
+                        self._increment(redis_client)
+                        if cr.status_code != 200:
+                            continue
+                        col_data = cr.json()
+                    except Exception:
+                        continue
+
+                    col_text = str(col_data)
+                    tokens = set(TOKEN_PATTERN.findall(col_text))
+                    for tok in tokens:
+                        if tok in seen_tokens or not _is_valid_token(tok):
+                            continue
+                        seen_tokens.add(tok)
+                        results.append({
+                            "token": tok,
+                            "meta": {
+                                "postman_collection_id": collection_id,
+                                "postman_name": col_name,
+                                "extracted_from": "collection_body",
+                            },
+                        })
+
+                    try:
+                        redis_client.setex(redis_key, 7 * 86400, "1")
+                    except Exception:
+                        pass
+
+                    await asyncio.sleep(1)
+                await asyncio.sleep(2)
+
+        logger.info(f"[Postman] returned {len(results)} matches")
+        return results

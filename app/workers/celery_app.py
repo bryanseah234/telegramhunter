@@ -226,10 +226,8 @@ app.conf.update(
             "task": "scanner.scan_urlscan",
             "schedule": crontab(minute=40, hour=f"*/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"),
         },
-        "scan-fofa-4hours": {
-            "task": "scanner.scan_fofa",
-            "schedule": crontab(minute=0, hour=f"1-23/{int(os.getenv('SCAN_INTERVAL_HOURS', 4))}"),
-        },
+        # scan-fofa-4hours: DISABLED — F-coins balance exhausted (F点余额不足).
+        # Re-enable after topping up FOFA credits at fofa.info.
         # scan-gitlab-6hours: DISABLED — gitlab.com free tier has global blob
         # search disabled (returns "403 Forbidden - Global Search is disabled
         # for this scope"). Re-enable only if upgrading to paid GitLab plan
@@ -301,6 +299,13 @@ app.conf.update(
         "scan-shodan-c2-6hours": {
             "task": "scanner.scan_shodan_c2",
             "schedule": crontab(minute=10, hour="*/6"),
+        },
+        # scan-replit-12hours: DISABLED — Replit now requires Apollo persisted
+        # query hashes + session cookie. Public GraphQL search no longer works.
+        # Postman public workspaces — free, no key. 12h cadence.
+        "scan-postman-12hours": {
+            "task": "scanner.scan_postman",
+            "schedule": crontab(minute=50, hour="*/12"),
         },
         # Netlas — once daily (budget: 45+90=135 req/day across 2 accounts)
         "scan-netlas-daily": {

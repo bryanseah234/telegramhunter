@@ -2,6 +2,7 @@ import asyncio
 import os
 import time
 
+import httpx
 from app.workers.celery_app import app
 from app.core.database import db
 from app.core.security import security
@@ -292,8 +293,23 @@ async def _enrich_logic(cred_id: str):
     # Pre-create Topic with NEW FORMAT: @username / botid
     from app.core.config import settings
     
-    bot_username = bot_info.get("username") or "unknown"
-    bot_id = bot_info.get("id") or "0"
+    bot_username = bot_info.get("username") or ""
+    bot_id = bot_info.get("id") or ""
+
+    # Fallback: if discover_chats didn't return bot info, try a direct getMe()
+    if not bot_username or not bot_id:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as _hc:
+                gm = await _hc.get(f"https://api.telegram.org/bot{bot_token}/getMe")
+                if gm.status_code == 200:
+                    gm_data = gm.json().get("result", {})
+                    bot_username = bot_username or gm_data.get("username", "")
+                    bot_id = bot_id or gm_data.get("id", "")
+        except Exception:
+            pass
+
+    bot_username = bot_username or "unknown"
+    bot_id = bot_id or "0"
     topic_name = f"@{bot_username} / {bot_id}"
     
     topic_id = 0
