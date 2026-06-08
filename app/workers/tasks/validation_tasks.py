@@ -305,6 +305,7 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
                 "chat_id": chat_id,
                 "status": "active",
                 "meta": merged_meta,
+                "confidence_score": confidence_score,
             }
             if chat_name:
                 update_data["chat_name"] = chat_name
@@ -337,6 +338,7 @@ async def _validate_token_async(item: dict, source_name: str) -> int:
             "bot_username": bot_username,
             "source": source_name,
             "status": "pending" if not chat_id else "active",
+            "confidence_score": confidence_score,
             "meta": {
                 **item.get("meta", {}),
                 "bot_username": bot_username,
@@ -677,7 +679,11 @@ async def _backfill_scoring_async(batch_size: int):
                             "confidence_score": score, "confidence_reasons": reasons}
                 await async_execute(
                     db.table("discovered_credentials")
-                    .update({"meta": new_meta, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                    .update({
+                        "meta": new_meta,
+                        "confidence_score": score,
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    })
                     .eq("id", row["id"])
                 )
                 done += 1
