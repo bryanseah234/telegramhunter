@@ -202,7 +202,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /restart - Restart the bot service\n"
             "• /commands - List all commands (Alias for /help)\n"
             "• /starthunter - Login a new Telegram account\n"
-            "• /bots - Show all available bots\n\n"
+            "• /bots - Show all available bots\n"
+            "• /backfill - Re-broadcast messages stuck in General topic\n\n"
             f"**Available Bots**: {bot_list}\n\n"
             "Only authorized administrators can use these commands."
         )
@@ -230,6 +231,21 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     lines.append(f"\n**Total**: {len(_bot_usernames)} bots")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggers re-broadcast of messages stuck in General topic."""
+    if not is_admin(update):
+        await update.message.reply_text("⚠️ This command is restricted to administrators.")
+        return
+
+    await update.message.reply_text(
+        "🔄 **Backfill started**.\n"
+        "Messages stuck in General will be re-queued to their correct topics.\n"
+        "Check the monitor group for progress.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    from app.workers.tasks.audit_tasks import backfill_general_messages
+    backfill_general_messages.delay()
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -787,6 +803,7 @@ def _build_application(token: str) -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("commands", help_command))
     application.add_handler(CommandHandler("bots", bots_command))
+    application.add_handler(CommandHandler("backfill", backfill_command))
 
     login_conv_handler = ConversationHandler(
         entry_points=[CommandHandler('starthunter', starthunter)],
@@ -890,6 +907,13 @@ async def _run_bot(token: str, is_primary: bool = False):
 
 async def main():
     global redis_client
+
+    # Wait for internet on startup (handles machine boot / container restart)
+    from app.core.connectivity import wait_for_internet_async
+    logger.info("Checking internet connectivity before starting...")
+    if not await wait_for_internet_async(max_wait=300, check_interval=10):
+        logger.error("No internet after 300s — starting anyway (will retry on each operation).")
+
     raw_tokens = settings.bot_tokens
     seen_ids = set()
     tokens = []

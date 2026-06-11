@@ -4,7 +4,7 @@ import os
 import sys
 
 from celery import Celery
-from celery.signals import worker_ready, worker_shutdown, task_failure
+from celery.signals import worker_ready, worker_shutdown, task_failure, task_prerun
 from celery.schedules import crontab
 
 from app.core.config import settings
@@ -80,6 +80,12 @@ def _send_signal_log(msg: str):
 @worker_ready.connect
 def on_worker_ready(**kwargs):
     get_worker_loop()  # Ensure loop is initialized before any task runs
+
+    # Wait for internet on startup (handles machine boot / container restart)
+    from app.core.connectivity import wait_for_internet_sync
+    if not wait_for_internet_sync(max_wait=300, check_interval=10):
+        logger.warning("[Worker] Started without internet — tasks needing external APIs will wait.")
+
     _send_signal_log("🟢 **Worker Service** Started (Celery)")
 
 
@@ -136,6 +142,24 @@ def on_task_failure(task_id, exception, traceback, einfo, args, kwargs, **extra)
 
     import threading
     threading.Thread(target=_persist, daemon=True).start()
+
+
+@task_prerun.connect
+def on_task_prerun(task_id, task, args, kwargs, **extra):
+    """
+    Gate task execution on internet connectivity.
+    Waits up to 120s for connection before letting the task proceed.
+    Tasks that only need Redis (heartbeat) are exempted.
+    """
+    # Exempt local-only tasks that don't need external APIs
+    local_only_tasks = {"flow.system_heartbeat"}
+    if task.name in local_only_tasks:
+        return
+
+    from app.core.connectivity import check_internet, wait_for_internet_sync
+    if not check_internet(timeout=3):
+        logger.warning(f"[PreRun] No internet for task {task.name} — waiting...")
+        wait_for_internet_sync(max_wait=120, check_interval=10)
 
 
 # ==============================================
@@ -326,9 +350,9 @@ app.conf.update(
             "task": "audit.audit_active_topics",
             "schedule": crontab(minute=15, hour=f"*/{int(os.getenv('AUDIT_INTERVAL_HOURS', 1))}"),
         },
-        "system-self-heal-6hours": {
+        "system-self-heal-90min": {
             "task": "system.self_heal",
-            "schedule": crontab(minute=45, hour="*/6"),
+            "schedule": 5400.0,  # 90 minutes in seconds
         },
         "system-enforce-whitelist-6hours": {
             "task": "system.enforce_whitelist",

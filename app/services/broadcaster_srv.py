@@ -91,14 +91,13 @@ class BroadcasterService:
                     self._failed_tokens.add(token)
                     logger.warning(f"⚠️ Bot {token[:10]}... kicked. Rotating...")
                 except TelegramError as e:
-                    if "Message thread not found" in str(e) and thread_id is not None:
-                        logger.warning("⚠️ Topic not supported in this group. Retrying in General...")
-                        await self._wait_for_rate_limit()
-                        try:
-                            await bot.send_message(chat_id=group_id, text=to_send_text)
-                            return
-                        except Exception as fallback_e:
-                            logger.error(f"❌ General fallback send failed: {fallback_e}")
+                    err_str = str(e)
+                    if ("Message thread not found" in err_str
+                        or "TOPIC_DELETED" in err_str
+                        or "Topic_deleted" in err_str):
+                        # Let the caller (broadcast_logic) handle topic recreation
+                        # instead of silently dumping into General
+                        raise
                     logger.error(f"❌ Bot send failed: {e}")
 
         logger.error("❌ All identities failed to send message.")
@@ -116,7 +115,7 @@ class BroadcasterService:
             logger.error(f"Failed to send log: {e}")
 
     async def ensure_topic(self, group_id: int | str, topic_name: str) -> int:
-        """Ensures a forum topic exists."""
+        """Ensures a forum topic exists. Retries once before raising."""
         try:
             existing_id = await user_agent.find_topic_id(group_id, topic_name)
             if existing_id: return existing_id
@@ -125,9 +124,31 @@ class BroadcasterService:
         if topic_name in ["General", "general", "main"]: return 1
 
         bot = self._get_bot_instance(self.bot_tokens[0])
+        last_err = None
+        for attempt in range(2):
+            try:
+                topic = await bot.create_forum_topic(chat_id=group_id, name=topic_name)
+                return topic.message_thread_id
+            except Exception as e:
+                last_err = e
+                if attempt == 0:
+                    logger.warning(f"Topic creation attempt 1 failed: {e}. Retrying...")
+                    await asyncio.sleep(2)
+
+        logger.error(f"Topic creation failed after 2 attempts: {last_err}")
+        raise RuntimeError(f"Could not create topic '{topic_name}': {last_err}")
+
+    async def rename_topic(self, group_id: int | str, thread_id: int, new_name: str) -> bool:
+        """Renames an existing forum topic."""
+        bot = self._get_bot_instance(self.bot_tokens[0])
         try:
-            topic = await bot.create_forum_topic(chat_id=group_id, name=topic_name)
-            return topic.message_thread_id
+            await bot.edit_forum_topic(
+                chat_id=group_id,
+                message_thread_id=thread_id,
+                name=new_name,
+            )
+            logger.info(f"Renamed topic {thread_id} to '{new_name}'")
+            return True
         except Exception as e:
-            logger.error(f"Topic creation failed: {e}")
-            return 1 # Fallback to general
+            logger.warning(f"Topic rename failed for {thread_id}: {e}")
+            return False
