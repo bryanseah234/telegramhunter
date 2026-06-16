@@ -41,7 +41,7 @@ This document details the architecture and tasks for Phase 2 of the TelegramHunt
 
 ## Execution Checklist
 
-- [ ] **Bundle 1: Firehose Expansion** (Modify `firehose_tasks.py` to extract Issue/PR bodies)
-- [ ] **Bundle 2: Pastebin Alternatives** (Add Rentry/Hastebin parsers to `scanners_extension.py`)
-- [ ] **Bundle 3: Docker Hub Scanner** (Add registry pull logic to `scanner_tasks.py`)
-- [ ] **Bundle 4: Active Honeypot** (Add `cloudflared` to compose, build fake API routes)
+- [x] **Bundle 1: Firehose Expansion** (Modify `firehose_tasks.py` to extract Issue/PR bodies)
+- [x] **Bundle 2: Pastebin Alternatives** (Add Rentry/Hastebin parsers to `scanners_extension.py`)
+- [x] **Bundle 3: Docker Hub Scanner** (Add registry pull logic to `scanner_tasks.py`)
+- [ ] **Bundle 4: Active Honeypot** (Skipped)

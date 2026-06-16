@@ -271,6 +271,14 @@ app.conf.update(
             "task": "scanner.scan_exa",
             "schedule": crontab(minute=35, hour="*/12"),
         },
+        "scan-rentry-12hours": {
+            "task": "scanner.scan_rentry",
+            "schedule": crontab(minute=40, hour="*/12"),
+        },
+        "scan-hastebin-12hours": {
+            "task": "scanner.scan_hastebin",
+            "schedule": crontab(minute=45, hour="*/12"),
+        },
         # Wayback Machine — historical URL scanner (free, no key)
         # 04:00 UTC slot avoids overlap with regular scanners + quietest period
         # for archive.org's ~1 req/sec courtesy budget.
@@ -302,6 +310,10 @@ app.conf.update(
         "scan-commoncrawl-daily": {
             "task": "scanner.scan_commoncrawl",
             "schedule": crontab(minute=0, hour=2),  # 02:00 UTC
+        },
+        "scan-dockerhub-hourly": {
+            "task": "scanner.scan_dockerhub",
+            "schedule": crontab(minute=10),
         },
         # Sourcegraph — public code search over ~91k indexed repos with
         # api.telegram.org. Free, no auth. SSE stream search.
