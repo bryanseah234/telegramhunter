@@ -216,6 +216,11 @@ async def _system_self_heal_async():
         if monitor_ids:
             contaminated_ids: list[str] = []
             for mid in monitor_ids:
+                try:
+                    int(mid)
+                except ValueError:
+                    continue  # Skip non-numeric monitor IDs (e.g. @username) since chat_id is bigint in DB
+                
                 res = await async_execute(
                     db.table("discovered_credentials")
                     .select("id")
