@@ -174,7 +174,7 @@ show_menu() {
             case "$log_choice" in
                 a) cmd_logs ;;
                 b) cmd_logs api ;;
-                c) cmd_logs worker-core worker-scanners worker-scrape ;;
+                c) cmd_logs worker-core worker-scanners worker-scrape worker-validators ;;
                 d) cmd_logs bot ;;
                 *) echo -e "${RED}Invalid choice.${NC}" ;;
             esac

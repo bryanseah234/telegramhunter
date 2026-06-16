@@ -10,7 +10,7 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_redis
     restart: always
     init: true
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 1gb --maxmemory-policy allkeys-lru
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
@@ -34,7 +34,7 @@ services:
     ports:
       - "${API_PORT:-8011}:8001"
     env_file: .env
-    command: gunicorn app.api.main:app -k uvicorn.workers.UvicornWorker -w 2 --bind 0.0.0.0:8001 --timeout 120
+    command: gunicorn app.api.main:app -k uvicorn.workers.UvicornWorker -w 4 --bind 0.0.0.0:8001 --timeout 120
     depends_on:
       redis:
         condition: service_healthy
@@ -61,7 +61,7 @@ services:
     restart: always
     init: true
     env_file: .env
-    command: celery -A app.workers.celery_app worker -Q celery --loglevel=info --concurrency=4
+    command: celery -A app.workers.celery_app worker -Q celery --loglevel=info --concurrency=8
     depends_on:
       redis:
         condition: service_healthy
@@ -89,7 +89,7 @@ services:
     restart: always
     init: true
     env_file: .env
-    command: celery -A app.workers.celery_app worker -Q scanners --loglevel=info --concurrency=2
+    command: celery -A app.workers.celery_app worker -Q scanners --loglevel=info --concurrency=8
     depends_on:
       redis:
         condition: service_healthy
@@ -136,7 +136,7 @@ services:
   # Async token validation worker — pulls validate_token tasks from the
   # `validation` queue with global Redis-backed rate limiting (default
   # 30 getMe calls / 10s across all validator processes).
-  # Concurrency=4: validators are I/O-bound on Telegram getMe; rate limiter
+  # Concurrency=16: validators are I/O-bound on Telegram getMe; rate limiter
   # gates total throughput so concurrency just controls in-flight depth.
   worker-validators:
     build: .
@@ -144,7 +144,7 @@ services:
     restart: always
     init: true
     env_file: .env
-    command: celery -A app.workers.celery_app worker -Q validation --loglevel=info --concurrency=4
+    command: celery -A app.workers.celery_app worker -Q validation --loglevel=info --concurrency=16
     depends_on:
       redis:
         condition: service_healthy
@@ -234,6 +234,24 @@ services:
         condition: service_started
     volumes:
       - sessions:/app/sessions
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  flower:
+    build: .
+    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_flower
+    restart: always
+    init: true
+    env_file: .env
+    command: celery -A app.workers.celery_app flower --port=5555
+    ports:
+      - "${FLOWER_PORT:-8555}:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
     logging:
       driver: "json-file"
       options:
