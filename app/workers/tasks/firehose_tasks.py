@@ -121,62 +121,91 @@ async def _poll_github_events_async():
                     break
                 if not new_last_id and ev_id:
                     new_last_id = ev_id  # first event of first page = newest
-                if ev.get("type") != "PushEvent":
+                ev_type = ev.get("type")
+                valid_types = {"PushEvent", "IssuesEvent", "PullRequestEvent", "IssueCommentEvent"}
+                
+                if ev_type not in valid_types:
                     continue
 
                 payload = ev.get("payload") or {}
-                commits = payload.get("commits") or []
                 repo_name = (ev.get("repo") or {}).get("name")
+                
+                text_blobs = []
+                source_meta = {
+                    "repo": repo_name,
+                    "source_kind": f"github_{ev_type.lower()}"
+                }
 
-                for commit in commits:
-                    commit_url = commit.get("url")
-                    if not commit_url:
-                        continue
-                    commit_sha = commit.get("sha", "")
-                    seen_key = f"{SEEN_COMMIT_PREFIX}{commit_sha}"
-                    try:
-                        if redis_client.exists(seen_key):
+                if ev_type == "PushEvent":
+                    commits = payload.get("commits") or []
+                    for commit in commits:
+                        commit_url = commit.get("url")
+                        if not commit_url:
                             continue
-                        redis_client.setex(seen_key, 7 * 86400, "1")
-                    except Exception:
-                        logger.debug("[Firehose] Redis dedup unavailable — proceeding without dedup (may reprocess commits)")
+                        commit_sha = commit.get("sha", "")
+                        seen_key = f"{SEEN_COMMIT_PREFIX}{commit_sha}"
+                        try:
+                            if redis_client.exists(seen_key):
+                                continue
+                            redis_client.setex(seen_key, 7 * 86400, "1")
+                        except Exception:
+                            pass
 
-                    try:
-                        cr = await client.get(commit_url)
-                        if cr.status_code != 200:
-                            continue
-                        commit_data = cr.json()
-                    except Exception as e:
-                        logger.debug(f"[Firehose] commit fetch failed: {e}")
+                        try:
+                            cr = await client.get(commit_url)
+                            if cr.status_code != 200:
+                                continue
+                            commit_data = cr.json()
+                            
+                            for f in (commit_data.get("files") or []):
+                                patch = f.get("patch")
+                                if patch:
+                                    text_blobs.append(patch)
+                            
+                            source_meta["commit_sha"] = commit_sha
+                            source_meta["commit_url"] = commit_url
+                            
+                        except Exception as e:
+                            logger.debug(f"[Firehose] commit fetch failed: {e}")
+                        
+                        await asyncio.sleep(0.2)  # gentle pacing per commit fetch
+
+                elif ev_type == "IssuesEvent":
+                    issue = payload.get("issue") or {}
+                    body = issue.get("body")
+                    if body:
+                        text_blobs.append(body)
+                    source_meta["issue_url"] = issue.get("html_url")
+                    
+                elif ev_type == "PullRequestEvent":
+                    pr = payload.get("pull_request") or {}
+                    body = pr.get("body")
+                    if body:
+                        text_blobs.append(body)
+                    source_meta["pr_url"] = pr.get("html_url")
+                    
+                elif ev_type == "IssueCommentEvent":
+                    comment = payload.get("comment") or {}
+                    body = comment.get("body")
+                    if body:
+                        text_blobs.append(body)
+                    source_meta["comment_url"] = comment.get("html_url")
+
+                if not text_blobs:
+                    continue
+
+                full_text = "\n".join(text_blobs)
+                tokens = set(TOKEN_PATTERN.findall(full_text))
+                if not tokens:
+                    continue
+
+                for tok in tokens:
+                    if not _is_valid_token(tok):
                         continue
-
-                    text_blobs = []
-                    for f in (commit_data.get("files") or []):
-                        patch = f.get("patch")
-                        if patch:
-                            text_blobs.append(patch)
-                    if not text_blobs:
-                        continue
-
-                    full_text = "\n".join(text_blobs)
-                    tokens = set(TOKEN_PATTERN.findall(full_text))
-                    if not tokens:
-                        continue
-
-                    for tok in tokens:
-                        if not _is_valid_token(tok):
-                            continue
-                        results_to_enqueue.append({
-                            "token": tok,
-                            "meta": {
-                                "repo": repo_name,
-                                "commit_sha": commit_sha,
-                                "commit_url": commit_url,
-                                "source_kind": "github_push_event",
-                            }
-                        })
-
-                    await asyncio.sleep(0.2)  # gentle pacing per commit fetch
+                    results_to_enqueue.append({
+                        "token": tok,
+                        "meta": source_meta.copy()
+                    })
 
             if stop:
                 break
