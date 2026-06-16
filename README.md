@@ -6,7 +6,7 @@ A self-hosted, continuously-running OSINT pipeline that discovers exposed bot to
 - **Database:** Supabase (managed PostgreSQL) with Row Level Security
 - **Frontend (optional):** Next.js 16 + React 19  read-only dashboard
 - **Browser Extension (optional):** Manifest V3 Chrome extension  FOFA scraper
-- **Deployment:** Docker Compose (7 services)
+- **Deployment:** Docker Compose (10 services)
 
 ---
 
@@ -62,6 +62,7 @@ cp .env.template .env
 | `AUDIT_INTERVAL_HOURS` | `2` | Topic-integrity audit cadence |
 | `API_PORT` | `8011` | Host-side port for the API service |
 | `REDIS_PORT` | `6379` | Host-side port for Redis |
+| `FLOWER_PORT` | `8555` | Host-side port for the Flower Celery monitor |
 | `COMPOSE_PROJECT_NAME` | `telegramhunter` | Docker Compose namespace |
 | `EXTENSION_WRITE_SECRET` | *(unset)* | Secret for Chrome extension RLS policy. Must also be set in Supabase: `ALTER DATABASE postgres SET app.extension_write_secret = '<value>';` |
 | `TARGET_COUNTRIES` | *(built-in 50-country list)* | Optional JSON array of ISO-3166 codes for country-rotation scanning |
@@ -136,7 +137,7 @@ See [Database Setup](#database-setup) above.
 docker compose up -d --build
 ```
 
-This starts 7 services: `redis`, `api`, `worker-core`, `worker-scanners`, `worker-scrape`, `beat`, `bot`.
+This starts 10 services: `redis`, `api`, `worker-core`, `worker-scanners`, `worker-scrape`, `worker-validators`, `beat`, `bot`, `flower`, `frontend`.
 
 ### 6. Verify startup
 
@@ -145,7 +146,7 @@ curl http://localhost:8011/
 curl http://localhost:8011/health/
 ```
 
-Both should return HTTP 200.
+Both should return HTTP 200. You can also view the Celery queue monitor at `http://localhost:8555`.
 
 ---
 
@@ -446,7 +447,7 @@ NEXT_PUBLIC_SUPABASE_KEY=<anon-key>
     validate_deployment.py       Post-deploy health checks
     validate_startup.py          Pre-start environment checks
  .env.template                    Environment variable template
- docker-compose.yml               7-service stack definition
+ docker-compose.yml               10-service stack definition
  Dockerfile                       python:3.11-slim-bookworm, non-root user
  docker-entrypoint.sh             Container entrypoint  CSV pre-processing
 ```
