@@ -80,7 +80,7 @@ echo.
 
 if /i "%log_choice%"=="a" ( docker compose logs -f & goto after_cmd )
 if /i "%log_choice%"=="b" ( docker compose logs -f api & goto after_cmd )
-if /i "%log_choice%"=="c" ( docker compose logs -f worker-core worker-scanners worker-scrape & goto after_cmd )
+if /i "%log_choice%"=="c" ( docker compose logs -f worker-core worker-scanners worker-scrape worker-validators & goto after_cmd )
 if /i "%log_choice%"=="d" ( docker compose logs -f bot & goto after_cmd )
 if    "%log_choice%"=="0" goto menu
 goto menu_logs
