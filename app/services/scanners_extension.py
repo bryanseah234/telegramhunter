@@ -86,7 +86,7 @@ class GithubGistService:
 
 
 class GrepAppService:
-    BOT_TOKEN_RE = re.compile(r"(\d{8,10}:[A-Za-z0-9_-]{35})")
+    BOT_TOKEN_RE = re.compile(r"(\d{8,15}:[A-Za-z0-9_-]{35})")
 
     def __init__(self):
         self.base_url = "https://grep.app/api/search"
@@ -95,7 +95,7 @@ class GrepAppService:
         return htmlmod.unescape(re.sub(r"<[^>]+>", "", html))
 
     async def search(self) -> List[Dict[str, Any]]:
-        query = r"api\.telegram\.org/bot\d{8,10}:[A-Za-z0-9_-]{35}"
+        query = r"api\.telegram\.org/bot\d{8,15}:[A-Za-z0-9_-]{35}"
 
         try:
             from app.services.scanners import _is_valid_token

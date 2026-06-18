@@ -116,13 +116,13 @@ All scanners degrade gracefully when API keys are absent  missing-key scanners r
 
 ### 3.2 Token Validation
 
-- **Regex pattern:** `\b(\d{8,10}:[A-Za-z0-9_-]{35})\b`
+- **Regex pattern:** `\b(\d{8,15}:[A-Za-z0-9_-]{35})\b`
 - **Strict rejection rules (applied in `_is_valid_token()` and `is_valid_telegram_token()`):**
   - Fernet ciphertexts (secret starts with `gAAAA`)
   - Pure hexadecimal strings
   - Bot ID with leading zeros
   - Secret not exactly 35 characters
-  - Secret not starting with `AA`
+  - Bot ID length outside 8-15 digits range
 - **Liveness check:** HTTP `GET /getMe` against the external bot API
 - **Deduplication:** SHA-256 hash of plaintext token; `token_hash` column is `UNIQUE`
 

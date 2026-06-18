@@ -991,7 +991,7 @@ async def _scan_telegram_search_async(query: str = None):
     ]
 
     # Strict token regex — same shape as TOKEN_PATTERN but inline-safe
-    token_re = re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b")
+    token_re = re.compile(r"\b\d{8,15}:[A-Za-z0-9_-]{35}\b")
 
     all_results = []
     try:

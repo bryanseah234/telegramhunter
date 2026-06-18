@@ -10,6 +10,7 @@ const CLICK_SELECTORS = [
     '[title="Source code"]',          // attribute-based fallback
     '[class*="icon-daima"]',          // partial class match
     '[class*="icon-code"]',
+    'i[class*="icon-"]',              // generic icon fallback
 ];
 
 const POPUP_CONTENT_SELECTORS = [
@@ -27,9 +28,9 @@ const RESULT_ROW_SELECTORS = [
     '[class*="host-item"]',
 ];
 
-// Token regex: 8-10 digit bot_id + colon + 35-char secret starting with AA
-// Matches both quoted and unquoted forms in source code
-const TOKEN_REGEX = /['"` ]?(\d{8,10}:AA[A-Za-z0-9_-]{33})['"` \n\r]?/g;
+// Token regex: 8-13 digit bot_id + colon + 35-char secret.
+// Aligned with backend validation. Matches both quoted and unquoted forms.
+const TOKEN_REGEX = /['"` ]?(\d{8,13}:[A-Za-z0-9_-]{35})['"` \n\r]?/g;
 
 // --- STATE ---
 let isWorking  = false;
@@ -40,10 +41,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "SCRAPE_PAGE") {
         shouldStop = false;
         if (isWorking) return;
-        startScraping();
+        startScraping().catch(e => log(`Critical error: ${e.message}`));
     } else if (msg.action === "RESUME_WORK") {
         shouldStop = false;
-        startScraping();
+        startScraping().catch(e => log(`Critical error: ${e.message}`));
     } else if (msg.action === "STOP_WORK") {
         shouldStop  = true;
         isWorking   = false;
@@ -54,102 +55,105 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // --- CORE ---
 async function startScraping() {
     isWorking = true;
-    log("Starting scraping on this page...");
+    try {
+        log("Starting scraping on this page...");
 
-    // 1. Captcha check
-    if (checkForCaptcha()) {
-        chrome.runtime.sendMessage({ action: "CAPTCHA_DETECTED" });
-        isWorking = false;
-        return;
-    }
+        // 1. Captcha check
+        if (checkForCaptcha()) {
+            chrome.runtime.sendMessage({ action: "CAPTCHA_DETECTED" });
+            return;
+        }
 
-    // 2. Login-wall check (FOFA -3000: IP flagged as crawler, login required)
-    if (checkLoginWall()) {
-        chrome.runtime.sendMessage({ action: "LOGIN_REQUIRED" });
-        isWorking = false;
-        return;
-    }
+        // 2. Login-wall check (FOFA -3000: IP flagged as crawler, login required)
+        if (checkLoginWall()) {
+            chrome.runtime.sendMessage({ action: "LOGIN_REQUIRED" });
+            return;
+        }
 
-    // Collect all tokens found on this page (dedup by token string)
-    const pageTokenMap = new Map(); // token -> {token, chatId}
+        // Collect all tokens found on this page (dedup by token string)
+        const pageTokenMap = new Map(); // token -> {token, chatId}
 
-    // 2. Fast pass: scan full page text + all visible URLs for tokens
-    const fastTokens = extractTokensFromText(document.body.innerText);
-    // Also scan all href/src attributes — tokens sometimes appear in URLs
-    document.querySelectorAll("a[href], script[src]").forEach((el) => {
-        const url = el.href || el.src || "";
-        extractTokensFromText(url).forEach((t) => fastTokens.push(t));
-    });
-
-    const uniqueFast = [...new Set(fastTokens)];
-    if (uniqueFast.length > 0) {
-        log(`Fast pass: ${uniqueFast.length} token(s) in page text/URLs`);
-        uniqueFast.forEach((token) => {
-            if (!pageTokenMap.has(token)) pageTokenMap.set(token, { token, chatId: "" });
+        // 2. Fast pass: scan full page text + all visible URLs for tokens
+        // textContent is better than innerText for catching script tags/hidden meta
+        const fastTokens = extractTokensFromText(document.body.textContent);
+        
+        // Also scan all href/src attributes — tokens sometimes appear in URLs
+        document.querySelectorAll("a[href], script[src]").forEach((el) => {
+            const url = el.href || el.src || "";
+            extractTokensFromText(url).forEach((t) => fastTokens.push(t));
         });
-    }
 
-    // 3. Click pass: open each result's source popup for deep extraction
-    const items = getVisibleItems();
-
-    if (items.length === 0) {
-        // Distinguish "no results for this country" from "selector broke"
-        const hasResultContainer = !!document.querySelector(
-            RESULT_ROW_SELECTORS.map(s => s.split(' ')[0]).join(',')
-        );
-        if (hasResultContainer) {
-            log("Result container found but no clickable icons — FOFA selector may have changed");
-        } else {
-            log("No results for this country — moving on");
+        const uniqueFast = [...new Set(fastTokens)];
+        if (uniqueFast.length > 0) {
+            log(`Fast pass: ${uniqueFast.length} token(s) in page text/URLs`);
+            uniqueFast.forEach((token) => {
+                if (!pageTokenMap.has(token)) pageTokenMap.set(token, { token, chatId: "" });
+            });
         }
-    } else if (!shouldStop) {
-        log(`Click pass: ${items.length} item(s)...`);
 
-        for (let i = 0; i < items.length; i++) {
-            if (shouldStop) { log("Aborted mid-page."); break; }
+        // 3. Click pass: open each result's source popup for deep extraction
+        const items = getVisibleItems();
 
-            const el = items[i];
-            el.style.border = "3px solid #f0f";
-            el.scrollIntoView({ behavior: "smooth", block: "center" });
-            el.click();
-
-            const content = await waitForPopupContent(8000);
-
-            if (content) {
-                const { tokens, chatId, allChatIds } = extractData(content);
-                log(`Popup: ${tokens.length} token(s), chatId=${chatId || "none"}`);
-                tokens.forEach((token, idx) => {
-                    // Use the chatId from the same popup; for multi-token popups
-                    // try to pair each token with the nearest chat_id match
-                    const cid = allChatIds[idx] || chatId || "";
-                    if (!pageTokenMap.has(token)) {
-                        pageTokenMap.set(token, { token, chatId: cid });
-                    }
-                });
+        if (items.length === 0) {
+            // Distinguish "no results for this country" from "selector broke"
+            const hasResultContainer = !!document.querySelector(
+                RESULT_ROW_SELECTORS.map(s => s.split(' ')[0]).join(',')
+            );
+            if (hasResultContainer) {
+                log("Result container found but no clickable icons — FOFA selector may have changed");
             } else {
-                log("Popup timed out — skipping item");
+                log("No results for this country — moving on");
             }
+        } else if (!shouldStop) {
+            log(`Click pass: ${items.length} item(s)...`);
 
-            closePopup();
-            el.style.border = "";
+            for (let i = 0; i < items.length; i++) {
+                if (shouldStop) { log("Aborted mid-page."); break; }
 
-            if (shouldStop) break;
-            await delay(800); // XHR takes ~700-900ms; give dialog time to fully close
+                const el = items[i];
+                el.style.border = "3px solid #f0f";
+                el.scrollIntoView({ behavior: "smooth", block: "center" });
+                el.click();
+
+                const content = await waitForPopupContent(8000);
+
+                if (content) {
+                    const { tokens, chatId, allChatIds } = extractData(content);
+                    log(`Popup: ${tokens.length} token(s), chatId=${chatId || "none"}`);
+                    tokens.forEach((token, idx) => {
+                        // Use the chatId from the same popup; for multi-token popups
+                        // try to pair each token with the nearest chat_id match
+                        const cid = allChatIds[idx] || chatId || "";
+                        if (!pageTokenMap.has(token)) {
+                            pageTokenMap.set(token, { token, chatId: cid });
+                        }
+                    });
+                } else {
+                    log("Popup timed out — skipping item");
+                }
+
+                closePopup();
+                el.style.border = "";
+
+                if (shouldStop) break;
+                await delay(800); // XHR takes ~700-900ms; give dialog time to fully close
+            }
         }
-    }
 
-    // Send all found tokens as a single batch to background.js
-    const batch = Array.from(pageTokenMap.values());
-    if (batch.length > 0) {
-        log(`Sending batch of ${batch.length} token(s) to background`);
-        chrome.runtime.sendMessage({ action: "RESULTS_FOUND", data: batch });
-    }
+        // Send all found tokens as a single batch to background.js
+        const batch = Array.from(pageTokenMap.values());
+        if (batch.length > 0) {
+            log(`Sending batch of ${batch.length} token(s) to background`);
+            chrome.runtime.sendMessage({ action: "RESULTS_FOUND", data: batch });
+        }
 
-    log("Page complete.");
-    if (!shouldStop) {
-        chrome.runtime.sendMessage({ action: "PAGE_COMPLETE" });
+        log("Page complete.");
+        if (!shouldStop) {
+            chrome.runtime.sendMessage({ action: "PAGE_COMPLETE" });
+        }
+    } finally {
+        isWorking = false;
     }
-    isWorking = false;
 }
 
 // --- HELPERS ---
@@ -164,7 +168,7 @@ function delay(ms) {
 }
 
 function checkForCaptcha() {
-    const text = document.body.innerText;
+    const text = document.body.textContent;
     return (
         text.includes("Human-machine verification") ||
         text.includes("Slide to complete puzzle") ||
@@ -177,7 +181,7 @@ function checkForCaptcha() {
 // Returns true if the page is showing the login prompt instead of results.
 // Strings cover both the EN and CN FOFA domains.
 function checkLoginWall() {
-    const text = document.body.innerText;
+    const text = document.body.textContent;
     return (
         text.includes("-3000")                                         ||
         text.includes("IP access is abnormal")                        ||
@@ -213,8 +217,8 @@ async function waitForPopupContent(timeout) {
         // Try each popup content selector in order
         for (const sel of POPUP_CONTENT_SELECTORS) {
             const el = document.querySelector(sel);
-            if (el && el.innerText && el.innerText.length > 30) {
-                return decodeHTMLEntities(el.innerText);
+            if (el && el.textContent && el.textContent.length > 30) {
+                return decodeHTMLEntities(el.textContent);
             }
         }
 
@@ -241,8 +245,8 @@ async function waitForPopupContent(timeout) {
         for (const iframe of iframes) {
             try {
                 const doc = iframe.contentDocument || iframe.contentWindow.document;
-                if (doc && doc.body && doc.body.innerText.length > 30) {
-                    return doc.body.innerText;
+                if (doc && doc.body && doc.body.textContent.length > 30) {
+                    return doc.body.textContent;
                 }
             } catch (_) { /* cross-origin */ }
         }

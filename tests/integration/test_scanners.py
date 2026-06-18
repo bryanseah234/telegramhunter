@@ -13,7 +13,7 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 # ── Mock Redis so scanners don't need it running locally ─────────────────────
 # The pause check (redis_client.get("system:paused")) returns None = not paused
