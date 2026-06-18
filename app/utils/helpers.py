@@ -9,7 +9,7 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 
 # Token validation regex (reused across scanners)
-TOKEN_PATTERN = re.compile(r'(?<![A-Za-z0-9])(?:bot)?(\d{8,10}:[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])')
+TOKEN_PATTERN = re.compile(r'(?<![A-Za-z0-9])(?:bot)?(\d{8,15}:[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])')
 CHAT_ID_PATTERN = re.compile(r'(?:chat_id|chat|target|cid)[=_":\s]+([-\d]+)', re.IGNORECASE)
 
 
@@ -36,10 +36,10 @@ def is_valid_telegram_token(token_str: str) -> bool:
         parts = token_str.split(":", 1)
         bot_id, secret = parts
         
-        # Bot ID must be 8-10 digits, no leading zeros
+        # Bot ID must be 8-15 digits, no leading zeros
         if not bot_id.isdigit():
             return False
-        if len(bot_id) < 8 or len(bot_id) > 10:
+        if len(bot_id) < 8 or len(bot_id) > 15:
             return False
         if len(bot_id) > 1 and bot_id.startswith("0"):
             return False

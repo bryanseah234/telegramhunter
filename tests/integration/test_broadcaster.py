@@ -10,7 +10,7 @@ logging.basicConfig(
 )
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from app.services.user_agent_srv import user_agent
 from app.services.broadcaster_srv import BroadcasterService

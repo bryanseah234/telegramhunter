@@ -1,7 +1,7 @@
 import asyncio
 import os
 import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.core.config import settings
 from telethon import TelegramClient
