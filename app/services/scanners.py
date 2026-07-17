@@ -17,6 +17,8 @@ import urllib3
 import logging
 import random
 import functools
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 logger = logging.getLogger("scanners")
 
@@ -74,6 +76,12 @@ SPOOFED_HEADERS = {
 # Handles bare tokens and /bot{token} URL form (e.g. api.telegram.org/bot123:xxx)
 # Negative lookbehind on [A-Za-z0-9] so "mybot12345:..." won't match, but "/bot12345:..." will.
 TOKEN_PATTERN = re.compile(r'(?<![A-Za-z0-9])(?:bot)?(\d{8,15}:[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])')
+ADJACENT_ENDPOINT_REGEX = re.compile(
+    r"(https?://[^\s'\"]+)|"
+    r"(?:[a-zA-Z0-9_]+_(?:HOST|DOMAIN|URL|IP|SERVER|API|ENDPOINT|PORT)\s*[:=]\s*[\"']?([^\s'\"]+)[\"']?)",
+    re.IGNORECASE,
+)
+LOCAL_ENDPOINT_VALUES = {"127.0.0.1", "0.0.0.0", "localhost", "::1"}
 
 
 def _is_valid_token(token_str: str) -> bool:
@@ -121,6 +129,54 @@ def _is_valid_token(token_str: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _token_context(code_text: str, token: str, line_radius: int = 50) -> str:
+    lines = (code_text or "").splitlines()
+    if not lines:
+        return code_text or ""
+    for idx, line in enumerate(lines):
+        if token in line:
+            start = max(0, idx - line_radius)
+            end = min(len(lines), idx + line_radius + 1)
+            return "\n".join(lines[start:end])
+    return code_text or ""
+
+
+def _is_remote_endpoint(value: str) -> bool:
+    if not value:
+        return False
+    clean = value.strip().strip("',\")]}>,")
+    if not clean:
+        return False
+    parsed = urlparse(clean if "://" in clean else f"//{clean}")
+    host = parsed.hostname or clean.split("/")[0].split(":")[0]
+    if host.lower() in LOCAL_ENDPOINT_VALUES:
+        return False
+    return "." in host or host.replace(".", "").isdigit() or "/" in clean
+
+
+def extract_infrastructure_context(
+    code_text: str,
+    source_meta: Dict[str, Any],
+    token: str | None = None,
+) -> Dict[str, Any]:
+    context_text = _token_context(code_text, token) if token else (code_text or "")
+    endpoints = set()
+    for url_match, config_match in ADJACENT_ENDPOINT_REGEX.findall(context_text):
+        candidate = (url_match or config_match or "").strip().strip("',\")]}>,")
+        if _is_remote_endpoint(candidate):
+            endpoints.add(candidate)
+
+    if not endpoints:
+        return {}
+
+    return {
+        "source_file_path": source_meta.get("path") or source_meta.get("file") or source_meta.get("filename"),
+        "repository_uri": source_meta.get("repository") or source_meta.get("repo") or source_meta.get("project_id"),
+        "co_located_endpoints": sorted(endpoints),
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 # Strict Regex: \b (boundary) + digits + : + 35 chars + \b
 # Regex for extracting chat_id (e.g., chat_id=12345 or "chat_id": 12345)
@@ -659,15 +715,26 @@ class GithubService:
                             content = raw_res.text
                             found = TOKEN_PATTERN.findall(content)
                             local_res = []
+                            source_meta = {
+                                "source": "github",
+                                "repository": item.get('repository', {}).get('full_name'),
+                                "repo": item.get('repository', {}).get('full_name'),
+                                "path": item.get('path'),
+                                "file_url": item.get('html_url'),
+                            }
                             for t in found:
                                 if not _is_valid_token(t): continue
+                                meta = dict(source_meta)
+                                infrastructure_context = extract_infrastructure_context(
+                                    content,
+                                    source_meta,
+                                    token=t,
+                                )
+                                if infrastructure_context:
+                                    meta["infrastructure_context"] = infrastructure_context
                                 local_res.append({
                                     "token": t,
-                                    "meta": {
-                                        "source": "github",
-                                        "repo": item.get('repository', {}).get('full_name'),
-                                        "file_url": item.get('html_url')
-                                    }
+                                    "meta": meta
                                 })
                             return local_res
                         except Exception:

