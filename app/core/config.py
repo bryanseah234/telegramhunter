@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     MONITOR_GROUP_ID: int | str
     WHITELISTED_BOT_IDS: str = "" # Comma-separated IDs (or usernames)
     ANONYMOUS_ADMIN_ID: int = 1087968824  # Telegram anonymous group admin bot ID
+    AUTO_ARCHIVE_MEDIA: bool = False
 
     # Bot IDs that belong to US — never scan, validate, scrape, or broadcast about these.
     # Comma-separated bot IDs (numeric only, no tokens).

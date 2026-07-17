@@ -10,6 +10,8 @@ from app.services.user_agent_srv import user_agent
 
 logger = logging.getLogger("broadcaster")
 
+ARCHIVE_MEDIA_TYPES = {"document", "photo", "audio", "video"}
+
 class BroadcasterService:
     def __init__(self):
         self.bot_tokens = settings.bot_tokens
@@ -86,6 +88,21 @@ class BroadcasterService:
                         message_thread_id=thread_id if thread_id != 1 else None, # 1 often causes issues
                         text=to_send_text
                     )
+                    if (
+                        settings.AUTO_ARCHIVE_MEDIA
+                        and media_type in ARCHIVE_MEDIA_TYPES
+                        and msg_obj.get("chat_id")
+                        and msg_obj.get("telegram_msg_id")
+                    ):
+                        asyncio.create_task(
+                            user_agent.archive_media_transiently(
+                                msg_obj["chat_id"],
+                                int(msg_obj["telegram_msg_id"]),
+                                target_chat_id=group_id,
+                                topic_id=thread_id,
+                                caption=f"Archived Attachment [ID: {msg_obj.get('id', msg_id)}]",
+                            )
+                        )
                     return
                 except Forbidden:
                     self._failed_tokens.add(token)

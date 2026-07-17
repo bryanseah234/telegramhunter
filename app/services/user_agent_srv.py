@@ -6,6 +6,7 @@ from app.core.config import settings
 import time
 import logging
 import socket
+import uuid
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("user_agent")
@@ -636,6 +637,71 @@ class UserAgentService:
                 logger.error(f"    ❌ [UserAgent] Send failed: {e}")
                 return False
             finally: await self._disconnect()
+
+    async def archive_media_transiently(
+        self,
+        entity_or_chat_id: int | str,
+        message_id: int,
+        target_chat_id: int | str,
+        topic_id: int | None = None,
+        caption: str = "",
+    ) -> bool:
+        """
+        Download a source attachment to a temporary file, re-upload it, then
+        immediately remove the local file regardless of upload outcome.
+        """
+        temp_path = ""
+        async with self.lock:
+            if not await self.start():
+                return False
+            try:
+                source = int(entity_or_chat_id) if str(entity_or_chat_id).lstrip("-").isdigit() else entity_or_chat_id
+                target = int(target_chat_id) if str(target_chat_id).lstrip("-").isdigit() else target_chat_id
+                message = await self.client.get_messages(source, ids=message_id)
+                if not message or not getattr(message, "media", None):
+                    logger.warning(
+                        f"    ⚠️ [UserAgent] No archiveable media for chat={entity_or_chat_id} msg={message_id}"
+                    )
+                    return False
+
+                original_name = os.path.basename(str(getattr(getattr(message, "file", None), "name", "") or ""))
+                filename = f"archive_{uuid.uuid4().hex[:8]}_{message_id}"
+                if original_name:
+                    filename = f"{filename}_{original_name}"
+                else:
+                    filename = f"{filename}.bin"
+                temp_path = os.path.join("/tmp", filename)
+
+                downloaded_path = await self.client.download_media(message, file=temp_path)
+                if downloaded_path:
+                    temp_path = str(downloaded_path)
+
+                try:
+                    await self.client.send_file(
+                        target,
+                        temp_path,
+                        caption=(caption or "")[:1024],
+                        reply_to=topic_id if topic_id != 1 else None,
+                    )
+                    logger.info(
+                        f"    📦 [UserAgent] Archived media msg={message_id} from {entity_or_chat_id} to {target_chat_id}"
+                    )
+                    return True
+                finally:
+                    if temp_path and os.path.exists(temp_path):
+                        os.remove(temp_path)
+            except Exception as e:
+                logger.warning(
+                    f"    ⚠️ [UserAgent] Transient media archive failed for chat={entity_or_chat_id} msg={message_id}: {e}"
+                )
+                return False
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception as cleanup_err:
+                        logger.warning(f"    ⚠️ [UserAgent] Temp archive cleanup failed: {cleanup_err}")
+                await self._disconnect()
 
     async def clear_removed_users(self, group_id: int | str) -> int:
         async with self.lock:
