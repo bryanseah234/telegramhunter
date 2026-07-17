@@ -74,9 +74,9 @@ All scanner keys degrade gracefully when absent  the corresponding scanner is si
 | Variable | Scanner |
 |---|---|
 | `SHODAN_KEY` | Shodan |
-| `FOFA_EMAIL` + `FOFA_KEY` | FOFA |
+| `FOFA_EMAIL` + `FOFA_KEY` | FOFA API (paid plan only) |
 | `URLSCAN_KEY` | URLScan.io |
-| `GITHUB_TOKEN` | GitHub Code Search + Gists |
+| `GITHUB_TOKEN` or `GITHUB_TOKENS` | GitHub Code Search + Gists |
 | `GITLAB_TOKEN` | GitLab |
 | `BITBUCKET_USER` + `BITBUCKET_API_TOKEN` | Bitbucket (Bearer auth) |
 | `PUBLICWWW_KEY` | PublicWWW |
@@ -84,6 +84,8 @@ All scanner keys degrade gracefully when absent  the corresponding scanner is si
 | `GOOGLE_SEARCH_KEY` + `GOOGLE_CSE_ID` | Google Custom Search |
 | `NETLAS_API_KEY_1` | Netlas account 1 (50 req/day) |
 | `NETLAS_API_KEY_2` | Netlas account 2 (100 req/day) |
+
+If you are not paying for FOFA API access, leave `FOFA_EMAIL` and `FOFA_KEY` empty. The FOFA web / extension collection path still works without API credentials.
 
 ---
 
@@ -373,6 +375,18 @@ NEXT_PUBLIC_SUPABASE_KEY=<anon-key>
    - **Supabase URL** and **Anon Key** (for direct write fallback)
    - **Write Secret** (must match `app.extension_write_secret` in your Supabase DB)
    - **API URL** (recommended  e.g. `http://localhost:8011`) for server-side encryption
+
+Recommended unpaid FOFA workflow:
+
+1. Use the FOFA website or your FOFA scraping extension to collect candidate hits.
+2. Let this Chrome extension capture the tokens from those FOFA pages.
+3. Set **API URL** so the extension sends findings to `/ingest/extension/credentials`; that keeps token encryption on the server side.
+4. Leave `FOFA_EMAIL` and `FOFA_KEY` empty unless you later decide to pay for FOFA API access.
+
+Notes:
+- The FOFA API scanner is optional and only applies when `FOFA_EMAIL` and `FOFA_KEY` are configured.
+- The extension path works without FOFA API credentials.
+- Direct Supabase writes are still available as a fallback, but the API route is the safer default.
 
 ---
 

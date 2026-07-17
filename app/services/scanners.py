@@ -4,6 +4,7 @@ Also exports shared utilities: TOKEN_PATTERN, _is_valid_token, _perform_active_d
 Complementary services (GithubGistService, GrepAppService, etc.) live in scanners_extension.py.
 """
 import httpx
+from app.utils.http_client import get_async_http_client
 import asyncio
 import hashlib
 import json
@@ -1141,7 +1142,7 @@ class SourcegraphService:
         results: List[Dict[str, Any]] = []
         queries = [query] if query else list(self.QUERIES)
 
-        async with httpx.AsyncClient(
+        async with get_async_http_client(
             timeout=self.timeout,
             follow_redirects=True,
             headers={"User-Agent": "telegramhunter/1.0 (+research)"},

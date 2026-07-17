@@ -6,6 +6,23 @@ from app.core.config import settings
 
 logger = logging.getLogger("bot_manager")
 
+
+def _parse_proxy_url(proxy_url: str) -> tuple:
+    """Parse a proxy URL into the 6-element tuple expected by Telethon/PySocks."""
+    import socks
+    import urllib.parse
+    parsed = urllib.parse.urlparse(proxy_url)
+    if not parsed.hostname or not parsed.port:
+        raise ValueError(f"Invalid proxy URL configured: missing hostname or port in '{proxy_url}'")
+    if parsed.scheme in ("socks5", "socks5h"):
+        proxy_type = socks.SOCKS5
+    elif parsed.scheme in ("http", "https"):
+        proxy_type = socks.HTTP
+    else:
+        raise ValueError(f"Unsupported proxy scheme '{parsed.scheme}'. Must be socks5, http, or https.")
+    return (proxy_type, parsed.hostname, parsed.port, True, parsed.username, parsed.password)
+
+
 _MAX_CACHED_CLIENTS = 50  # evict LRU entries beyond this to bound memory
 
 
@@ -44,7 +61,8 @@ class BotClientManager:
             import os
             pid = os.getpid()
             logger.info(f"🚀 [BotManager] [PID:{pid}] Creating fresh connection for bot...")
-            client = TelegramClient(MemorySession(), self.api_id, self.api_hash)
+            proxy_tuple = _parse_proxy_url(settings.TELETHON_PROXY_URL) if settings.TELETHON_PROXY_URL else None
+            client = TelegramClient(MemorySession(), self.api_id, self.api_hash, proxy=proxy_tuple)
             try:
                 await asyncio.wait_for(client.start(bot_token=bot_token), timeout=30.0)
             except asyncio.TimeoutError:

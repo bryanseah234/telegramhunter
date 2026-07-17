@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional, TypedDict
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 import asyncio
 from telethon import TelegramClient, errors
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
@@ -11,6 +11,7 @@ from telethon.errors import (
 from app.core.config import settings
 import logging
 import httpx
+from app.utils.http_client import get_async_http_client
 
 logger = logging.getLogger("scraper")
 
@@ -924,6 +925,78 @@ class ScraperService:
                     )
 
         return bot_info, discovered_chats
+
+    async def _http_preflight_check(self, auth_token: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any], bool]:
+        """
+        Lightweight HTTP-only check to verify token validity, fetch webhook info,
+        and retrieve recent updates before committing to a full Telethon scrape.
+
+        Returns (formatted_updates, meta_dict, is_revoked).
+        Updates use the same schema keys as ScraperService.scrape_history() so they
+        can be inserted into exfiltrated_messages after adding credential_id.
+        """
+        try:
+            # Warm the monitor group cache before iterating updates
+            monitor_ids = await _resolve_monitor_group_ids_async()
+
+            async with get_async_http_client(timeout=10.0) as client:
+                # 1. Check webhook info and token validity
+                resp = await client.get(f"https://api.telegram.org/bot{auth_token}/getWebhookInfo")
+                if resp.status_code == 401:
+                    return ([], {}, True)
+
+                meta_dict: Dict[str, Any] = {}
+                if resp.status_code == 200:
+                    webhook_url = resp.json().get("result", {}).get("url")
+                    if webhook_url:
+                        meta_dict = {"webhook_url": webhook_url}
+
+                # 2. Fetch recent updates
+                resp = await client.get(
+                    f"https://api.telegram.org/bot{auth_token}/getUpdates",
+                    params={"limit": 100},
+                )
+                formatted_updates: List[Dict[str, Any]] = []
+                if resp.status_code == 200:
+                    updates = resp.json().get("result", [])
+                    for update in updates:
+                        target = update.get("message") or update.get("channel_post")
+                        if not target:
+                            continue
+                        chat_id = target.get("chat", {}).get("id")
+                        if str(chat_id) in monitor_ids or chat_id in monitor_ids:
+                            continue
+                        # Media detection
+                        media_type = "text"
+                        file_meta: Dict[str, Any] = {}
+                        if "photo" in target:
+                            media_type = "photo"
+                        elif "document" in target:
+                            media_type = "document"
+                        formatted_updates.append({
+                            "telegram_msg_id": target.get("message_id"),
+                            "sender_name": (
+                                target.get("from", {}).get("username")
+                                or target.get("from", {}).get("first_name")
+                                or "Unknown"
+                            ),
+                            "content": target.get("text") or target.get("caption") or "",
+                            "media_type": media_type,
+                            "file_meta": file_meta,
+                        })
+                elif resp.status_code == 409:
+                    logger.warning("    ⚠️ [Preflight] getUpdates 409 — webhook conflict")
+                elif resp.status_code == 429:
+                    logger.warning("    ⚠️ [Preflight] getUpdates 429 — rate limited")
+                elif resp.status_code == 401:
+                    return ([], {}, True)
+                else:
+                    logger.info(f"    ℹ️ [Preflight] getUpdates HTTP {resp.status_code}")
+
+            return (formatted_updates, meta_dict, False)
+        except Exception as e:
+            logger.error(f"❌ [Scraper] Preflight check error: {e}")
+            return ([], {}, False)
 
     async def _kickstart_bot(self, bot_token: str) -> int:
         """

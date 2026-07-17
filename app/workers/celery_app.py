@@ -327,6 +327,10 @@ app.conf.update(
             "task": "scanner.scan_bitbucket",
             "schedule": crontab(minute=30, hour="*/8"),
         },
+        "scan-searchcode-every-8-hours": {
+            "task": "scanner.scan_searchcode",
+            "schedule": crontab(minute=5, hour="*/8"),
+        },
         # PublicWWW — HTML source code search (free tier 200 req/day)
         "scan-publicwww-12hours": {
             "task": "scanner.scan_publicwww",

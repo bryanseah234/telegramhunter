@@ -35,6 +35,35 @@ def validate_database():
         print(f"   ❌ Database connection failed: {e}")
         return False
 
+def validate_runtime_guards():
+    """Validate code paths that have recently broken in production-like runs."""
+    print("\n4. Validating runtime guards...")
+    try:
+        from app.core.db_retry import DatabaseHealth
+        from app.services import bot_listener
+        from app.workers.tasks import validation_tasks
+
+        if not callable(DatabaseHealth.check_connection):
+            raise TypeError("DatabaseHealth.check_connection is not callable")
+
+        with open(bot_listener.__file__, "r", encoding="utf-8") as fh:
+            bot_source = fh.read()
+        if "_resolve_monitor_group_ids_async" not in bot_source:
+            raise AssertionError("bot_listener.log_update is not using async monitor guard")
+
+        with open(validation_tasks.__file__, "r", encoding="utf-8") as fh:
+            validation_source = fh.read()
+        if '"confidence_score": score,' in validation_source and '".update({' in validation_source:
+            marker = '.update({\n                        "meta": new_meta,\n                        "confidence_score": score,'
+            if marker in validation_source:
+                raise AssertionError("validation backfill still updates top-level confidence_score")
+
+        print("   ✅ Runtime guards look correct")
+        return True
+    except Exception as e:
+        print(f"   ❌ Runtime guard validation failed: {e}")
+        return False
+
 def validate_redis():
     """Validate Redis connection"""
     print("\n3. Validating Redis connection...")
@@ -51,7 +80,7 @@ def validate_redis():
 
 def validate_telegram_api():
     """Validate Telegram Bot API"""
-    print("\n4. Validating Telegram Bot API...")
+    print("\n5. Validating Telegram Bot API...")
     try:
         import requests
         from app.core.config import settings
@@ -72,19 +101,32 @@ def validate_telegram_api():
 
 def validate_optional_services():
     """Check optional API keys"""
-    print("\n5. Checking optional services...")
+    print("\n6. Checking optional services...")
     from app.core.config import settings
-    
-    services = {
-        "Shodan": settings.SHODAN_KEY,
-        "URLScan": settings.URLSCAN_KEY,
-        "GitHub": settings.GITHUB_TOKEN,
-        "FOFA": settings.FOFA_KEY and settings.FOFA_EMAIL,
-    }
-    
-    for name, has_key in services.items():
-        status = "✅" if has_key else "⚠️ "
-        print(f"   {status} {name}: {'Configured' if has_key else 'Not configured'}")
+
+    github_configured = bool(settings.GITHUB_TOKEN or settings.GITHUB_TOKENS)
+    fofa_api_configured = bool(settings.FOFA_KEY and settings.FOFA_EMAIL)
+
+    services = [
+        ("Shodan", bool(settings.SHODAN_KEY), "Configured", "Not configured"),
+        ("URLScan", bool(settings.URLSCAN_KEY), "Configured", "Not configured"),
+        (
+            "GitHub",
+            github_configured,
+            "Configured (GITHUB_TOKEN or GITHUB_TOKENS)",
+            "Not configured",
+        ),
+        (
+            "FOFA API",
+            fofa_api_configured,
+            "Configured",
+            "Not configured (optional; web / extension mode is fine)",
+        ),
+    ]
+
+    for name, is_configured, configured_msg, missing_msg in services:
+        status = "✅" if is_configured else "ℹ️ "
+        print(f"   {status} {name}: {configured_msg if is_configured else missing_msg}")
     
     return True
 
@@ -96,6 +138,7 @@ if __name__ == "__main__":
     results = [
         validate_config(),
         validate_database(),
+        validate_runtime_guards(),
         validate_redis(),
         validate_telegram_api(),
         validate_optional_services()

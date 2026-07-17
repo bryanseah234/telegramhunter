@@ -49,6 +49,8 @@ def with_db_retry(func: Callable[..., T]) -> Callable[..., T]:
                     raise
         raise last_exc  # unreachable but satisfies type checker
 
+    return wrapper
+
 
 
 class DatabaseHealth:
