@@ -16,10 +16,38 @@ from celery.exceptions import SoftTimeLimitExceeded
 
 logger = logging.getLogger("flow.tasks")
 
+HIGH_PRIORITY_DOMAIN_KEYWORDS = (
+    "wallet",
+    "pay",
+    "payment",
+    "checkout",
+    "exchange",
+    "crypto",
+    "blockchain",
+)
+
 # Helper for async DB execution
 async def async_execute(query_builder):
     """Executes a Supabase query builder synchronously in a background thread."""
     return await asyncio.to_thread(query_builder.execute)
+
+
+async def _send_alert(message: str) -> None:
+    """Best-effort control-channel notification for high-priority telemetry."""
+    try:
+        await get_broadcaster().send_log(message)
+    except Exception as e:
+        logger.debug(f"[TelemetryParser] Alert dispatch skipped: {e}")
+
+
+def _is_high_priority_indicator(indicator: Dict[str, Any]) -> bool:
+    indicator_type = indicator.get("indicator_type")
+    indicator_value = str(indicator.get("indicator_value") or "").lower()
+    if indicator_type == "wallet_address":
+        return True
+    if indicator_type != "network_domain":
+        return False
+    return any(keyword in indicator_value for keyword in HIGH_PRIORITY_DOMAIN_KEYWORDS)
 
 
 async def _hydrate_message_rows_for_index(message_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -112,7 +140,21 @@ async def _index_telemetry_indicators(message_rows: List[Dict[str, Any]]) -> int
             ),
             timeout=10.0,
         )
-        return len(result.data or [])
+        inserted_rows = result.data or []
+        high_priority_rows = [
+            row for row in inserted_rows
+            if _is_high_priority_indicator(row)
+        ]
+        if high_priority_rows:
+            preview = ", ".join(
+                str(row.get("indicator_value") or "")[:80]
+                for row in high_priority_rows[:5]
+            )
+            await _send_alert(
+                "**Telemetry Entity Indexed**\n"
+                f"New financial or high-priority infrastructure strings: `{preview}`"
+            )
+        return len(inserted_rows)
     except Exception as e:
         logger.debug(f"[TelemetryParser] Indicator indexing skipped: {e}")
         return 0

@@ -21,6 +21,8 @@ from telegram.request import HTTPXRequest
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 import shutil
+from typing import Any
+from telegram.helpers import escape_markdown
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -203,6 +205,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /commands - List all commands (Alias for /help)\n"
             "• /starthunter - Login a new Telegram account\n"
             "• /bots - Show all available bots\n"
+            "• /telemetry - Show canonical telemetry analytics\n"
             "• /backfill - Re-broadcast messages stuck in General topic\n\n"
             f"**Available Bots**: {bot_list}\n\n"
             "Only authorized administrators can use these commands."
@@ -231,6 +234,116 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     lines.append(f"\n**Total**: {len(_bot_usernames)} bots")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+INDICATOR_TYPES = ("network_domain", "canonical_url", "wallet_address")
+
+
+async def _execute_db(query_builder):
+    return await asyncio.to_thread(query_builder.execute)
+
+
+async def _telemetry_count(indicator_type: str) -> int:
+    response = await _execute_db(
+        db.table("telemetry_indicators")
+        .select("id", count="exact")
+        .eq("indicator_type", indicator_type)
+        .limit(1)
+    )
+    return int(response.count or 0)
+
+
+async def _fetch_telemetry_summary() -> dict[str, Any]:
+    counts = {
+        indicator_type: await _telemetry_count(indicator_type)
+        for indicator_type in INDICATOR_TYPES
+    }
+    recent_wallets = await _execute_db(
+        db.table("telemetry_indicators")
+        .select("indicator_value, first_seen_at")
+        .eq("indicator_type", "wallet_address")
+        .order("first_seen_at", desc=True)
+        .limit(5)
+    )
+    recent_domains = await _execute_db(
+        db.table("telemetry_indicators")
+        .select("indicator_value, first_seen_at")
+        .eq("indicator_type", "network_domain")
+        .order("first_seen_at", desc=True)
+        .limit(5)
+    )
+    gateway_credentials = await _execute_db(
+        db.table("discovered_credentials")
+        .select("id, meta")
+        .eq("status", "active")
+        .not_.is_("meta->gateway_telemetry->>configured_webhook_url", "null")
+        .limit(5)
+    )
+    return {
+        "counts": counts,
+        "recent_wallets": recent_wallets.data or [],
+        "recent_domains": recent_domains.data or [],
+        "gateway_credentials": gateway_credentials.data or [],
+    }
+
+
+def _telemetry_value_lines(rows: list[dict[str, Any]], empty_text: str) -> list[str]:
+    if not rows:
+        return [escape_markdown(empty_text, version=2)]
+    lines = []
+    for row in rows:
+        value = str(row.get("indicator_value") or "").strip()
+        if value:
+            lines.append(f"• `{escape_markdown(value[:96], version=2)}`")
+    return lines or [escape_markdown(empty_text, version=2)]
+
+
+def _format_telemetry_summary(summary: dict[str, Any]) -> str:
+    counts = summary.get("counts") or {}
+    gateway_lines: list[str] = []
+    for row in summary.get("gateway_credentials") or []:
+        meta = row.get("meta") if isinstance(row, dict) else {}
+        gateway = (meta or {}).get("gateway_telemetry") if isinstance(meta, dict) else {}
+        endpoint = (gateway or {}).get("configured_webhook_url") if isinstance(gateway, dict) else None
+        if endpoint:
+            gateway_lines.append(f"• `{escape_markdown(str(endpoint)[:96], version=2)}`")
+    if not gateway_lines:
+        gateway_lines.append(escape_markdown("No active webhook gateway endpoints indexed.", version=2))
+
+    lines = [
+        "*Telemetry Analytics*",
+        "",
+        f"*Network Domains:* `{counts.get('network_domain', 0)}`",
+        f"*Canonical URLs:* `{counts.get('canonical_url', 0)}`",
+        f"*Blockchain Wallets:* `{counts.get('wallet_address', 0)}`",
+        "",
+        "*Webhook Gateway Endpoints*",
+        *gateway_lines,
+        "",
+        "*Recent Wallet Entities*",
+        *_telemetry_value_lines(summary.get("recent_wallets") or [], "No wallet entities indexed."),
+        "",
+        "*Recent Network Domains*",
+        *_telemetry_value_lines(summary.get("recent_domains") or [], "No network domains indexed."),
+    ]
+    return "\n".join(lines)
+
+
+async def telemetry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await update.message.reply_text("⚠️ This command is restricted to administrators.")
+        return
+
+    try:
+        summary = await _fetch_telemetry_summary()
+        await update.message.reply_text(
+            _format_telemetry_summary(summary),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.error(f"Telemetry summary failed: {e}")
+        await update.message.reply_text("❌ Telemetry analytics are temporarily unavailable.")
 
 async def backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Triggers re-broadcast of messages stuck in General topic."""
@@ -804,6 +917,8 @@ def _build_application(token: str) -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("commands", help_command))
     application.add_handler(CommandHandler("bots", bots_command))
+    application.add_handler(CommandHandler("telemetry", telemetry_command))
+    application.add_handler(CommandHandler("indicators", telemetry_command))
     application.add_handler(CommandHandler("backfill", backfill_command))
 
     login_conv_handler = ConversationHandler(

@@ -2,14 +2,18 @@
 
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
-import { LucideTarget } from "lucide-react";
-import type { Credential } from "@/app/page";
+import { BarChart3, MessageSquareText, LucideTarget } from "lucide-react";
+import type { Credential, DashboardView } from "@/app/page";
 
 export default function Sidebar({
     selected,
+    activeView,
+    onViewChange,
     onSelect,
 }: {
     selected: Credential | null;
+    activeView: DashboardView;
+    onViewChange: (view: DashboardView) => void;
     onSelect: (cred: Credential) => void;
 }) {
     const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -117,6 +121,32 @@ export default function Sidebar({
                 <h2 className="font-bold text-lg flex items-center gap-2 text-slate-800">
                     <LucideTarget className="text-red-600" /> Discovered Bots
                 </h2>
+                <div className="mt-3 grid grid-cols-2 gap-1 rounded-md bg-slate-100 p-1">
+                    <button
+                        type="button"
+                        onClick={() => onViewChange("chat")}
+                        className={`flex items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs font-semibold transition-colors ${
+                            activeView === "chat"
+                                ? "bg-white text-slate-900 shadow-sm"
+                                : "text-slate-500 hover:text-slate-800"
+                        }`}
+                    >
+                        <MessageSquareText className="h-3.5 w-3.5" />
+                        Chat Feed
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => onViewChange("telemetry")}
+                        className={`flex items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs font-semibold transition-colors ${
+                            activeView === "telemetry"
+                                ? "bg-white text-slate-900 shadow-sm"
+                                : "text-slate-500 hover:text-slate-800"
+                        }`}
+                    >
+                        <BarChart3 className="h-3.5 w-3.5" />
+                        Telemetry
+                    </button>
+                </div>
             </div>
             <div className="flex flex-col">
                 {credentials.map((cred) => (

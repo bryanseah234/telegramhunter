@@ -2,11 +2,12 @@
 
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
-import { LucideSend } from "lucide-react";
-import type { Credential } from "@/app/page";
+import { ChevronDown, ChevronUp, Globe2, LucideSend, Server, TerminalSquare } from "lucide-react";
+import type { Credential, InfrastructureContext } from "@/app/page";
 
 export default function ChatWindow({ credential }: { credential: Credential | null }) {
-    const [messages, setMessages] = useState<any[]>([]);
+    const [messages, setMessages] = useState<ChatMessage[]>([]);
+    const [isProfileExpanded, setIsProfileExpanded] = useState(true);
     const bottomRef = useRef<HTMLDivElement>(null);
     const credentialId = credential?.id;
 
@@ -23,7 +24,7 @@ export default function ChatWindow({ credential }: { credential: Credential | nu
                 .limit(200);
 
             // Reverse to show oldest-first in the chat view
-            if (data) setMessages(data.reverse());
+            if (data) setMessages((data as ChatMessage[]).reverse());
         }
 
         fetchMsgs();
@@ -39,7 +40,7 @@ export default function ChatWindow({ credential }: { credential: Credential | nu
                     filter: `credential_id=eq.${credentialId}`,
                 },
                 (payload) => {
-                    setMessages((prev) => [...prev, payload.new]);
+                    setMessages((prev) => [...prev, payload.new as ChatMessage]);
                 }
             )
             .subscribe();
@@ -64,21 +65,101 @@ export default function ChatWindow({ credential }: { credential: Credential | nu
     const displayName = credential.meta?.bot_username
         ? `@${credential.meta.bot_username}`
         : credential.meta?.chat_title || "Unknown Bot";
+    const gatewayTelemetry = credential.meta?.gateway_telemetry;
+    const infrastructureContext = credential.meta?.infrastructure_context;
+    const commands = (gatewayTelemetry?.command_dictionary || [])
+        .map((item) => item.command)
+        .filter((command): command is string => Boolean(command));
+    const infrastructureEndpoints = collectInfrastructureEndpoints(infrastructureContext);
+    const hasEndpointProfile = Boolean(
+        gatewayTelemetry?.configured_webhook_url ||
+        gatewayTelemetry?.resolved_ip_address ||
+        commands.length > 0 ||
+        infrastructureEndpoints.length > 0
+    );
 
     return (
         <div className="flex-1 flex flex-col h-full bg-[#E5DDD5]">
-            <div className="p-3 bg-white border-b shadow-sm flex items-center gap-3">
-                <div className="flex flex-col min-w-0">
-                    <span className="font-semibold text-slate-800 truncate">{displayName}</span>
-                    <div className="flex items-center gap-2 mt-0.5">
-                        <span className="bg-slate-200 px-1.5 py-0.5 rounded text-[10px] uppercase font-mono text-slate-600">
-                            {credential.source}
-                        </span>
-                        <span className="text-xs font-mono text-slate-400">
-                            ID: {credential.meta?.bot_id || credential.id.slice(0, 8)}
-                        </span>
+            <div className="border-b bg-white/90 shadow-sm backdrop-blur">
+                <div className="p-3 flex items-center gap-3">
+                    <div className="flex flex-col min-w-0">
+                        <span className="font-semibold text-slate-800 truncate">{displayName}</span>
+                        <div className="flex items-center gap-2 mt-0.5">
+                            <span className="bg-slate-200 px-1.5 py-0.5 rounded text-[10px] uppercase font-mono text-slate-600">
+                                {credential.source}
+                            </span>
+                            <span className="text-xs font-mono text-slate-400">
+                                ID: {credential.meta?.bot_id || credential.id.slice(0, 8)}
+                            </span>
+                        </div>
                     </div>
                 </div>
+                {hasEndpointProfile && (
+                    <div className="mx-3 mb-3 rounded border border-white/60 bg-white/70 shadow-sm backdrop-blur-md">
+                        <button
+                            type="button"
+                            onClick={() => setIsProfileExpanded((value) => !value)}
+                            className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
+                        >
+                            <span className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+                                <Server className="h-4 w-4 text-cyan-600" />
+                                Endpoint Profile
+                            </span>
+                            {isProfileExpanded ? (
+                                <ChevronUp className="h-4 w-4 text-slate-500" />
+                            ) : (
+                                <ChevronDown className="h-4 w-4 text-slate-500" />
+                            )}
+                        </button>
+                        {isProfileExpanded && (
+                            <div className="grid grid-cols-3 gap-3 border-t border-slate-200 px-3 py-3 text-xs">
+                                <div className="min-w-0 space-y-1">
+                                    <div className="flex items-center gap-1.5 font-semibold uppercase text-slate-500">
+                                        <Globe2 className="h-3.5 w-3.5" />
+                                        Gateway
+                                    </div>
+                                    <div className="truncate font-mono text-slate-800" title={gatewayTelemetry?.configured_webhook_url || undefined}>
+                                        {gatewayTelemetry?.configured_webhook_url || "No remote endpoint"}
+                                    </div>
+                                    {gatewayTelemetry?.resolved_ip_address && (
+                                        <div className="font-mono text-slate-500">
+                                            {gatewayTelemetry.resolved_ip_address}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="min-w-0 space-y-2">
+                                    <div className="flex items-center gap-1.5 font-semibold uppercase text-slate-500">
+                                        <TerminalSquare className="h-3.5 w-3.5" />
+                                        Commands
+                                    </div>
+                                    <div className="flex flex-wrap gap-1">
+                                        {commands.length > 0 ? commands.slice(0, 8).map((command) => (
+                                            <span key={command} className="rounded bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] text-white">
+                                                /{command.replace(/^\//, "")}
+                                            </span>
+                                        )) : (
+                                            <span className="text-slate-500">No commands indexed</span>
+                                        )}
+                                    </div>
+                                </div>
+                                <div className="min-w-0 space-y-2">
+                                    <div className="font-semibold uppercase text-slate-500">
+                                        Repository Constants
+                                    </div>
+                                    <div className="flex flex-wrap gap-1">
+                                        {infrastructureEndpoints.length > 0 ? infrastructureEndpoints.slice(0, 6).map((endpoint) => (
+                                            <span key={endpoint} className="max-w-full truncate rounded bg-cyan-50 px-1.5 py-0.5 font-mono text-[10px] text-cyan-800" title={endpoint}>
+                                                {endpoint}
+                                            </span>
+                                        )) : (
+                                            <span className="text-slate-500">No adjacent endpoints indexed</span>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 flex flex-col space-y-3">
@@ -97,7 +178,9 @@ export default function ChatWindow({ credential }: { credential: Credential | nu
                             {msg.content}
                         </p>
                         <span className="text-[10px] text-slate-400 self-end mt-1">
-                            {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            {msg.created_at
+                                ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                                : ""}
                         </span>
                     </div>
                 ))}
@@ -111,4 +194,40 @@ export default function ChatWindow({ credential }: { credential: Credential | nu
             </div>
         </div>
     );
+}
+
+type ChatMessage = {
+    id: string;
+    sender_name?: string | null;
+    content?: string | null;
+    created_at?: string | null;
+};
+
+function collectInfrastructureEndpoints(context?: InfrastructureContext): string[] {
+    if (!context) {
+        return [];
+    }
+
+    const endpoints = new Set<string>();
+    context.co_located_endpoints?.forEach((value) => {
+        if (value) endpoints.add(value);
+    });
+
+    Object.entries(context).forEach(([key, value]) => {
+        if (!/(?:_HOST|_DOMAIN|_URL|_IP|HOST|DOMAIN|URL|IP)$/i.test(key)) {
+            return;
+        }
+        if (typeof value === "string" && value.trim()) {
+            endpoints.add(value.trim());
+        }
+        if (Array.isArray(value)) {
+            value.forEach((item) => {
+                if (typeof item === "string" && item.trim()) {
+                    endpoints.add(item.trim());
+                }
+            });
+        }
+    });
+
+    return Array.from(endpoints).sort();
 }

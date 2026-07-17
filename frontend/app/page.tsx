@@ -3,7 +3,25 @@
 import { useState, useEffect } from "react";
 import Sidebar from "@/components/Sidebar";
 import ChatWindow from "@/components/ChatWindow";
+import TelemetryAnalyticsView from "@/components/TelemetryAnalyticsView";
 import { LucideTarget, LucideSmartphone } from "lucide-react";
+
+export type DashboardView = "chat" | "telemetry";
+
+export type GatewayTelemetry = {
+  configured_webhook_url?: string | null;
+  resolved_ip_address?: string | null;
+  command_dictionary?: Array<{ command?: string | null; description?: string | null }>;
+  error_profile?: unknown;
+  last_error_info?: string | null;
+};
+
+export type InfrastructureContext = {
+  source_file_path?: string | null;
+  repository_uri?: string | null;
+  co_located_endpoints?: string[];
+  [key: string]: unknown;
+};
 
 export interface Credential {
   id: string;
@@ -16,12 +34,15 @@ export interface Credential {
     chat_title?: string;
     bot_username?: string;
     bot_id?: string;
+    gateway_telemetry?: GatewayTelemetry;
+    infrastructure_context?: InfrastructureContext;
     [key: string]: unknown;
   };
 }
 
 export default function Home() {
   const [selected, setSelected] = useState<Credential | null>(null);
+  const [activeView, setActiveView] = useState<DashboardView>("chat");
   const [isMobile, setIsMobile] = useState(false);
 
   useEffect(() => {
@@ -59,8 +80,20 @@ export default function Home() {
 
   return (
     <main className="flex h-screen w-full overflow-hidden bg-white">
-      <Sidebar selected={selected} onSelect={setSelected} />
-      <ChatWindow credential={selected} />
+      <Sidebar
+        selected={selected}
+        activeView={activeView}
+        onViewChange={setActiveView}
+        onSelect={(cred) => {
+          setSelected(cred);
+          setActiveView("chat");
+        }}
+      />
+      {activeView === "telemetry" ? (
+        <TelemetryAnalyticsView />
+      ) : (
+        <ChatWindow credential={selected} />
+      )}
     </main>
   );
 }
