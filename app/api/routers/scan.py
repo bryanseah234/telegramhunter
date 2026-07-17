@@ -27,10 +27,10 @@ async def trigger_scan(request: ScanRequest, x_monitor_key: str | None = Header(
     task_name = f"scanner.scan_{request.source.lower()}"
 
     # Valid sources — censys and hybrid removed (no tasks exist for them)
-    if request.source.lower() not in ["shodan", "fofa", "github", "gitlab", "urlscan"]:
+    if request.source.lower() not in ["shodan", "fofa", "github", "gitlab", "urlscan", "sourcegraph", "searchcode"]:
         raise HTTPException(
             status_code=400,
-            detail="Unsupported source. Use 'shodan', 'fofa', 'github', 'gitlab', or 'urlscan'."
+            detail="Unsupported source. Use 'shodan', 'fofa', 'github', 'gitlab', 'urlscan', 'sourcegraph', or 'searchcode'."
         )
 
     try:

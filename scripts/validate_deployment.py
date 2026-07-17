@@ -127,6 +127,35 @@ def test_new_features():
         print(f"   ❌ Feature test failed: {e}")
         return False
 
+
+def test_runtime_regressions():
+    """Catch the high-value regressions that have recently escaped into runtime."""
+    print("\n8. Testing runtime regression guards...")
+    try:
+        import asyncio
+
+        from app.core.db_retry import DatabaseHealth
+        from app.services import bot_listener
+        from app.workers.tasks import validation_tasks
+
+        if not callable(DatabaseHealth.check_connection):
+            raise AssertionError("DatabaseHealth.check_connection is not callable")
+
+        bot_source = open(bot_listener.__file__, "r", encoding="utf-8").read()
+        if "_resolve_monitor_group_ids_async" not in bot_source:
+            raise AssertionError("bot_listener.log_update is not using async monitor guard")
+
+        validation_source = open(validation_tasks.__file__, "r", encoding="utf-8").read()
+        if '".update({\n                        "meta": new_meta,\n                        "confidence_score": score,' in validation_source:
+            raise AssertionError("validation backfill still updates top-level confidence_score")
+
+        asyncio.run(asyncio.to_thread(DatabaseHealth.check_connection))
+        print("   ✅ Regression guards passed")
+        return True
+    except Exception as e:
+        print(f"   ❌ Runtime regression test failed: {e}")
+        return False
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Telegram Hunter - Deployment Validation")
@@ -139,7 +168,8 @@ if __name__ == "__main__":
         test_api_imports(),
         test_helper_imports(),
         test_config_validation(),
-        test_new_features()
+        test_new_features(),
+        test_runtime_regressions(),
     ]
     
     print("\n" + "=" * 60)

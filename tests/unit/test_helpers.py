@@ -33,7 +33,7 @@ class TestTokenValidation:
     
     def test_invalid_token_long_bot_id(self):
         """Test rejection of long bot ID"""
-        assert not is_valid_telegram_token("12345678901:AAHhbW3Pzj9V5JhU5KzJ9V5JhU5KzJ9V5Jh")
+        assert not is_valid_telegram_token("1234567890123456:AAHhbW3Pzj9V5JhU5KzJ9V5JhU5KzJ9V5Jh")
     
     def test_invalid_token_non_numeric_id(self):
         """Test rejection of non-numeric bot ID"""

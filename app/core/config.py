@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     # Account 1: 50 req/day, 2500 search coins  Account 2: 100 req/day, 5000 search coins
     NETLAS_API_KEY_1: Optional[str] = None
     NETLAS_API_KEY_2: Optional[str] = None
+
+    # Proxy Configuration — optional SOCKS5/HTTP proxies for external connections
+    TELETHON_PROXY_URL: Optional[str] = None
+    HTTP_PROXY_URL: Optional[str] = None
     
     # Target Countries (Tiered by Telegram usage volume)
     # Primary:   Top Telegram DAU per capita (CIS, South/Southeast Asia, MENA, LatAm)

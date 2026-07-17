@@ -769,8 +769,9 @@ async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # The bot is a member of the hub so it receives every broadcast message back;
     # logging each one is pure noise and leaks message content into container logs.
     if chat_id is not None:
-        from app.services.scraper_srv import _is_monitor_group
-        if _is_monitor_group(chat_id):
+        from app.services.scraper_srv import _resolve_monitor_group_ids_async
+        monitor_ids = await _resolve_monitor_group_ids_async()
+        if str(chat_id) in monitor_ids or chat_id in monitor_ids:
             return
 
     user = update.effective_user
