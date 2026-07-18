@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     WHITELISTED_BOT_IDS: str = "" # Comma-separated IDs (or usernames)
     ANONYMOUS_ADMIN_ID: int = 1087968824  # Telegram anonymous group admin bot ID
     AUTO_ARCHIVE_MEDIA: bool = False
+    MAX_ARCHIVE_SIZE_MB: int = 1024
+    ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS: int = 1800
+    ARCHIVE_UPLOAD_TIMEOUT_SECONDS: int = 1800
+    ARCHIVE_RETRY_ATTEMPTS: int = 2
+    ARCHIVE_RETRY_BACKOFF_SECONDS: float = 2.0
+    ARCHIVE_STALE_TMP_MAX_AGE_SECONDS: int = 1800
 
     # Bot IDs that belong to US — never scan, validate, scrape, or broadcast about these.
     # Comma-separated bot IDs (numeric only, no tokens).

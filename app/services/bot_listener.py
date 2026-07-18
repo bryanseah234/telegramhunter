@@ -396,6 +396,22 @@ async def _resolve_attachment_source_chat_id(row: dict[str, Any]) -> int | str |
     return rows[0].get("chat_id")
 
 
+def _format_archive_result_message(result) -> str:
+    if result.ok:
+        return "✅ Attachment retrieval complete."
+    if result.code == "too_large":
+        return f"Attachment skipped: {result.detail}"
+    if result.code == "timeout":
+        return f"Attachment transfer timed out: {result.detail}"
+    if result.code == "not_found":
+        return "Attachment payload is no longer available upstream."
+    if result.code == "upload_failed":
+        return f"Attachment upload failed after retry: {result.detail or 'upstream transfer failed'}"
+    if result.code == "session_unavailable":
+        return "Attachment retrieval is temporarily unavailable because no user session is ready."
+    return "Attachment payload is no longer available upstream."
+
+
 async def getfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         await update.message.reply_text("⚠️ This command is restricted to administrators.")
@@ -423,16 +439,13 @@ async def getfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Retrieving transient attachment from storage...")
     from app.services.user_agent_srv import user_agent
 
-    ok = await user_agent.archive_media_transiently(
+    result = await user_agent.archive_media_transiently(
         source_chat_id,
         int(row["telegram_msg_id"]),
         target_chat_id=update.effective_chat.id,
         caption=f"Archived Attachment [ID: {row['id']}]",
     )
-    if ok:
-        await update.message.reply_text("✅ Attachment retrieval complete.")
-    else:
-        await update.message.reply_text("Attachment payload is no longer available upstream.")
+    await update.message.reply_text(_format_archive_result_message(result))
 
 async def backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Triggers re-broadcast of messages stuck in General topic."""

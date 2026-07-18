@@ -7,6 +7,7 @@ import time
 import logging
 import socket
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("user_agent")
@@ -14,6 +15,8 @@ logger = logging.getLogger("user_agent")
 # MTProto conflict backoff (seconds) -- kept short since connections are brief
 _MTPROTO_CONFLICT_BACKOFF = 10
 _MTPROTO_MAX_RETRIES = 3
+ARCHIVE_TMP_DIR = "/tmp"
+ARCHIVE_TMP_PREFIX = "archive_"
 
 # Determine absolute path to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +25,23 @@ SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
 # Support multiple accounts via Env Var (default: user_session)
 SESSION_NAME = os.getenv("USER_SESSION_NAME", "user_session")
 SESSION_FILE = os.path.join(BASE_DIR, f"{SESSION_NAME}.session")
+
+
+@dataclass
+class ArchiveMediaResult:
+    ok: bool
+    code: str = "ok"
+    detail: str = ""
+    size_bytes: int | None = None
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    @property
+    def size_mb(self) -> float | None:
+        if self.size_bytes is None:
+            return None
+        return self.size_bytes / 1024 / 1024
 
 
 def _is_session_file_healthy(path: str) -> bool:
@@ -88,6 +108,7 @@ class UserAgentService:
         import os as _os
         self._instance_id = _os.getenv("WORKER_INSTANCE_ID", "worker-scrape")  # Override via env if needed
         self._current_phone = None
+        self._tmp_archive_sweep_done = False
 
     def _discover_sessions(self):
         """Scans BASE_DIR and telegram_accounts DB for valid .session files."""
@@ -161,6 +182,10 @@ class UserAgentService:
         Rotates through available sessions to find a usable one.
         On-demand pattern: caller MUST call _disconnect() when done.
         """
+        if not self._tmp_archive_sweep_done:
+            await asyncio.to_thread(self._cleanup_stale_tmp_archives)
+            self._tmp_archive_sweep_done = True
+
         if not self.sessions:
             self._discover_sessions()
             
@@ -294,6 +319,34 @@ class UserAgentService:
         
         logger.error("    ❌ [UserAgent] All sessions failed or on cooldown.")
         return False
+
+    def _cleanup_stale_tmp_archives(self) -> int:
+        """Remove orphaned transient archive files left by ungraceful shutdowns."""
+        removed = 0
+        now = time.time()
+        max_age = settings.ARCHIVE_STALE_TMP_MAX_AGE_SECONDS
+        try:
+            names = os.listdir(ARCHIVE_TMP_DIR)
+        except FileNotFoundError:
+            return 0
+        except Exception as e:
+            logger.warning(f"    ⚠️ [UserAgent] Could not scan archive temp dir: {e}")
+            return 0
+
+        for name in names:
+            if not name.startswith(ARCHIVE_TMP_PREFIX):
+                continue
+            path = os.path.join(ARCHIVE_TMP_DIR, name)
+            try:
+                if os.path.isfile(path) and now - os.path.getmtime(path) > max_age:
+                    os.remove(path)
+                    removed += 1
+            except Exception as e:
+                logger.warning(f"    ⚠️ [UserAgent] Could not remove stale archive temp file {path}: {e}")
+
+        if removed:
+            logger.info(f"    [UserAgent] Removed {removed} stale transient archive file(s).")
+        return removed
 
     async def _disconnect(self):
         try:
@@ -638,6 +691,78 @@ class UserAgentService:
                 return False
             finally: await self._disconnect()
 
+    @staticmethod
+    def _coerce_chat_ref(value: int | str) -> int | str:
+        return int(value) if str(value).lstrip("-").isdigit() else value
+
+    @staticmethod
+    def _archive_temp_path(message, message_id: int) -> str:
+        original_name = os.path.basename(str(getattr(getattr(message, "file", None), "name", "") or ""))
+        filename = f"{ARCHIVE_TMP_PREFIX}{uuid.uuid4().hex[:8]}_{message_id}"
+        if original_name:
+            filename = f"{filename}_{original_name}"
+        else:
+            filename = f"{filename}.bin"
+        return os.path.join(ARCHIVE_TMP_DIR, filename)
+
+    @staticmethod
+    def _archive_size_result(message) -> ArchiveMediaResult | None:
+        size_bytes = getattr(getattr(message, "file", None), "size", None)
+        if size_bytes is None:
+            return None
+
+        max_bytes = settings.MAX_ARCHIVE_SIZE_MB * 1024 * 1024
+        if size_bytes <= max_bytes:
+            return None
+
+        size_mb = size_bytes / 1024 / 1024
+        detail = (
+            f"Attachment is {size_mb:.1f} MB; "
+            f"limit is {settings.MAX_ARCHIVE_SIZE_MB} MB."
+        )
+        return ArchiveMediaResult(
+            ok=False,
+            code="too_large",
+            detail=detail,
+            size_bytes=size_bytes,
+        )
+
+    async def _send_archived_file_with_retries(
+        self,
+        target_chat_id: int | str,
+        temp_path: str,
+        topic_id: int | None,
+        caption: str,
+    ) -> ArchiveMediaResult:
+        attempts = max(1, settings.ARCHIVE_RETRY_ATTEMPTS)
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                await asyncio.wait_for(
+                    self.client.send_file(
+                        target_chat_id,
+                        temp_path,
+                        caption=(caption or "")[:1024],
+                        reply_to=topic_id if topic_id != 1 else None,
+                    ),
+                    timeout=settings.ARCHIVE_UPLOAD_TIMEOUT_SECONDS,
+                )
+                return ArchiveMediaResult(ok=True)
+            except asyncio.TimeoutError as e:
+                last_error = e
+                code = "timeout"
+            except Exception as e:
+                last_error = e
+                code = "upload_failed"
+
+            if attempt + 1 < attempts:
+                await asyncio.sleep(settings.ARCHIVE_RETRY_BACKOFF_SECONDS * (2 ** attempt))
+
+        detail = str(last_error)[:200] if last_error else "Upload failed."
+        if not detail and isinstance(last_error, asyncio.TimeoutError):
+            detail = f"Upload exceeded {settings.ARCHIVE_UPLOAD_TIMEOUT_SECONDS}s."
+        return ArchiveMediaResult(ok=False, code=code, detail=detail)
+
     async def archive_media_transiently(
         self,
         entity_or_chat_id: int | str,
@@ -645,7 +770,7 @@ class UserAgentService:
         target_chat_id: int | str,
         topic_id: int | None = None,
         caption: str = "",
-    ) -> bool:
+    ) -> ArchiveMediaResult:
         """
         Download a source attachment to a temporary file, re-upload it, then
         immediately remove the local file regardless of upload outcome.
@@ -653,48 +778,61 @@ class UserAgentService:
         temp_path = ""
         async with self.lock:
             if not await self.start():
-                return False
+                return ArchiveMediaResult(ok=False, code="session_unavailable", detail="No usable user session.")
             try:
-                source = int(entity_or_chat_id) if str(entity_or_chat_id).lstrip("-").isdigit() else entity_or_chat_id
-                target = int(target_chat_id) if str(target_chat_id).lstrip("-").isdigit() else target_chat_id
+                source = self._coerce_chat_ref(entity_or_chat_id)
+                target = self._coerce_chat_ref(target_chat_id)
                 message = await self.client.get_messages(source, ids=message_id)
                 if not message or not getattr(message, "media", None):
+                    detail = f"No archiveable media for chat={entity_or_chat_id} msg={message_id}"
+                    logger.warning(f"    ⚠️ [UserAgent] {detail}")
+                    return ArchiveMediaResult(ok=False, code="not_found", detail=detail)
+
+                size_result = self._archive_size_result(message)
+                if size_result is not None:
                     logger.warning(
-                        f"    ⚠️ [UserAgent] No archiveable media for chat={entity_or_chat_id} msg={message_id}"
+                        f"    ⚠️ [UserAgent] Archive skipped for msg={message_id}: {size_result.detail}"
                     )
-                    return False
+                    return size_result
 
-                original_name = os.path.basename(str(getattr(getattr(message, "file", None), "name", "") or ""))
-                filename = f"archive_{uuid.uuid4().hex[:8]}_{message_id}"
-                if original_name:
-                    filename = f"{filename}_{original_name}"
-                else:
-                    filename = f"{filename}.bin"
-                temp_path = os.path.join("/tmp", filename)
+                temp_path = self._archive_temp_path(message, message_id)
+                try:
+                    downloaded_path = await asyncio.wait_for(
+                        self.client.download_media(message, file=temp_path),
+                        timeout=settings.ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    return ArchiveMediaResult(
+                        ok=False,
+                        code="timeout",
+                        detail=f"Download exceeded {settings.ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS}s.",
+                        size_bytes=getattr(getattr(message, "file", None), "size", None),
+                    )
 
-                downloaded_path = await self.client.download_media(message, file=temp_path)
                 if downloaded_path:
                     temp_path = str(downloaded_path)
 
-                try:
-                    await self.client.send_file(
-                        target,
-                        temp_path,
-                        caption=(caption or "")[:1024],
-                        reply_to=topic_id if topic_id != 1 else None,
-                    )
+                result = await self._send_archived_file_with_retries(
+                    target,
+                    temp_path,
+                    topic_id,
+                    caption,
+                )
+                result.size_bytes = getattr(getattr(message, "file", None), "size", None)
+                if result.ok:
                     logger.info(
                         f"    📦 [UserAgent] Archived media msg={message_id} from {entity_or_chat_id} to {target_chat_id}"
                     )
-                    return True
-                finally:
-                    if temp_path and os.path.exists(temp_path):
-                        os.remove(temp_path)
+                else:
+                    logger.warning(
+                        f"    ⚠️ [UserAgent] Archive upload failed for msg={message_id}: {result.code} {result.detail}"
+                    )
+                return result
             except Exception as e:
                 logger.warning(
                     f"    ⚠️ [UserAgent] Transient media archive failed for chat={entity_or_chat_id} msg={message_id}: {e}"
                 )
-                return False
+                return ArchiveMediaResult(ok=False, code="error", detail=str(e)[:200])
             finally:
                 if temp_path and os.path.exists(temp_path):
                     try:

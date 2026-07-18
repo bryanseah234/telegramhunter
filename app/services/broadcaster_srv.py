@@ -51,6 +51,19 @@ class BroadcasterService:
             await asyncio.sleep(wait_time)
         self._last_send_time = time.time()
 
+    async def _auto_archive_media(self, group_id: int | str, thread_id: int, msg_obj: dict, msg_id):
+        result = await user_agent.archive_media_transiently(
+            msg_obj["chat_id"],
+            int(msg_obj["telegram_msg_id"]),
+            target_chat_id=group_id,
+            topic_id=thread_id,
+            caption=f"Archived Attachment [ID: {msg_obj.get('id', msg_id)}]",
+        )
+        if not result.ok:
+            logger.warning(
+                f"[Broadcaster] Auto-archive skipped for msg={msg_id}: {result.code} {result.detail}"
+            )
+
     async def send_message(self, group_id: int | str, thread_id: int, msg_obj: dict):
         """
         Sends a message using the next available identity (Bot or User Account).
@@ -94,15 +107,7 @@ class BroadcasterService:
                         and msg_obj.get("chat_id")
                         and msg_obj.get("telegram_msg_id")
                     ):
-                        asyncio.create_task(
-                            user_agent.archive_media_transiently(
-                                msg_obj["chat_id"],
-                                int(msg_obj["telegram_msg_id"]),
-                                target_chat_id=group_id,
-                                topic_id=thread_id,
-                                caption=f"Archived Attachment [ID: {msg_obj.get('id', msg_id)}]",
-                            )
-                        )
+                        asyncio.create_task(self._auto_archive_media(group_id, thread_id, msg_obj, msg_id))
                     return
                 except Forbidden:
                     self._failed_tokens.add(token)
