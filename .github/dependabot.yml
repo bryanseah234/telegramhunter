@@ -1,31 +1,18 @@
 version: 2
 updates:
-  # Python dependencies
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      time: "09:00"
-    open-pull-requests-limit: 5
-
-  # npm (Next.js frontend)
-  - package-ecosystem: "npm"
-    directory: "/frontend"
-    schedule:
-      interval: "weekly"
-      time: "09:00"
-    open-pull-requests-limit: 5
-
-  # Docker
-  - package-ecosystem: "docker"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      time: "09:00"
-
-  # GitHub Actions
+  # Conservative shared default.
+  #
+  # Language package ecosystems are intentionally not synced from sourcerepo:
+  # Dependabot has no manifest-aware conditionals in this file, so a global
+  # all-ecosystems template creates duplicate PRs and false CI failures in
+  # repos that do not use those ecosystems. Add npm, bun, pip, etc. directly
+  # in a target repo only when that repo actually owns the matching manifest.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-      time: "09:00"
+      day: "monday"
+      time: "15:00"
+    labels:
+      - "dependencies"
+      - "github-actions"
