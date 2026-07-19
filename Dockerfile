@@ -2,7 +2,7 @@
 # Stage 1: builder — system build deps + Python packages.
 # Only rebuilds when requirements.txt changes.
 # ============================================
-FROM python:3.11-slim-trixie AS builder
+FROM python:3.11-slim-bookworm AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -11,9 +11,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# System dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+# System dependencies and latest security upgrades
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -28,7 +28,7 @@ RUN python -m venv /opt/venv \
 # Stage 2: final — runtime deps + app code only.
 # Rebuilds fast: only copies source files.
 # ============================================
-FROM python:3.11-slim-trixie AS final
+FROM python:3.11-slim-bookworm AS final
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -38,8 +38,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Non-root user
-RUN useradd -m -u 1000 celery
+# Security upgrades and non-root user creation
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean \
+    && useradd -m -u 1000 celery
 
 # Python runtime dependencies from builder; build-essential stays out of final image.
 COPY --from=builder /opt/venv /opt/venv

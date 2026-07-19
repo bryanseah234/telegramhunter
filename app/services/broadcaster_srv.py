@@ -51,9 +51,31 @@ class BroadcasterService:
             await asyncio.sleep(wait_time)
         self._last_send_time = time.time()
 
+    async def _resolve_chat_id(self, msg_obj: dict) -> int | str | None:
+        if msg_obj.get("chat_id"):
+            return msg_obj["chat_id"]
+        cred_info = msg_obj.get("discovered_credentials", {})
+        if isinstance(cred_info, dict) and cred_info.get("chat_id"):
+            return cred_info["chat_id"]
+        cred_id = msg_obj.get("credential_id")
+        if not cred_id:
+            return None
+        from app.db.supabase import db
+        from app.utils.helpers import async_execute
+        try:
+            res = await async_execute(db.table("discovered_credentials").select("chat_id").eq("id", cred_id).limit(1))
+            rows = res.data or []
+            return rows[0].get("chat_id") if rows else None
+        except Exception:
+            return None
+
     async def _auto_archive_media(self, group_id: int | str, thread_id: int, msg_obj: dict, msg_id):
+        source_chat_id = await self._resolve_chat_id(msg_obj)
+        if not source_chat_id:
+            logger.warning(f"[Broadcaster] Auto-archive skipped for msg={msg_id}: missing source chat_id")
+            return
         result = await user_agent.archive_media_transiently(
-            msg_obj["chat_id"],
+            source_chat_id,
             int(msg_obj["telegram_msg_id"]),
             target_chat_id=group_id,
             topic_id=thread_id,
@@ -104,13 +126,10 @@ class BroadcasterService:
                     if (
                         settings.AUTO_ARCHIVE_MEDIA
                         and media_type in ARCHIVE_MEDIA_TYPES
-                        and msg_obj.get("chat_id")
                         and msg_obj.get("telegram_msg_id")
                     ):
                         asyncio.create_task(self._auto_archive_media(group_id, thread_id, msg_obj, msg_id))
                     return
-                except Forbidden:
-                    self._failed_tokens.add(token)
                     logger.warning(f"⚠️ Bot {token[:10]}... kicked. Rotating...")
                 except TelegramError as e:
                     err_str = str(e)

@@ -473,13 +473,20 @@ class UserAgentService:
                     await self.client(InviteToChannelRequest(channel=group_entity, users=[bot_entity]))
                     logger.info("    ✅ [UserAgent] Invite successful (Channel/Supergroup).")
                     return True
-                except Exception:
+                except errors.UserAlreadyParticipantError:
+                    logger.info("    ℹ️ [UserAgent] Bot is already inside the group.")
+                    return True
+                except Exception as e_channel:
+                    logger.debug(f"    ℹ️ [UserAgent] InviteToChannelRequest skipped ({e_channel}), trying AddChatUserRequest...")
                     try:
                         await self.client(AddChatUserRequest(chat_id=group_entity.id, user_id=bot_entity, fwd_limit=0))
                         logger.info("    ✅ [UserAgent] Invite successful (Basic Chat).")
                         return True
+                    except errors.UserAlreadyParticipantError:
+                        logger.info("    ℹ️ [UserAgent] Bot is already inside the group.")
+                        return True
                     except Exception as e_chat:
-                        logger.error(f"    ❌ [UserAgent] Invite failed: {e_chat}")
+                        logger.error(f"    ❌ [UserAgent] Invite failed (Channel err: {e_channel} | Chat err: {e_chat})")
                         return False
             except errors.FloodWaitError as e:
                 await self._handle_flood_error(e)
