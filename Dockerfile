@@ -1,9 +1,8 @@
 # ============================================
-# Stage 1: base — system deps + Python packages
-# All services share this cached layer.
+# Stage 1: builder — system build deps + Python packages.
 # Only rebuilds when requirements.txt changes.
 # ============================================
-FROM python:3.11-slim-bookworm AS base
+FROM python:3.11-slim-trixie AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -15,23 +14,35 @@ WORKDIR /app
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    dos2unix \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
 # Python dependencies — cached separately from app code
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
     && rm -rf ~/.cache/pip
+
+# ============================================
+# Stage 2: final — runtime deps + app code only.
+# Rebuilds fast: only copies source files.
+# ============================================
+FROM python:3.11-slim-trixie AS final
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONOPTIMIZE=0 \
+    PYTHONPATH=/app \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
 
 # Non-root user
 RUN useradd -m -u 1000 celery
 
-# ============================================
-# Stage 2: final — app code only
-# Rebuilds fast: only copies source files.
-# ============================================
-FROM base AS final
+# Python runtime dependencies from builder; build-essential stays out of final image.
+COPY --from=builder /opt/venv /opt/venv
 
 # Application code
 COPY . .
@@ -43,8 +54,8 @@ COPY . .
 RUN mkdir -p /app/imports/processed /app/beat && \
     chown -R celery:celery /app
 
-# Fix line endings (Windows CRLF → LF) and make entrypoint executable
-RUN dos2unix /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
+# Fix line endings (Windows CRLF -> LF) and make entrypoint executable.
+RUN sed -i 's/\r$//' /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 USER celery
 
