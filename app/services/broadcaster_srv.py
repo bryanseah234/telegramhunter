@@ -1,6 +1,6 @@
 from telegram import Bot
 from telegram.request import HTTPXRequest
-from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError, Forbidden
+from telegram.error import TelegramError, Forbidden
 import asyncio
 import logging
 import time
@@ -12,11 +12,18 @@ logger = logging.getLogger("broadcaster")
 
 ARCHIVE_MEDIA_TYPES = {"document", "photo", "audio", "video"}
 
+
+async def _async_execute(query_builder):
+    """Run synchronous PostgREST calls without blocking the event loop."""
+    return await asyncio.to_thread(query_builder.execute)
+
+
 class BroadcasterService:
     def __init__(self):
         self.bot_tokens = settings.bot_tokens
         self._bots = {} # token -> Bot instance
         self._failed_tokens: set = set()
+        self._archive_tasks: set[asyncio.Task] = set()
 
         # Rotation pool: bots ONLY for broadcast messages.
         # MTProto user sessions are reserved exclusively for admin operations
@@ -52,21 +59,35 @@ class BroadcasterService:
         self._last_send_time = time.time()
 
     async def _resolve_chat_id(self, msg_obj: dict) -> int | str | None:
-        if msg_obj.get("chat_id"):
-            return msg_obj["chat_id"]
-        cred_info = msg_obj.get("discovered_credentials", {})
-        if isinstance(cred_info, dict) and cred_info.get("chat_id"):
-            return cred_info["chat_id"]
+        direct_chat_id = msg_obj.get("chat_id")
+        if direct_chat_id:
+            return direct_chat_id
+
+        cred_info = msg_obj.get("discovered_credentials") or msg_obj.get("credential") or {}
+        if isinstance(cred_info, dict):
+            joined_chat_id = cred_info.get("chat_id")
+            if joined_chat_id:
+                return joined_chat_id
+
         cred_id = msg_obj.get("credential_id")
         if not cred_id:
             return None
-        from app.db.supabase import db
-        from app.utils.helpers import async_execute
+
         try:
-            res = await async_execute(db.table("discovered_credentials").select("chat_id").eq("id", cred_id).limit(1))
+            from app.core.database import db
+
+            res = await _async_execute(
+                db.table("discovered_credentials")
+                .select("chat_id")
+                .eq("id", cred_id)
+                .limit(1)
+            )
             rows = res.data or []
             return rows[0].get("chat_id") if rows else None
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                f"[Broadcaster] Failed to resolve source chat_id for credential={cred_id}: {exc}"
+            )
             return None
 
     async def _auto_archive_media(self, group_id: int | str, thread_id: int, msg_obj: dict, msg_id):
@@ -85,6 +106,21 @@ class BroadcasterService:
             logger.warning(
                 f"[Broadcaster] Auto-archive skipped for msg={msg_id}: {result.code} {result.detail}"
             )
+
+    def _schedule_auto_archive(self, group_id: int | str, thread_id: int, msg_obj: dict, msg_id):
+        task = asyncio.create_task(self._auto_archive_media(group_id, thread_id, msg_obj, msg_id))
+        self._archive_tasks.add(task)
+
+        def _log_archive_result(done_task: asyncio.Task):
+            self._archive_tasks.discard(done_task)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                logger.debug(f"[Broadcaster] Auto-archive task cancelled for msg={msg_id}")
+            except Exception:
+                logger.exception(f"[Broadcaster] Auto-archive task crashed for msg={msg_id}")
+
+        task.add_done_callback(_log_archive_result)
 
     async def send_message(self, group_id: int | str, thread_id: int, msg_obj: dict):
         """
@@ -128,8 +164,10 @@ class BroadcasterService:
                         and media_type in ARCHIVE_MEDIA_TYPES
                         and msg_obj.get("telegram_msg_id")
                     ):
-                        asyncio.create_task(self._auto_archive_media(group_id, thread_id, msg_obj, msg_id))
+                        self._schedule_auto_archive(group_id, thread_id, msg_obj, msg_id)
                     return
+                except Forbidden:
+                    self._failed_tokens.add(token)
                     logger.warning(f"⚠️ Bot {token[:10]}... kicked. Rotating...")
                 except TelegramError as e:
                     err_str = str(e)

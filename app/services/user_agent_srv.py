@@ -476,6 +476,8 @@ class UserAgentService:
                 except errors.UserAlreadyParticipantError:
                     logger.info("    ℹ️ [UserAgent] Bot is already inside the group.")
                     return True
+                except errors.FloodWaitError:
+                    raise
                 except Exception as e_channel:
                     logger.debug(f"    ℹ️ [UserAgent] InviteToChannelRequest skipped ({e_channel}), trying AddChatUserRequest...")
                     try:
@@ -485,6 +487,8 @@ class UserAgentService:
                     except errors.UserAlreadyParticipantError:
                         logger.info("    ℹ️ [UserAgent] Bot is already inside the group.")
                         return True
+                    except errors.FloodWaitError:
+                        raise
                     except Exception as e_chat:
                         logger.error(f"    ❌ [UserAgent] Invite failed (Channel err: {e_channel} | Chat err: {e_chat})")
                         return False
