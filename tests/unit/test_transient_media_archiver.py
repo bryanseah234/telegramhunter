@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import os
+import sys
 import time
 
 import pytest
@@ -39,6 +40,49 @@ class _FakeArchiveClient:
             raise RuntimeError("upload failed")
 
 
+class _MissingEntityThenUsernameClient(_FakeArchiveClient):
+    def __init__(self, *, missing_source, username_source="@ItsWatermarkBot"):
+        super().__init__()
+        self.missing_source = missing_source
+        self.username_source = username_source
+        self.get_message_calls = []
+
+    async def get_messages(self, entity_or_chat_id, ids):
+        self.get_message_calls.append((entity_or_chat_id, ids))
+        if entity_or_chat_id == self.missing_source:
+            raise ValueError(
+                f"Could not find the input entity for PeerUser(user_id={entity_or_chat_id})"
+            )
+        if entity_or_chat_id == self.username_source:
+            return self.message
+        raise AssertionError(f"unexpected source {entity_or_chat_id}")
+
+
+class _FakeCredentialQuery:
+    def __init__(self):
+        self.selected = None
+        self.or_filters = None
+
+    def select(self, columns):
+        self.selected = columns
+        return self
+
+    def or_(self, filters):
+        self.or_filters = filters
+        return self
+
+    def limit(self, _size):
+        return self
+
+
+class _FakeCredentialDb:
+    def __init__(self):
+        self.query = _FakeCredentialQuery()
+
+    def table(self, _table_name):
+        return self.query
+
+
 def _service_with_client(client):
     service = UserAgentService()
     service.client = client
@@ -52,6 +96,17 @@ def _service_with_client(client):
     service.start = start
     service._disconnect = disconnect
     return service
+
+
+def _patch_archive_credential_lookup(monkeypatch, rows):
+    fake_db = _FakeCredentialDb()
+    monkeypatch.setitem(sys.modules, "app.core.database", SimpleNamespace(db=fake_db))
+
+    async def fake_async_execute(_query):
+        return SimpleNamespace(data=rows)
+
+    monkeypatch.setattr(user_agent_srv, "_async_execute", fake_async_execute)
+    return fake_db
 
 
 @pytest.mark.asyncio
@@ -100,6 +155,72 @@ async def test_archive_media_transiently_downloads_reuploads_and_cleans_up(monke
     assert sent["temp_path"].endswith("_42_evidence.pdf")
     assert removed_paths == [sent["temp_path"]]
     assert service.disconnected is True
+
+
+@pytest.mark.asyncio
+async def test_archive_media_transiently_retries_missing_entity_as_username(monkeypatch):
+    client = _MissingEntityThenUsernameClient(missing_source=8940899601)
+    service = _service_with_client(client)
+    existing_paths = set()
+    removed_paths = []
+    fake_db = _patch_archive_credential_lookup(
+        monkeypatch,
+        [{"meta": {"bot_username": "ItsWatermarkBot"}}],
+    )
+
+    def fake_exists(path):
+        return path in existing_paths
+
+    def fake_remove(path):
+        removed_paths.append(path)
+        existing_paths.discard(path)
+
+    original_download = client.download_media
+
+    async def tracked_download(message, file):
+        existing_paths.add(file)
+        return await original_download(message, file)
+
+    client.download_media = tracked_download
+    monkeypatch.setattr(user_agent_srv.os.path, "exists", fake_exists)
+    monkeypatch.setattr(user_agent_srv.os, "remove", fake_remove)
+
+    result = await service.archive_media_transiently(
+        8940899601,
+        47,
+        target_chat_id=-100999,
+        caption="Archived Attachment",
+    )
+
+    assert result.ok is True
+    assert result.code == "ok"
+    assert client.get_message_calls == [(8940899601, 47), ("@ItsWatermarkBot", 47)]
+    assert fake_db.query.selected == "meta"
+    assert fake_db.query.or_filters == "chat_id.eq.8940899601"
+    assert len(client.download_calls) == 1
+    assert len(client.send_calls) == 1
+    assert removed_paths == [client.send_calls[0]["temp_path"]]
+
+
+@pytest.mark.asyncio
+async def test_archive_media_transiently_returns_missing_access_hash_without_username(monkeypatch):
+    client = _MissingEntityThenUsernameClient(missing_source=8940899601)
+    service = _service_with_client(client)
+    fake_db = _patch_archive_credential_lookup(monkeypatch, [{"meta": {}}])
+
+    result = await service.archive_media_transiently(
+        8940899601,
+        48,
+        target_chat_id=-100999,
+    )
+
+    assert result.ok is False
+    assert result.code == "missing_access_hash"
+    assert "Missing Telethon access_hash" in result.detail
+    assert client.get_message_calls == [(8940899601, 48)]
+    assert fake_db.query.or_filters == "chat_id.eq.8940899601"
+    assert client.download_calls == []
+    assert client.send_calls == []
 
 
 @pytest.mark.asyncio

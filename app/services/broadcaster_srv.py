@@ -18,6 +18,18 @@ async def _async_execute(query_builder):
     return await asyncio.to_thread(query_builder.execute)
 
 
+def _username_from_meta(meta: object) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+    username = meta.get("bot_username")
+    if not isinstance(username, str):
+        return None
+    username = username.strip()
+    if not username:
+        return None
+    return username if username.startswith("@") else f"@{username}"
+
+
 class BroadcasterService:
     def __init__(self):
         self.bot_tokens = settings.bot_tokens
@@ -59,15 +71,18 @@ class BroadcasterService:
         self._last_send_time = time.time()
 
     async def _resolve_chat_id(self, msg_obj: dict) -> int | str | None:
-        direct_chat_id = msg_obj.get("chat_id")
-        if direct_chat_id:
-            return direct_chat_id
-
         cred_info = msg_obj.get("discovered_credentials") or msg_obj.get("credential") or {}
         if isinstance(cred_info, dict):
+            username = _username_from_meta(cred_info.get("meta"))
+            if username:
+                return username
             joined_chat_id = cred_info.get("chat_id")
             if joined_chat_id:
                 return joined_chat_id
+
+        direct_chat_id = msg_obj.get("chat_id")
+        if direct_chat_id:
+            return direct_chat_id
 
         cred_id = msg_obj.get("credential_id")
         if not cred_id:
@@ -78,12 +93,18 @@ class BroadcasterService:
 
             res = await _async_execute(
                 db.table("discovered_credentials")
-                .select("chat_id")
+                .select("chat_id, meta")
                 .eq("id", cred_id)
                 .limit(1)
             )
             rows = res.data or []
-            return rows[0].get("chat_id") if rows else None
+            if not rows:
+                return None
+            row = rows[0]
+            username = _username_from_meta(row.get("meta"))
+            if username:
+                return username
+            return row.get("chat_id")
         except Exception as exc:
             logger.warning(
                 f"[Broadcaster] Failed to resolve source chat_id for credential={cred_id}: {exc}"

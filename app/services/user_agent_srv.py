@@ -18,6 +18,74 @@ _MTPROTO_MAX_RETRIES = 3
 ARCHIVE_TMP_DIR = "/tmp"
 ARCHIVE_TMP_PREFIX = "archive_"
 
+
+async def _async_execute(query_builder):
+    return await asyncio.to_thread(query_builder.execute)
+
+
+def _username_from_meta(meta: object) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+    username = meta.get("bot_username")
+    if not isinstance(username, str):
+        return None
+    username = username.strip()
+    if not username:
+        return None
+    return username if username.startswith("@") else f"@{username}"
+
+
+def _credential_lookup_filter_for_source(source: int | str) -> str | None:
+    source_text = str(source).strip()
+    if source_text.lstrip("-").isdigit():
+        return f"chat_id.eq.{source_text}"
+    try:
+        uuid.UUID(source_text)
+    except (TypeError, ValueError):
+        return None
+    return f"id.eq.{source_text}"
+
+
+def _telethon_media_info(message) -> tuple[str, dict]:
+    if not getattr(message, "media", None):
+        return "text", {}
+
+    file_meta = {}
+    try:
+        from telethon import utils as telethon_utils
+
+        file_id = telethon_utils.pack_bot_file_id(message.media)
+        if file_id:
+            file_meta["file_id"] = file_id
+    except Exception:
+        pass
+
+    if isinstance(message.media, types.MessageMediaPhoto):
+        photo = getattr(message.media, "photo", None)
+        file_meta["wc"] = "photo"
+        file_meta["id"] = getattr(photo, "id", 0)
+        return "photo", file_meta
+
+    if isinstance(message.media, types.MessageMediaDocument):
+        document = getattr(message.media, "document", None)
+        mime = getattr(document, "mime_type", None) or getattr(getattr(message, "file", None), "mime_type", None)
+        if mime:
+            file_meta["mime"] = mime
+        file_name = getattr(getattr(message, "file", None), "name", None)
+        if file_name:
+            file_meta["file_name"] = file_name
+        doc_id = getattr(document, "id", None)
+        if doc_id is not None:
+            file_meta["id"] = doc_id
+        if isinstance(mime, str) and mime.startswith("video/"):
+            return "video", file_meta
+        if isinstance(mime, str) and mime.startswith("audio/"):
+            return "audio", file_meta
+        return "document", file_meta
+
+    return "other", file_meta
+
+
 # Determine absolute path to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
@@ -738,6 +806,72 @@ class UserAgentService:
             size_bytes=size_bytes,
         )
 
+    @staticmethod
+    def _should_retry_missing_entity(source: int | str, exc: Exception) -> bool:
+        return (
+            "Could not find the input entity" in str(exc)
+            or str(source).lstrip("-").isdigit()
+        )
+
+    async def _resolve_archive_username_from_credentials(self, source: int | str) -> str | None:
+        lookup_filter = _credential_lookup_filter_for_source(source)
+        if not lookup_filter:
+            return None
+
+        try:
+            from app.core.database import db
+
+            res = await _async_execute(
+                db.table("discovered_credentials")
+                .select("meta")
+                .or_(lookup_filter)
+                .limit(1)
+            )
+        except Exception as exc:
+            logger.warning(
+                f"    ⚠️ [UserAgent] Failed credential username lookup for source={source}: {exc}"
+            )
+            return None
+
+        for row in res.data or []:
+            username = _username_from_meta(row.get("meta"))
+            if username:
+                return username
+        return None
+
+    async def _get_archive_message_with_entity_fallback(
+        self,
+        source: int | str,
+        message_id: int,
+    ):
+        try:
+            return await self.client.get_messages(source, ids=message_id)
+        except (ValueError, TypeError) as entity_err:
+            if not self._should_retry_missing_entity(source, entity_err):
+                raise
+
+            username_source = await self._resolve_archive_username_from_credentials(source)
+            if not username_source:
+                detail = (
+                    f"Missing Telethon access_hash for raw source {source}; "
+                    "no discovered_credentials.meta.bot_username fallback was found."
+                )
+                logger.warning(f"    ⚠️ [UserAgent] {detail}")
+                return ArchiveMediaResult(ok=False, code="missing_access_hash", detail=detail)
+
+            logger.info(
+                f"    ℹ️ [UserAgent] Retrying archive source {source} as {username_source}"
+            )
+            try:
+                return await self.client.get_messages(username_source, ids=message_id)
+            except (ValueError, TypeError) as retry_err:
+                detail = (
+                    f"Resolved {source} to {username_source}, but Telethon still could not "
+                    f"load msg={message_id}: {retry_err}"
+                )
+                logger.warning(f"    ⚠️ [UserAgent] {detail}")
+                return ArchiveMediaResult(ok=False, code="missing_access_hash", detail=detail[:200])
+
     async def _send_archived_file_with_retries(
         self,
         target_chat_id: int | str,
@@ -793,7 +927,9 @@ class UserAgentService:
             try:
                 source = self._coerce_chat_ref(entity_or_chat_id)
                 target = self._coerce_chat_ref(target_chat_id)
-                message = await self.client.get_messages(source, ids=message_id)
+                message = await self._get_archive_message_with_entity_fallback(source, message_id)
+                if isinstance(message, ArchiveMediaResult):
+                    return message
                 if not message or not getattr(message, "media", None):
                     detail = f"No archiveable media for chat={entity_or_chat_id} msg={message_id}"
                     logger.warning(f"    ⚠️ [UserAgent] {detail}")
@@ -908,7 +1044,7 @@ class UserAgentService:
             finally: await self._disconnect()
 
     async def get_history(self, group_id: int | str, limit: int) -> list[dict]:
-        from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
+        from telethon.tl.types import Message
         from telethon.errors import FloodWaitError
         import os as _os
         # Minimum sleep between successive get_history calls on the same session.
@@ -925,16 +1061,7 @@ class UserAgentService:
                 async for message in self.client.iter_messages(entity, limit=limit):
                     if not isinstance(message, Message): continue
                     content = message.text or ""
-                    media_type = "text"
-                    file_meta = {}
-                    if message.media:
-                        if isinstance(message.media, MessageMediaPhoto):
-                            media_type = "photo"
-                            file_meta = {"wc": "photo", "id": getattr(message.media.photo, 'id', 0)}
-                        elif isinstance(message.media, MessageMediaDocument):
-                            media_type = "document"
-                            file_meta = {"mime": message.media.document.mime_type}
-                        else: media_type = "other"
+                    media_type, file_meta = _telethon_media_info(message)
                     sender_name = "Unknown"
                     if message.sender:
                         if hasattr(message.sender, 'username') and message.sender.username: sender_name = message.sender.username

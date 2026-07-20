@@ -41,6 +41,78 @@ async def _async_execute(query_builder):
     return await asyncio.to_thread(query_builder.execute)
 
 
+def _copy_if_present(target: Dict[str, Any], source: Dict[str, Any], source_key: str, target_key: str | None = None) -> None:
+    value = source.get(source_key)
+    if value is not None:
+        target[target_key or source_key] = value
+
+
+def _bot_api_media_info(payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    file_meta: Dict[str, Any] = {}
+
+    if isinstance(payload.get("photo"), list) and payload["photo"]:
+        photo = payload["photo"][-1] or {}
+        if isinstance(photo, dict):
+            _copy_if_present(file_meta, photo, "file_id")
+            _copy_if_present(file_meta, photo, "file_unique_id")
+            _copy_if_present(file_meta, photo, "file_size")
+            _copy_if_present(file_meta, photo, "width")
+            _copy_if_present(file_meta, photo, "height")
+        return "photo", file_meta
+
+    for key in ("document", "video", "audio"):
+        media = payload.get(key)
+        if isinstance(media, dict):
+            _copy_if_present(file_meta, media, "file_id")
+            _copy_if_present(file_meta, media, "file_unique_id")
+            _copy_if_present(file_meta, media, "file_name")
+            _copy_if_present(file_meta, media, "mime_type", "mime")
+            _copy_if_present(file_meta, media, "file_size")
+            return key, file_meta
+
+    return "text", file_meta
+
+
+def _telethon_media_info(message: Message) -> Tuple[str, Dict[str, Any]]:
+    if not getattr(message, "media", None):
+        return "text", {}
+
+    file_meta: Dict[str, Any] = {}
+    try:
+        from telethon import utils as telethon_utils
+
+        file_id = telethon_utils.pack_bot_file_id(message.media)
+        if file_id:
+            file_meta["file_id"] = file_id
+    except Exception:
+        pass
+
+    if isinstance(message.media, MessageMediaPhoto):
+        photo = getattr(message.media, "photo", None)
+        file_meta["wc"] = "photo"
+        file_meta["id"] = getattr(photo, "id", 0)
+        return "photo", file_meta
+
+    if isinstance(message.media, MessageMediaDocument):
+        document = getattr(message.media, "document", None)
+        mime = getattr(document, "mime_type", None) or getattr(getattr(message, "file", None), "mime_type", None)
+        if mime:
+            file_meta["mime"] = mime
+        file_name = getattr(getattr(message, "file", None), "name", None)
+        if file_name:
+            file_meta["file_name"] = file_name
+        doc_id = getattr(document, "id", None)
+        if doc_id is not None:
+            file_meta["id"] = doc_id
+        if isinstance(mime, str) and mime.startswith("video/"):
+            return "video", file_meta
+        if isinstance(mime, str) and mime.startswith("audio/"):
+            return "audio", file_meta
+        return "document", file_meta
+
+    return "other", file_meta
+
+
 class ScrapedMessage(TypedDict):
     telegram_msg_id: int
     sender_name: str
@@ -325,12 +397,7 @@ class ScraperService:
                             # Parse Content
                             content = result.get("text") or result.get("caption") or ""
 
-                            media_type = "text"
-                            file_meta = {}
-                            if "photo" in result:
-                                media_type = "photo"
-                            elif "document" in result:
-                                media_type = "document"
+                            media_type, file_meta = _bot_api_media_info(result)
 
                             original_sender = "Unknown"
                             if "forward_from" in result:
@@ -394,19 +461,7 @@ class ScraperService:
                             continue
 
                         content = message.text or ""
-                        media_type = "text"
-                        file_meta = {}
-
-                        if message.media:
-                            if isinstance(message.media, MessageMediaPhoto):
-                                media_type = "photo"
-                                file_meta = {
-                                    "wc": "photo",
-                                    "id": getattr(message.media.photo, "id", 0),
-                                }
-                            elif isinstance(message.media, MessageMediaDocument):
-                                media_type = "document"
-                                file_meta = {"mime": message.media.document.mime_type}
+                        media_type, file_meta = _telethon_media_info(message)
 
                         sender_name = "Unknown"
                         if message.sender:
@@ -493,18 +548,7 @@ class ScraperService:
                         continue
 
                     content = message.text or ""
-                    media_type = "text"
-                    file_meta = {}
-
-                    if message.media:
-                        if isinstance(message.media, MessageMediaPhoto):
-                            media_type = "photo"
-                            file_meta = {"wc": "photo", "id": getattr(message.media.photo, "id", 0)}
-                        elif isinstance(message.media, MessageMediaDocument):
-                            media_type = "document"
-                            file_meta = {"mime": message.media.document.mime_type}
-                        else:
-                            media_type = "other"
+                    media_type, file_meta = _telethon_media_info(message)
 
                     sender_name = "Unknown"
                     if message.sender:
@@ -735,12 +779,7 @@ class ScraperService:
                         content = target.get("text") or target.get("caption") or ""
 
                         # Determine media
-                        media_type = "text"
-                        file_meta = {}
-                        if "photo" in target:
-                            media_type = "photo"
-                        elif "document" in target:
-                            media_type = "document"
+                        media_type, file_meta = _bot_api_media_info(target)
 
                         msgs.append(
                             {
@@ -1053,12 +1092,7 @@ class ScraperService:
                         if str(chat_id) in monitor_ids or chat_id in monitor_ids:
                             continue
                         # Media detection
-                        media_type = "text"
-                        file_meta: Dict[str, Any] = {}
-                        if "photo" in target:
-                            media_type = "photo"
-                        elif "document" in target:
-                            media_type = "document"
+                        media_type, file_meta = _bot_api_media_info(target)
                         entities = target.get("entities") or target.get("caption_entities")
                         if entities:
                             file_meta["entities"] = entities

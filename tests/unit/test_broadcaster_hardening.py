@@ -65,6 +65,69 @@ async def test_resolve_chat_id_falls_back_to_credential_lookup(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_resolve_chat_id_prefers_joined_bot_username(monkeypatch):
+    from app.services import broadcaster_srv
+
+    monkeypatch.setattr(broadcaster_srv, "settings", _settings())
+    service = broadcaster_srv.BroadcasterService()
+
+    chat_id = await service._resolve_chat_id(
+        {
+            "chat_id": 8940899601,
+            "discovered_credentials": {
+                "chat_id": 8940899601,
+                "meta": {"bot_username": "ItsWatermarkBot"},
+            },
+        }
+    )
+
+    assert chat_id == "@ItsWatermarkBot"
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_id_prefers_db_bot_username(monkeypatch):
+    from app.services import broadcaster_srv
+
+    class _FakeQuery:
+        selected = None
+
+        def select(self, columns, *_args, **_kwargs):
+            self.selected = columns
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+    class _FakeDb:
+        def __init__(self):
+            self.query = _FakeQuery()
+
+        def table(self, _table_name):
+            return self.query
+
+    fake_db = _FakeDb()
+    monkeypatch.setitem(sys.modules, "app.core.database", SimpleNamespace(db=fake_db))
+
+    async def fake_async_execute(_query):
+        return SimpleNamespace(
+            data=[{"chat_id": 8940899601, "meta": {"bot_username": "@ItsWatermarkBot"}}]
+        )
+
+    monkeypatch.setattr(broadcaster_srv, "_async_execute", fake_async_execute)
+    monkeypatch.setattr(broadcaster_srv, "settings", _settings())
+
+    service = broadcaster_srv.BroadcasterService()
+
+    chat_id = await service._resolve_chat_id({"credential_id": "cred-1"})
+
+    assert chat_id == "@ItsWatermarkBot"
+    assert fake_db.query.selected == "chat_id, meta"
+
+
+@pytest.mark.asyncio
 async def test_schedule_auto_archive_tracks_and_logs_task_failures(monkeypatch, caplog):
     from app.services import broadcaster_srv
 
