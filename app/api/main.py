@@ -95,6 +95,10 @@ app.include_router(ingest.router)
 from app.api.routers import health
 app.include_router(health.router)
 
+# Media proxy endpoint
+from app.api.routers import media
+app.include_router(media.router, prefix="/media", tags=["media"])
+
 @app.get("/")
 def read_root():
     if settings.ENV == "production":

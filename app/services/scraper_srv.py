@@ -49,6 +49,7 @@ def _copy_if_present(target: Dict[str, Any], source: Dict[str, Any], source_key:
 
 def _bot_api_media_info(payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     file_meta: Dict[str, Any] = {}
+    file_meta["source"] = "bot_api"
 
     if isinstance(payload.get("photo"), list) and payload["photo"]:
         photo = payload["photo"][-1] or {}
@@ -78,6 +79,7 @@ def _telethon_media_info(message: Message) -> Tuple[str, Dict[str, Any]]:
         return "text", {}
 
     file_meta: Dict[str, Any] = {}
+    file_meta["source"] = "telethon"
     try:
         from telethon import utils as telethon_utils
 

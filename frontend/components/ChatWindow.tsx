@@ -2,8 +2,10 @@
 
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
-import { ChevronDown, ChevronUp, Globe2, LucideSend, Server, TerminalSquare } from "lucide-react";
+import { ChevronDown, ChevronUp, FileDown, Globe2, LucideSend, Server, TerminalSquare } from "lucide-react";
 import type { Credential, InfrastructureContext } from "@/app/page";
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8011";
 
 export default function ChatWindow({ credential }: { credential: Credential | null }) {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -174,6 +176,7 @@ export default function ChatWindow({ credential }: { credential: Credential | nu
                         <span className="text-xs font-bold text-sky-600 mb-0.5">
                             {msg.sender_name || "Unknown"}
                         </span>
+                        <MediaRenderer msg={msg} />
                         <p className="text-sm text-slate-800 whitespace-pre-wrap leading-snug break-all">
                             {msg.content}
                         </p>
@@ -201,7 +204,64 @@ type ChatMessage = {
     sender_name?: string | null;
     content?: string | null;
     created_at?: string | null;
+    media_type?: string | null;
+    file_meta?: Record<string, unknown> | null;
 };
+
+function MediaRenderer({ msg }: { msg: ChatMessage }) {
+    const mediaType = msg.media_type;
+    const fileId = (msg.file_meta as Record<string, unknown>)?.file_id;
+
+    if (!mediaType || mediaType === "text" || !fileId) return null;
+
+    const mediaUrl = `${API_BASE_URL}/media/${msg.id}`;
+
+    if (mediaType === "photo") {
+        return (
+            <img
+                src={mediaUrl}
+                alt="Attached photo"
+                className="rounded-md max-w-full max-h-64 object-cover mb-1.5 cursor-pointer"
+                loading="lazy"
+                onClick={() => window.open(mediaUrl, "_blank")}
+                onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = "none";
+                }}
+            />
+        );
+    }
+
+    if (mediaType === "video") {
+        return (
+            <video
+                src={mediaUrl}
+                controls
+                className="rounded-md max-w-full max-h-64 mb-1.5"
+                preload="metadata"
+            />
+        );
+    }
+
+    if (mediaType === "audio") {
+        return (
+            <audio src={mediaUrl} controls className="w-full mb-1.5" preload="metadata" />
+        );
+    }
+
+    // document / other
+    const fileName = (msg.file_meta as Record<string, unknown>)?.file_name;
+    return (
+        <a
+            href={mediaUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 bg-slate-100 rounded-md px-3 py-2 mb-1.5 text-sm text-sky-700 hover:bg-slate-200 transition-colors"
+        >
+            <FileDown className="h-4 w-4 shrink-0" />
+            <span className="truncate">{(fileName as string) || "Download document"}</span>
+        </a>
+    );
+}
 
 function collectInfrastructureEndpoints(context?: InfrastructureContext): string[] {
     if (!context) {

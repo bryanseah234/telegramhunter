@@ -6,11 +6,14 @@ import logging
 import time
 import itertools
 from app.core.config import settings
+from app.core.security import security
 from app.services.user_agent_srv import user_agent
 
 logger = logging.getLogger("broadcaster")
 
 ARCHIVE_MEDIA_TYPES = {"document", "photo", "audio", "video"}
+
+from app.core.database import db
 
 
 async def _async_execute(query_builder):
@@ -143,6 +146,32 @@ class BroadcasterService:
 
         task.add_done_callback(_log_archive_result)
 
+    async def _download_media_bytes(self, file_id: str, credential_id: str) -> bytes | None:
+        """Download media bytes using the SOURCE bot's token (not the broadcaster's)."""
+        if not credential_id:
+            return None
+        try:
+            res = await _async_execute(
+                db.table("discovered_credentials")
+                .select("bot_token")
+                .eq("id", credential_id)
+                .limit(1)
+            )
+            rows = res.data or []
+            if not rows or not rows[0].get("bot_token"):
+                return None
+
+            decrypted_token = security.decrypt(rows[0]["bot_token"]).strip()
+            request = HTTPXRequest(read_timeout=15.0, write_timeout=15.0)
+            source_bot = Bot(token=decrypted_token, request=request)
+            tg_file = await source_bot.get_file(file_id)
+            data = await tg_file.download_as_bytearray()
+            logger.info(f"    📥 [Broadcaster] Downloaded {len(data)} bytes via source bot")
+            return bytes(data)
+        except Exception as exc:
+            logger.warning(f"    ⚠️ [Broadcaster] _download_media_bytes failed: {exc}")
+            return None
+
     async def send_message(self, group_id: int | str, thread_id: int, msg_obj: dict):
         """
         Sends a message using the next available identity (Bot or User Account).
@@ -175,17 +204,41 @@ class BroadcasterService:
                 bot = self._get_bot_instance(token)
                 try:
                     logger.info(f"📤 [Broadcaster] Sending via Bot: {token[:10]}...")
-                    await bot.send_message(
-                        chat_id=group_id,
-                        message_thread_id=thread_id if thread_id != 1 else None, # 1 often causes issues
-                        text=to_send_text
-                    )
-                    if (
-                        settings.AUTO_ARCHIVE_MEDIA
-                        and media_type in ARCHIVE_MEDIA_TYPES
-                        and msg_obj.get("telegram_msg_id")
-                    ):
-                        self._schedule_auto_archive(group_id, thread_id, msg_obj, msg_id)
+                    
+                    file_id = msg_obj.get("file_meta", {}).get("file_id")
+                    bot_thread_id = thread_id if thread_id != 1 else None
+                    sent_via_media = False
+                    
+                    if file_id and media_type in ARCHIVE_MEDIA_TYPES:
+                        media_bytes = await self._download_media_bytes(file_id, msg_obj.get("credential_id"))
+                        if media_bytes:
+                            try:
+                                if media_type == "photo":
+                                    await bot.send_photo(chat_id=group_id, message_thread_id=bot_thread_id, photo=media_bytes, caption=caption)
+                                elif media_type == "document":
+                                    await bot.send_document(chat_id=group_id, message_thread_id=bot_thread_id, document=media_bytes, caption=caption)
+                                elif media_type == "video":
+                                    await bot.send_video(chat_id=group_id, message_thread_id=bot_thread_id, video=media_bytes, caption=caption)
+                                elif media_type == "audio":
+                                    await bot.send_audio(chat_id=group_id, message_thread_id=bot_thread_id, audio=media_bytes, caption=caption)
+                                
+                                sent_via_media = True
+                                logger.info(f"    ✅ [Broadcaster] Successfully sent {media_type} ({len(media_bytes)} bytes)")
+                            except TelegramError as media_err:
+                                logger.warning(f"⚠️ Failed to send media bytes: {media_err}. Falling back to text.")
+
+                    if not sent_via_media:
+                        await bot.send_message(
+                            chat_id=group_id,
+                            message_thread_id=bot_thread_id,
+                            text=to_send_text
+                        )
+                        if (
+                            settings.AUTO_ARCHIVE_MEDIA
+                            and media_type in ARCHIVE_MEDIA_TYPES
+                            and msg_obj.get("telegram_msg_id")
+                        ):
+                            self._schedule_auto_archive(group_id, thread_id, msg_obj, msg_id)
                     return
                 except Forbidden:
                     self._failed_tokens.add(token)
