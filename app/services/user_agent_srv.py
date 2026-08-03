@@ -194,6 +194,15 @@ class UserAgentService:
         self._instance_id = _os.getenv("WORKER_INSTANCE_ID", "worker-scrape")  # Override via env if needed
         self._current_phone = None
         self._tmp_archive_sweep_done = False
+        # In-memory session cooldown diagnostics. Redis remains the cross-worker
+        # source of truth; these dicts give operators a per-process view and
+        # drive the 5min/30min escalating local cooldown enforced in start().
+        # Keyed by absolute session_path.
+        self._session_cooldowns: dict = {}          # session_path -> datetime (UTC) expiry
+        self._session_failure_history: dict = {}    # session_path -> list[datetime] within last hour
+        self._session_cooldown_started: dict = {}   # session_path -> datetime when cooldown began
+        self._last_failure_reason: str | None = None
+        self._all_on_cooldown_warned_at = None      # datetime | None, for warning rate-limit
 
     def _discover_sessions(self):
         """Scans BASE_DIR and telegram_accounts DB for valid .session files."""
@@ -255,6 +264,155 @@ class UserAgentService:
             
         self.sessions = final_list
 
+    # ------------------------------------------------------------------
+    # Session cooldown diagnostics (in-memory pool status).
+    # Redis-backed cooldowns handle cross-worker coordination; the local
+    # dict below is per-process and drives get_pool_status(), the
+    # "all sessions on cooldown" WARNING, and recovery INFO logs.
+    # ------------------------------------------------------------------
+    def _mark_session_failed(self, session_path: str, reason: str) -> None:
+        """Add session_path to the local cooldown dict with escalating duration.
+
+        Baseline cooldown is 5 minutes. If another failure for the same session
+        was recorded within the last hour, escalate to 30 minutes. Cooldown is
+        extend-only -- an existing longer cooldown is preserved.
+        """
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        one_hour_ago = now - timedelta(hours=1)
+
+        history = [
+            ts for ts in self._session_failure_history.get(session_path, [])
+            if ts >= one_hour_ago
+        ]
+        history.append(now)
+        self._session_failure_history[session_path] = history
+
+        minutes = 30 if len(history) > 1 else 5
+        expires_at = now + timedelta(minutes=minutes)
+
+        # Extend-only: never shorten an existing local cooldown
+        existing = self._session_cooldowns.get(session_path)
+        if existing is None or expires_at > existing:
+            self._session_cooldowns[session_path] = expires_at
+        # Preserve original cooldown-start for accurate recovery duration
+        self._session_cooldown_started.setdefault(session_path, now)
+
+        session_name = os.path.splitext(os.path.basename(session_path))[0]
+        self._last_failure_reason = f"{session_name}: {reason[:180]}"
+        logger.info(
+            f"    ⏳ [UserAgent] Session '{session_name}' local cooldown {minutes}m "
+            f"(failures in last hour: {len(history)}, until "
+            f"{self._session_cooldowns[session_path].isoformat()})"
+        )
+
+    def _is_session_on_local_cooldown(self, session_path: str) -> bool:
+        """Return True if session_path is currently in local cooldown."""
+        from datetime import datetime, timezone
+        expires_at = self._session_cooldowns.get(session_path)
+        if not expires_at:
+            return False
+        if datetime.now(timezone.utc) >= expires_at:
+            # Expired -- clean up so it doesn't skew get_pool_status()
+            self._session_cooldowns.pop(session_path, None)
+            return False
+        return True
+
+    def _sync_redis_cooldown_to_local(self, session_path: str, cooldown_key: str) -> None:
+        """Mirror the Redis-backed cooldown TTL into the local dict (extend-only).
+
+        Called from start() before Redis is consulted so get_pool_status()
+        reflects cross-worker cooldowns (FloodWait, MTProto backoff, etc.)
+        set outside of _mark_session_failed().
+        """
+        from datetime import datetime, timedelta, timezone
+        try:
+            from app.core.redis_srv import redis_srv
+            ttl = redis_srv.get_cooldown_remaining(cooldown_key)
+        except Exception:
+            return
+        if not ttl or ttl <= 0:
+            return
+        now = datetime.now(timezone.utc)
+        new_expiry = now + timedelta(seconds=int(ttl))
+        existing = self._session_cooldowns.get(session_path)
+        if existing is None or new_expiry > existing:
+            self._session_cooldowns[session_path] = new_expiry
+            self._session_cooldown_started.setdefault(session_path, now)
+
+    def _log_recovery_if_applicable(self, session_path: str) -> None:
+        """Emit an INFO log with duration-on-cooldown if this session was previously cooled down."""
+        from datetime import datetime, timezone
+        started_at = self._session_cooldown_started.pop(session_path, None)
+        if started_at is None:
+            return
+        duration_s = (datetime.now(timezone.utc) - started_at).total_seconds()
+        session_name = os.path.splitext(os.path.basename(session_path))[0]
+        logger.info(
+            f"    🟢 [UserAgent] Session '{session_name}' recovered after "
+            f"{duration_s:.0f}s on cooldown."
+        )
+        # Clear cooldown state on successful connect
+        self._session_cooldowns.pop(session_path, None)
+        self._session_failure_history.pop(session_path, None)
+
+    def _emit_all_on_cooldown_warning(self) -> None:
+        """When every known session is on local cooldown, log a WARNING with the earliest recovery time."""
+        from datetime import datetime, timezone
+        if not self.sessions:
+            return
+        now = datetime.now(timezone.utc)
+        active = {
+            p: self._session_cooldowns[p]
+            for p in self.sessions
+            if p in self._session_cooldowns and self._session_cooldowns[p] > now
+        }
+        if len(active) < len(self.sessions):
+            return  # At least one session still available in local view
+
+        # Rate-limit warning to once per 60s to avoid log spam on tight retry loops
+        if self._all_on_cooldown_warned_at is not None:
+            if (now - self._all_on_cooldown_warned_at).total_seconds() < 60:
+                return
+        self._all_on_cooldown_warned_at = now
+
+        earliest_path = min(active, key=active.get)
+        earliest_expiry = active[earliest_path]
+        remaining_s = max(0.0, (earliest_expiry - now).total_seconds())
+        earliest_name = os.path.splitext(os.path.basename(earliest_path))[0]
+        logger.warning(
+            f"    🛑 [UserAgent] ALL {len(self.sessions)} session(s) on cooldown. "
+            f"Earliest recovery: '{earliest_name}' at {earliest_expiry.isoformat()} "
+            f"(~{remaining_s:.0f}s from now). Last failure: "
+            f"{self._last_failure_reason or 'unknown'}"
+        )
+
+    def get_pool_status(self) -> dict:
+        """Return current pool status for /health endpoints and admin diagnostics.
+
+        Reflects the local (this-process) cooldown state. Redis-backed cooldowns
+        used for cross-worker coordination are mirrored into the local dict on
+        every start() attempt so this stays a useful diagnostic surface.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        on_cooldown_expiries: list = []
+        for session_path in self.sessions:
+            expires = self._session_cooldowns.get(session_path)
+            if expires and expires > now:
+                on_cooldown_expiries.append(expires)
+
+        oldest_expires_at = min(on_cooldown_expiries) if on_cooldown_expiries else None
+
+        return {
+            "total_sessions": len(self.sessions),
+            "available_now": len(self.sessions) - len(on_cooldown_expiries),
+            "on_cooldown_count": len(on_cooldown_expiries),
+            "oldest_cooldown_expires_at": oldest_expires_at.isoformat() if oldest_expires_at else None,
+            "current_session_name": self.current_session_name,
+            "last_failure_reason": self._last_failure_reason,
+        }
+
     async def _session_refresher_loop(self):
         """Background loop to periodically scan for new .session files."""
         while True:
@@ -303,7 +461,24 @@ class UserAgentService:
             # Previously both used `user_agent:{session_name}` which caused
             # release_lock() to also clear the cooldown -- meaning FloodWait
             # cooldowns were silently wiped on every disconnect.
+            #
+            # Local in-memory cooldown gate is checked first (fast path) and
+            # mirrors Redis state so get_pool_status() stays accurate for the
+            # operator-facing diagnostic surface.
+            if self._is_session_on_local_cooldown(session_path):
+                from datetime import datetime as _dt, timezone as _tz
+                _exp = self._session_cooldowns[session_path]
+                _remaining = int((_exp - _dt.now(_tz.utc)).total_seconds())
+                logger.info(
+                    f"    ⏳ [UserAgent] Session '{session_name}' local cooldown "
+                    f"({_remaining}s, until {_exp.isoformat()}). Rotating..."
+                )
+                continue
+
             cooldown_key = f"user_agent:cooldown:{session_name}"
+            # Mirror Redis cooldown TTL into the local dict so cross-worker
+            # cooldowns (FloodWait, MTProto backoff) are visible via get_pool_status().
+            self._sync_redis_cooldown_to_local(session_path, cooldown_key)
             if redis_srv.is_on_cooldown(cooldown_key):
                  ttl = redis_srv.get_cooldown_remaining(cooldown_key)
                  logger.info(f"    ⏳ [UserAgent] Session '{session_name}' on cooldown ({ttl}s). Rotating...")
@@ -360,6 +535,7 @@ class UserAgentService:
                     await self.client.disconnect()
                     self._cleanup_temp_session(f"{TEMP_SESSION_PATH}.session")
                     redis_srv.incr_key(f"user_agent_fail:{session_name}", 3600)
+                    self._mark_session_failed(session_path, "not authorized (invalid/expired session)")
                     if self._session_lock_key:
                         redis_srv.release_lock(self._session_lock_key)
                         self._session_lock_key = None
@@ -368,6 +544,7 @@ class UserAgentService:
                     
                 self.current_session_name = session_name
                 redis_srv.reset_key(f"user_agent_fail:{session_name}")
+                self._log_recovery_if_applicable(session_path)
                 logger.info(f"    ✅ [UserAgent] Connected with session: {session_name}")
                 return True
 
@@ -384,6 +561,7 @@ class UserAgentService:
                     self._cleanup_temp_session(f"{TEMP_SESSION_PATH}.session")
                     redis_srv.incr_key(f"user_agent_fail:{session_name}", 3600)
                     redis_srv.set_cooldown(cooldown_key, _MTPROTO_CONFLICT_BACKOFF + 5)
+                    self._mark_session_failed(session_path, f"MTProto conflict: {str(e)[:120]}")
                     if self._session_lock_key:
                         redis_srv.release_lock(self._session_lock_key)
                         self._session_lock_key = None
@@ -397,6 +575,7 @@ class UserAgentService:
                 fail_count = redis_srv.incr_key(f"user_agent_fail:{session_name}", 3600)
                 if fail_count >= _MTPROTO_MAX_RETRIES:
                     redis_srv.set_cooldown(cooldown_key, 120)
+                self._mark_session_failed(session_path, f"connect error: {str(e)[:120]}")
                 if self._session_lock_key:
                     redis_srv.release_lock(self._session_lock_key)
                     self._session_lock_key = None
@@ -404,6 +583,7 @@ class UserAgentService:
                 continue
         
         logger.error("    ❌ [UserAgent] All sessions failed or on cooldown.")
+        self._emit_all_on_cooldown_warning()
         return False
 
     def _cleanup_stale_tmp_archives(self) -> int:
