@@ -1324,7 +1324,7 @@ _WEBHOOK_PROBE_STALE_HOURS = 24
 
 
 async def _probe_webhook_url(url: str) -> dict:
-    """Passive probe: DNS + HTTP GET + TLS cert. Returns fingerprint dict.
+    """Passive probe: DNS + HTTP GET + TLS cert + web recon + Shodan. Returns fingerprint dict.
 
     Best-effort — any single sub-probe failure is caught and recorded in the
     result rather than raising. We probe untrusted C2 endpoints so cert
@@ -1392,33 +1392,181 @@ async def _probe_webhook_url(url: str) -> dict:
         except Exception as http_exc:
             result["http_error"] = f"{type(http_exc).__name__}: {str(http_exc)[:150]}"
 
-        # TLS cert introspection (https only)
+        # TLS cert introspection (https only) — parse DER via cryptography lib
         if parsed.scheme == "https":
             try:
+                from cryptography import x509
+                from cryptography.hazmat.backends import default_backend
+                from cryptography.hazmat.primitives import hashes
+
                 ctx = ssl.create_default_context()
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
 
-                def _fetch_cert():
+                def _fetch_cert_der():
                     with socket.create_connection((hostname, port), timeout=5) as sock:
                         with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
-                            return ssock.getpeercert()
+                            return ssock.getpeercert(binary_form=True)
 
-                cert = await asyncio.to_thread(_fetch_cert)
-                if cert:
-                    result["tls_issuer"] = {
-                        item[0][0]: item[0][1] for item in cert.get("issuer", []) if item
-                    }
-                    result["tls_subject"] = {
-                        item[0][0]: item[0][1] for item in cert.get("subject", []) if item
-                    }
-                    result["tls_san"] = [x[1] for x in cert.get("subjectAltName", [])]
-                    result["tls_expiry"] = cert.get("notAfter")
+                der = await asyncio.to_thread(_fetch_cert_der)
+                if der:
+                    cert = x509.load_der_x509_certificate(der, default_backend())
+                    result["tls_issuer"] = cert.issuer.rfc4514_string()
+                    result["tls_subject"] = cert.subject.rfc4514_string()
+                    result["tls_serial"] = format(cert.serial_number, "x")
+                    try:
+                        result["tls_not_before"] = cert.not_valid_before_utc.isoformat()
+                        result["tls_not_after"] = cert.not_valid_after_utc.isoformat()
+                    except AttributeError:
+                        # cryptography < 42
+                        result["tls_not_before"] = cert.not_valid_before.isoformat()
+                        result["tls_not_after"] = cert.not_valid_after.isoformat()
+                    try:
+                        san_ext = cert.extensions.get_extension_for_class(
+                            x509.SubjectAlternativeName
+                        ).value
+                        result["tls_san"] = sorted({n.value for n in san_ext})
+                    except x509.ExtensionNotFound:
+                        pass
+                    try:
+                        result["tls_fingerprint_sha256"] = cert.fingerprint(hashes.SHA256()).hex()
+                    except Exception:
+                        pass
             except Exception as tls_exc:
                 result["tls_error"] = f"{type(tls_exc).__name__}: {str(tls_exc)[:150]}"
+
+        # Web recon — probe common paths on the origin (site tree / login / sensitive files)
+        if parsed.scheme in ("http", "https") and hostname:
+            base = f"{parsed.scheme}://{hostname}"
+            if (parsed.scheme == "https" and port != 443) or (parsed.scheme == "http" and port != 80):
+                base = f"{base}:{port}"
+            result["web_recon"] = await _probe_web_recon(base)
+
+        # Shodan enrichment — pivot each IP to open ports, banners, tags
+        ips = result.get("ip_addresses") or []
+        if ips and getattr(settings, "SHODAN_KEY", None):
+            result["shodan"] = await _probe_shodan_ips(ips[:5])
     except Exception as outer:
         result["error"] = f"{type(outer).__name__}: {str(outer)[:300]}"
     return result
+
+
+# Common recon paths — status-only for admin/login (don't dump body of potentially
+# sensitive dashboards), preview for public files like robots.txt / sitemap.xml.
+_WEB_RECON_PREVIEW_PATHS = ("/", "/robots.txt", "/sitemap.xml", "/.well-known/security.txt")
+_WEB_RECON_STATUS_PATHS = (
+    "/admin",
+    "/admin/",
+    "/login",
+    "/wp-admin/",
+    "/wp-login.php",
+    "/api",
+    "/api/",
+    "/dashboard",
+    "/health",
+    "/status",
+    "/actuator",
+    "/actuator/health",
+    "/metrics",
+    "/graphql",
+    "/.git/config",
+    "/.env",
+    "/server-status",
+)
+
+
+async def _probe_web_recon(base_url: str) -> dict:
+    """Probe common recon paths — bounded, best-effort, tight timeout per path."""
+    import re
+
+    findings: dict[str, dict] = {}
+    async with httpx.AsyncClient(
+        timeout=5.0, verify=False, follow_redirects=False
+    ) as client:
+        for path in _WEB_RECON_PREVIEW_PATHS:
+            entry: dict[str, Any] = {}
+            try:
+                r = await client.get(base_url + path)
+                entry["status"] = r.status_code
+                if r.status_code == 200:
+                    text = r.text
+                    entry["preview"] = text[:400]
+                    if path == "/":
+                        m = re.search(r"<title[^>]*>([^<]{0,200})</title>", text, re.IGNORECASE)
+                        if m:
+                            entry["title"] = m.group(1).strip()
+            except httpx.TimeoutException:
+                entry["error"] = "timeout"
+            except Exception as e:
+                entry["error"] = f"{type(e).__name__}: {str(e)[:80]}"
+            findings[path] = entry
+
+        for path in _WEB_RECON_STATUS_PATHS:
+            entry = {}
+            try:
+                r = await client.get(base_url + path)
+                entry["status"] = r.status_code
+                if r.status_code in (301, 302, 303, 307, 308):
+                    entry["location"] = r.headers.get("location")
+                elif r.status_code == 200 and path in ("/.git/config", "/.env", "/server-status"):
+                    # Sensitive file leaks — capture a small preview
+                    entry["leak_preview"] = r.text[:300]
+            except httpx.TimeoutException:
+                entry["error"] = "timeout"
+            except Exception as e:
+                entry["error"] = f"{type(e).__name__}: {str(e)[:80]}"
+            findings[path] = entry
+
+    # Extract sitemap URLs from sitemap.xml if present
+    sitemap_entry = findings.get("/sitemap.xml") or {}
+    if sitemap_entry.get("status") == 200 and sitemap_entry.get("preview"):
+        try:
+            urls = re.findall(r"<loc>([^<]+)</loc>", sitemap_entry["preview"])
+            if urls:
+                sitemap_entry["extracted_urls_sample"] = urls[:15]
+        except Exception:
+            pass
+
+    return findings
+
+
+async def _probe_shodan_ips(ips: list[str]) -> dict:
+    """Look up each IP via Shodan REST — returns per-IP summary (org, ports, tags, hostnames)."""
+    per_ip: dict[str, dict] = {}
+    api_key = settings.SHODAN_KEY
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for ip in ips:
+            try:
+                r = await client.get(
+                    f"https://api.shodan.io/shodan/host/{ip}",
+                    params={"key": api_key, "minify": "true"},
+                )
+                if r.status_code == 200:
+                    d = r.json()
+                    per_ip[ip] = {
+                        "org": d.get("org"),
+                        "isp": d.get("isp"),
+                        "asn": d.get("asn"),
+                        "country_code": d.get("country_code"),
+                        "city": d.get("city"),
+                        "hostnames": (d.get("hostnames") or [])[:8],
+                        "ports": d.get("ports") or [],
+                        "tags": d.get("tags") or [],
+                        "vulns": (d.get("vulns") or [])[:10],
+                        "last_update": d.get("last_update"),
+                    }
+                elif r.status_code == 404:
+                    per_ip[ip] = {"status": "not_indexed"}
+                elif r.status_code == 401:
+                    per_ip[ip] = {"error": "shodan_key_unauthorized"}
+                    break  # no point probing further with a bad key
+                else:
+                    per_ip[ip] = {"error": f"http_{r.status_code}"}
+            except httpx.TimeoutException:
+                per_ip[ip] = {"error": "timeout"}
+            except Exception as e:
+                per_ip[ip] = {"error": f"{type(e).__name__}: {str(e)[:100]}"}
+    return per_ip
 
 
 @app.task(name="flow.probe_webhooks")
@@ -1484,7 +1632,10 @@ async def _probe_webhooks_logic(max_per_run: int, force: bool = False) -> dict:
                     "http_status": probe.get("http_status"),
                     "server": (probe.get("http_headers") or {}).get("server"),
                     "ip_addresses": probe.get("ip_addresses"),
-                    "tls_issuer_cn": (probe.get("tls_issuer") or {}).get("commonName"),
+                    "tls_issuer": probe.get("tls_issuer"),
+                    "shodan_orgs": [
+                        v.get("org") for v in (probe.get("shodan") or {}).values() if isinstance(v, dict) and v.get("org")
+                    ] or None,
                     "error": probe.get("error") or probe.get("http_error"),
                 },
                 success=probe.get("http_status") is not None,
@@ -1496,7 +1647,11 @@ async def _probe_webhooks_logic(max_per_run: int, force: bool = False) -> dict:
                 "status": probe.get("http_status"),
                 "server": (probe.get("http_headers") or {}).get("server"),
                 "ip": (probe.get("ip_addresses") or [None])[0],
-                "tls_cn": (probe.get("tls_issuer") or {}).get("commonName"),
+                "tls_issuer": probe.get("tls_issuer"),
+                "shodan_first": next(
+                    (v for v in (probe.get("shodan") or {}).values() if isinstance(v, dict) and v.get("org")),
+                    None,
+                ),
                 "http_err": probe.get("http_error"),
                 "dns_err": probe.get("dns_error"),
             }
