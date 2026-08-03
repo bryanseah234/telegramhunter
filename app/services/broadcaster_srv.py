@@ -405,6 +405,24 @@ class BroadcasterService:
             logger.warning(f"[Broadcaster] pin_message failed msg_id={message_id}: {e}")
             return False
 
+    async def unpin_message(
+        self,
+        group_id: int | str,
+        message_id: int,
+    ) -> bool:
+        """Unpin a specific Telegram message in the group. Returns True on success."""
+        await self._wait_for_rate_limit()
+        bot = self._get_bot_instance(self.bot_tokens[0])
+        try:
+            await bot.unpin_chat_message(
+                chat_id=group_id,
+                message_id=message_id,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[Broadcaster] unpin_message failed msg_id={message_id}: {e}")
+            return False
+
     async def ensure_topic(self, group_id: int | str, topic_name: str) -> int:
         """Ensures a forum topic exists. Retries once before raising."""
         try:

