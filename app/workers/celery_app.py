@@ -309,6 +309,13 @@ app.conf.update(
             "schedule": crontab(minute="*/30"),
             "kwargs": {"max_messages": 100},
         },
+        # Reconcile topics from DB (source of truth) — hourly.
+        # Ensures pending broadcasts get processed; does NOT reset already-
+        # broadcasted messages (avoids duplicate flood).
+        "reconcile-topics-hourly": {
+            "task": "flow.reconcile_topics_from_db",
+            "schedule": crontab(minute=25, hour="*"),
+        },
         # Duplicate report — daily @ 08:15 UTC.
         "media-duplicate-report-daily": {
             "task": "flow.media_duplicate_report",
