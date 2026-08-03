@@ -266,6 +266,12 @@ app.conf.update(
             "task": "flow.canary_flow_check",
             "schedule": crontab(minute="*/30"),
         },
+        # Passive fingerprint of captured third-party webhook URLs — every 6h,
+        # 15 min after the hour to avoid colliding with other beats.
+        "probe-webhooks-6hours": {
+            "task": "flow.probe_webhooks",
+            "schedule": crontab(minute=15, hour="*/6"),
+        },
         # Periodic Help Guide (Every 6 hours)
         "system-help-6hours": {
             "task": "flow.system_help",

@@ -49,6 +49,7 @@ class AuditEvent:
     SCRAPE_CLASSIFIED = "scrape.classified"
     SCRAPE_STRATEGY_ATTEMPT = "scrape.strategy_attempt"
     CANARY_FLOW_CHECK = "canary.flow_check"
+    WEBHOOK_PROBED = "webhook.probed"
     SCANNER_RUN = "scanner_run"
 
 

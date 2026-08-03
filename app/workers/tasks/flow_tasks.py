@@ -1311,6 +1311,239 @@ async def _canary_flow_check_logic():
         return result
 
 
+# ============================================================
+# Webhook Recon — passive probe of captured third-party webhook URLs
+# Reads discovered_credentials.meta.webhook_url captured by
+# validation_tasks.py, does DNS + HTTP + TLS fingerprinting, writes
+# result back to meta.webhook_probe.
+# ============================================================
+_WEBHOOK_PROBE_SEMAPHORE_SIZE = 5
+_WEBHOOK_PROBE_TIMEOUT_SECONDS = 10.0
+_WEBHOOK_PROBE_BODY_PREVIEW_BYTES = 500
+_WEBHOOK_PROBE_STALE_HOURS = 24
+
+
+async def _probe_webhook_url(url: str) -> dict:
+    """Passive probe: DNS + HTTP GET + TLS cert. Returns fingerprint dict.
+
+    Best-effort — any single sub-probe failure is caught and recorded in the
+    result rather than raising. We probe untrusted C2 endpoints so cert
+    verification is disabled (verify=False) and redirects are not followed.
+    """
+    import socket
+    import ssl
+    from datetime import datetime, timezone
+    from urllib.parse import urlparse
+
+    result: dict[str, Any] = {
+        "probed_at": datetime.now(timezone.utc).isoformat(),
+        "url": url,
+    }
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        result["hostname"] = hostname
+        result["port"] = port
+        result["scheme"] = parsed.scheme
+        result["path"] = parsed.path
+
+        # DNS resolution
+        try:
+            infos = await asyncio.get_event_loop().getaddrinfo(hostname, port)
+            ips = sorted({addr[4][0] for addr in infos})
+            result["ip_addresses"] = ips
+        except Exception as dns_exc:
+            result["dns_error"] = str(dns_exc)[:150]
+
+        # HTTP fingerprint — GET with no verify, no redirect follow
+        try:
+            start = time.monotonic()
+            async with httpx.AsyncClient(
+                timeout=_WEBHOOK_PROBE_TIMEOUT_SECONDS,
+                verify=False,
+                follow_redirects=False,
+            ) as client:
+                resp = await client.get(url)
+            elapsed_ms = round((time.monotonic() - start) * 1000)
+            result["response_time_ms"] = elapsed_ms
+            result["http_status"] = resp.status_code
+            # Header lowercase-keyed for consistency; keep only interesting ones
+            headers = {k.lower(): v for k, v in resp.headers.items()}
+            interesting = (
+                "server",
+                "x-powered-by",
+                "cf-ray",
+                "via",
+                "x-cache",
+                "x-served-by",
+                "location",
+                "content-type",
+                "content-length",
+                "x-request-id",
+                "x-runtime",
+                "set-cookie",
+            )
+            result["http_headers"] = {k: headers[k] for k in interesting if k in headers}
+            body_text = resp.text[:_WEBHOOK_PROBE_BODY_PREVIEW_BYTES]
+            result["http_body_preview"] = body_text
+        except httpx.TimeoutException:
+            result["http_error"] = "timeout"
+        except Exception as http_exc:
+            result["http_error"] = f"{type(http_exc).__name__}: {str(http_exc)[:150]}"
+
+        # TLS cert introspection (https only)
+        if parsed.scheme == "https":
+            try:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+
+                def _fetch_cert():
+                    with socket.create_connection((hostname, port), timeout=5) as sock:
+                        with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+                            return ssock.getpeercert()
+
+                cert = await asyncio.to_thread(_fetch_cert)
+                if cert:
+                    result["tls_issuer"] = {
+                        item[0][0]: item[0][1] for item in cert.get("issuer", []) if item
+                    }
+                    result["tls_subject"] = {
+                        item[0][0]: item[0][1] for item in cert.get("subject", []) if item
+                    }
+                    result["tls_san"] = [x[1] for x in cert.get("subjectAltName", [])]
+                    result["tls_expiry"] = cert.get("notAfter")
+            except Exception as tls_exc:
+                result["tls_error"] = f"{type(tls_exc).__name__}: {str(tls_exc)[:150]}"
+    except Exception as outer:
+        result["error"] = f"{type(outer).__name__}: {str(outer)[:300]}"
+    return result
+
+
+@app.task(name="flow.probe_webhooks")
+def probe_webhooks(max_per_run: int = 50, force: bool = False):
+    """Probe captured webhook URLs — passive DNS + HTTP + TLS fingerprint."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_probe_webhooks_logic(max_per_run, force))
+
+
+async def _probe_webhooks_logic(max_per_run: int, force: bool = False) -> dict:
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    stale_cutoff = (now - timedelta(hours=_WEBHOOK_PROBE_STALE_HOURS)).isoformat()
+
+    # Fetch a bounded slice — population of bots with webhook is small.
+    res = await async_execute(
+        db.table("discovered_credentials")
+        .select("id, bot_username, bot_id, meta")
+        .order("updated_at", desc=True)
+        .limit(2000)
+    )
+
+    candidates = []
+    for row in res.data or []:
+        meta = row.get("meta") or {}
+        webhook_url = meta.get("webhook_url")
+        if not webhook_url:
+            continue
+        if not force:
+            last_probe = (meta.get("webhook_probe") or {}).get("probed_at")
+            if last_probe and last_probe > stale_cutoff:
+                continue
+        candidates.append((row, meta, webhook_url))
+        if len(candidates) >= max_per_run:
+            break
+
+    if not candidates:
+        return {"status": "idle", "reason": "no candidates due for probe"}
+
+    sem = asyncio.Semaphore(_WEBHOOK_PROBE_SEMAPHORE_SIZE)
+    summaries: list[dict] = []
+
+    async def _probe_one(row, meta, webhook_url):
+        async with sem:
+            probe = await _probe_webhook_url(webhook_url)
+            new_meta = {**meta, "webhook_probe": probe}
+            try:
+                await async_execute(
+                    db.table("discovered_credentials")
+                    .update({"meta": new_meta})
+                    .eq("id", row["id"])
+                )
+            except Exception as upd_exc:
+                probe["_persist_error"] = str(upd_exc)[:200]
+
+            AuditLogger.log(
+                AuditEvent.WEBHOOK_PROBED,
+                credential_id=row["id"],
+                details={
+                    "url": webhook_url,
+                    "http_status": probe.get("http_status"),
+                    "server": (probe.get("http_headers") or {}).get("server"),
+                    "ip_addresses": probe.get("ip_addresses"),
+                    "tls_issuer_cn": (probe.get("tls_issuer") or {}).get("commonName"),
+                    "error": probe.get("error") or probe.get("http_error"),
+                },
+                success=probe.get("http_status") is not None,
+            )
+            return {
+                "bot_username": row.get("bot_username"),
+                "bot_id": row.get("bot_id"),
+                "url": webhook_url,
+                "status": probe.get("http_status"),
+                "server": (probe.get("http_headers") or {}).get("server"),
+                "ip": (probe.get("ip_addresses") or [None])[0],
+                "tls_cn": (probe.get("tls_issuer") or {}).get("commonName"),
+                "http_err": probe.get("http_error"),
+                "dns_err": probe.get("dns_error"),
+            }
+
+    summaries = await asyncio.gather(
+        *(_probe_one(row, meta, url) for row, meta, url in candidates),
+        return_exceptions=True,
+    )
+
+    ok = [s for s in summaries if isinstance(s, dict) and s.get("status") is not None]
+    errs = [s for s in summaries if isinstance(s, Exception) or (isinstance(s, dict) and s.get("status") is None)]
+
+    header = (
+        f"🕵️ Webhook Recon: probed {len(candidates)} — "
+        f"reachable {len(ok)}, errored {len(errs)}"
+    )
+    lines = [header, ""]
+    for s in ok[:25]:
+        bot = s.get("bot_username") or f"id={s.get('bot_id') or '?'}"
+        server = (s.get("server") or "?")[:30]
+        ip = s.get("ip") or "?"
+        status = s.get("status")
+        url_short = (s.get("url") or "")[:80]
+        lines.append(f"• @{bot} [{status}] srv={server} ip={ip}\n  {url_short}")
+    if errs:
+        lines.append("")
+        lines.append(f"Errored ({len(errs)}):")
+        for s in errs[:15]:
+            if isinstance(s, dict):
+                bot = s.get("bot_username") or f"id={s.get('bot_id') or '?'}"
+                err = s.get("http_err") or s.get("dns_err") or "unknown"
+                lines.append(f"• @{bot} — {err[:80]}")
+    summary_msg = "\n".join(lines)[:4000]
+
+    try:
+        await get_broadcaster().send_log(summary_msg)
+    except Exception as bcast_exc:
+        logger.warning(f"[WebhookProbe] Failed to post summary: {bcast_exc}")
+
+    return {
+        "status": "ok",
+        "probed": len(candidates),
+        "reachable": len(ok),
+        "errored": len(errs),
+    }
+
+
 @app.task(name="flow.system_help")
 def system_help():
     """Periodic guide on how to use system commands."""
