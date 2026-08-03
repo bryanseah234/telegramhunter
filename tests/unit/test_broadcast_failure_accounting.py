@@ -1,0 +1,128 @@
+from types import SimpleNamespace
+
+import pytest
+
+from app.services.broadcaster_srv import BroadcastSendError
+
+
+class _FakeQuery:
+    def __init__(self):
+        self.payload = None
+        self.filters = []
+        self.used_or = False
+
+    def select(self, *_args, **_kwargs):
+        return self
+
+    def update(self, payload):
+        self.payload = payload
+        return self
+
+    def eq(self, key, value):
+        self.filters.append((key, value))
+        return self
+
+    def or_(self, condition):
+        self.used_or = True
+        self.filters.append(("or", condition))
+        return self
+
+    def order(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+
+class _FakeDb:
+    def __init__(self):
+        self.queries = []
+
+    def table(self, _table):
+        query = _FakeQuery()
+        self.queries.append(query)
+        return query
+
+
+@pytest.mark.asyncio
+async def test_mark_broadcast_failure_records_error_attempts_and_retry(monkeypatch):
+    from app.workers.tasks import flow_tasks
+
+    fake_db = _FakeDb()
+    captured = {}
+
+    async def fake_async_execute(query):
+        captured["payload"] = query.payload
+        captured["filters"] = query.filters
+        return SimpleNamespace(data=[query.payload])
+
+    monkeypatch.setattr(flow_tasks, "db", fake_db)
+    monkeypatch.setattr(flow_tasks, "async_execute", fake_async_execute)
+    monkeypatch.setattr(flow_tasks.AuditLogger, "log", lambda *args, **kwargs: None)
+
+    await flow_tasks._mark_broadcast_failure(
+        {"id": "msg-1", "credential_id": "cred-1", "broadcast_attempts": 2},
+        BroadcastSendError("timeout", "send exceeded timeout", retryable=True),
+    )
+
+    assert captured["filters"] == [("id", "msg-1")]
+    assert captured["payload"]["broadcast_claimed_at"] is None
+    assert captured["payload"]["broadcast_attempts"] == 3
+    assert captured["payload"]["broadcast_error"]["reason"] == "timeout"
+    assert captured["payload"]["broadcast_error"]["retryable"] is True
+    assert captured["payload"]["next_retry_at"]
+
+
+@pytest.mark.asyncio
+async def test_mark_broadcast_failure_falls_back_when_columns_missing(monkeypatch):
+    from app.workers.tasks import flow_tasks
+
+    fake_db = _FakeDb()
+    payloads = []
+
+    async def fake_async_execute(query):
+        payloads.append(query.payload)
+        if len(payloads) == 1:
+            raise Exception("column exfiltrated_messages.broadcast_error does not exist")
+        return SimpleNamespace(data=[query.payload])
+
+    monkeypatch.setattr(flow_tasks, "db", fake_db)
+    monkeypatch.setattr(flow_tasks, "async_execute", fake_async_execute)
+    monkeypatch.setattr(flow_tasks.AuditLogger, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(flow_tasks, "_BROADCAST_RELIABILITY_COLUMNS_AVAILABLE", None)
+    monkeypatch.setattr(flow_tasks, "_BROADCAST_RELIABILITY_LAST_CHECK", 0.0)
+
+    await flow_tasks._mark_broadcast_failure(
+        {"id": "msg-1", "credential_id": "cred-1", "broadcast_attempts": 2},
+        BroadcastSendError("timeout", "send exceeded timeout", retryable=True),
+    )
+
+    assert payloads[0]["broadcast_error"]["reason"] == "timeout"
+    assert payloads[1] == {"broadcast_claimed_at": None}
+    assert flow_tasks._BROADCAST_RELIABILITY_COLUMNS_AVAILABLE is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_pending_broadcasts_falls_back_when_next_retry_missing(monkeypatch):
+    from app.workers.tasks import flow_tasks
+
+    fake_db = _FakeDb()
+    calls = []
+
+    async def fake_async_execute(query):
+        calls.append(query)
+        if query.used_or:
+            raise Exception("column exfiltrated_messages.next_retry_at does not exist")
+        return SimpleNamespace(data=[{"id": "msg-1"}])
+
+    monkeypatch.setattr(flow_tasks, "db", fake_db)
+    monkeypatch.setattr(flow_tasks, "async_execute", fake_async_execute)
+    monkeypatch.setattr(flow_tasks, "_BROADCAST_RELIABILITY_COLUMNS_AVAILABLE", None)
+    monkeypatch.setattr(flow_tasks, "_BROADCAST_RELIABILITY_LAST_CHECK", 0.0)
+
+    messages = await flow_tasks._fetch_pending_broadcast_messages(10, "2026-08-02T00:00:00Z")
+
+    assert messages == [{"id": "msg-1"}]
+    assert calls[0].used_or is True
+    assert calls[1].used_or is False
+    assert flow_tasks._BROADCAST_RELIABILITY_COLUMNS_AVAILABLE is False

@@ -1,8 +1,14 @@
 import asyncio
+import contextlib
 import logging
+import os
+import urllib.parse
+
 from telethon import TelegramClient
 from telethon.sessions import MemorySession
+
 from app.core.config import settings
+from app.services._scraper.lifecycle import TelegramClientLifecycle
 
 logger = logging.getLogger("bot_manager")
 
@@ -10,7 +16,7 @@ logger = logging.getLogger("bot_manager")
 def _parse_proxy_url(proxy_url: str) -> tuple:
     """Parse a proxy URL into the 6-element tuple expected by Telethon/PySocks."""
     import socks
-    import urllib.parse
+
     parsed = urllib.parse.urlparse(proxy_url)
     if not parsed.hostname or not parsed.port:
         raise ValueError(f"Invalid proxy URL configured: missing hostname or port in '{proxy_url}'")
@@ -24,6 +30,7 @@ def _parse_proxy_url(proxy_url: str) -> tuple:
 
 
 _MAX_CACHED_CLIENTS = 50  # evict LRU entries beyond this to bound memory
+_CLIENT_START_TIMEOUT_SECONDS = 30.0
 
 
 class BotClientManager:
@@ -44,38 +51,48 @@ class BotClientManager:
         """
         async with self._lock:
             client = self._clients.get(bot_token)
-            
+
             # Check if client exists and is still connected
             if client:
                 if client.is_connected():
                     return client
                 else:
-                    logger.warning(f"Existing client for bot disconnected. Reconnecting...")
-                    try:
+                    logger.warning("Existing client for bot disconnected. Reconnecting...")
+                    with contextlib.suppress(Exception):
                         await client.disconnect()
-                    except Exception:
-                        pass
                     del self._clients[bot_token]
-                
+
             # Create new client
-            import os
             pid = os.getpid()
             logger.info(f"🚀 [BotManager] [PID:{pid}] Creating fresh connection for bot...")
             proxy_tuple = _parse_proxy_url(settings.TELETHON_PROXY_URL) if settings.TELETHON_PROXY_URL else None
             client = TelegramClient(MemorySession(), self.api_id, self.api_hash, proxy=proxy_tuple)
+            started = False
             try:
-                await asyncio.wait_for(client.start(bot_token=bot_token), timeout=30.0)
+                await asyncio.wait_for(
+                    client.start(bot_token=bot_token),
+                    timeout=_CLIENT_START_TIMEOUT_SECONDS,
+                )
+                started = True
             except asyncio.TimeoutError:
-                logger.error(f"[BotManager] Timeout connecting bot client after 30s")
+                logger.error(
+                    f"[BotManager] Timeout connecting bot client after {_CLIENT_START_TIMEOUT_SECONDS:g}s"
+                )
                 raise
-            
+            finally:
+                if not started:
+                    await TelegramClientLifecycle(
+                        disconnect=client.disconnect,
+                        disconnect_timeout=settings.TELEGRAM_CLIENT_DISCONNECT_TIMEOUT_SECONDS,
+                        label="bot_manager.start",
+                        logger=logger,
+                    ).disconnect_safely()
+
             # Evict oldest entry when cache is full
             if len(self._clients) >= _MAX_CACHED_CLIENTS:
                 oldest_token, oldest_client = next(iter(self._clients.items()))
-                try:
+                with contextlib.suppress(Exception):
                     await asyncio.wait_for(oldest_client.disconnect(), timeout=5.0)
-                except Exception:
-                    pass
                 del self._clients[oldest_token]
                 logger.info(f"[BotManager] Evicted oldest cached client (cache full at {_MAX_CACHED_CLIENTS})")
 
@@ -85,8 +102,8 @@ class BotClientManager:
     async def disconnect_all(self):
         """Cleanly disconnect all managed clients."""
         async with self._lock:
-            for token, client in self._clients.items():
-                logger.info(f"🔌 [BotManager] Disconnecting bot client...")
+            for _token, client in self._clients.items():
+                logger.info("🔌 [BotManager] Disconnecting bot client...")
                 await client.disconnect()
             self._clients.clear()
 

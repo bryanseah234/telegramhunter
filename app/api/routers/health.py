@@ -64,7 +64,7 @@ async def detailed_health(x_monitor_key: str | None = Header(None)):
         else:
             health_status["checks"]["telegram_bot"] = {"status": "unhealthy", "error": "API unreachable"}
             health_status["status"] = "degraded"
-    except Exception as e:
+    except Exception:
         # Do NOT include the exception string — it may contain the bot token in a URL
         health_status["checks"]["telegram_bot"] = {"status": "unhealthy", "error": "connection_failed"}
         health_status["status"] = "degraded"
@@ -89,6 +89,26 @@ async def get_metrics(x_monitor_key: str | None = Header(None)):
         "summary": metrics.get_summary(),
         "metrics": metrics.get_all_metrics()
     }
+
+
+@router.get("/queues")
+async def get_queue_health(x_monitor_key: str | None = Header(None)):
+    """
+    Get operational queue depth and oldest tracked job age.
+    """
+    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
+    try:
+        import redis
+        from app.core.queue_monitor import get_queue_snapshot
+
+        client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        return {"queues": get_queue_snapshot(client)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "degraded", "error": str(e)},
+        ) from e
 
 
 @router.get("/circuit-breakers")
@@ -120,4 +140,4 @@ async def reset_circuit_breaker(service: str, x_monitor_key: str | None = Header
         breaker.reset()
         return {"status": "success", "message": f"Circuit breaker for {service} reset"}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e

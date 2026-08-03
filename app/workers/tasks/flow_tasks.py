@@ -13,6 +13,7 @@ import redis
 from app.core.config import settings
 import logging
 from celery.exceptions import SoftTimeLimitExceeded
+from app.core.audit import AuditEvent, AuditLogger
 
 logger = logging.getLogger("flow.tasks")
 
@@ -160,6 +161,249 @@ async def _index_telemetry_indicators(message_rows: List[Dict[str, Any]]) -> int
         return 0
 
 
+async def _merge_credential_meta(cred_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge a metadata patch without overwriting unrelated enrichment keys."""
+    fresh_meta_res = await async_execute(
+        db.table("discovered_credentials").select("meta").eq("id", cred_id).single()
+    )
+    existing_meta = {}
+    if isinstance(fresh_meta_res.data, dict):
+        existing_meta = fresh_meta_res.data.get("meta") or {}
+    merged_meta = dict(existing_meta)
+    merged_meta.update(patch)
+    await async_execute(
+        db.table("discovered_credentials").update({"meta": merged_meta}).eq("id", cred_id)
+    )
+    return merged_meta
+
+
+def _strategy_attempt_to_dict(attempt: Any) -> Dict[str, Any]:
+    if hasattr(attempt, "to_dict"):
+        return attempt.to_dict()
+    if isinstance(attempt, dict):
+        return dict(attempt)
+    return {
+        "name": getattr(attempt, "name", "unknown"),
+        "success": getattr(attempt, "success", False),
+        "message_count": getattr(attempt, "message_count", 0),
+        "reason": str(getattr(attempt, "reason", "")),
+        "retryable": getattr(attempt, "retryable", False),
+        "evidence": getattr(attempt, "evidence", {}),
+    }
+
+
+async def _persist_scrape_classification(cred_id: str, scrape_result: Any) -> None:
+    from datetime import datetime, timezone
+
+    if hasattr(scrape_result, "to_metadata"):
+        meta_patch = scrape_result.to_metadata()
+    else:
+        meta_patch = {
+            "last_scrape_reason": "success" if scrape_result else "no_new_messages",
+            "last_scrape_retryable": False,
+            "last_scrape_evidence": {"legacy_result": True},
+            "last_scrape_strategy_attempts": [],
+            "last_scrape_next_action": "persist_messages" if scrape_result else "no_action",
+        }
+
+    meta_patch["last_scrape_at"] = datetime.now(timezone.utc).isoformat()
+    await _merge_credential_meta(cred_id, meta_patch)
+
+    reason = meta_patch.get("last_scrape_reason")
+    attempts = meta_patch.get("last_scrape_strategy_attempts") or []
+    AuditLogger.log(
+        AuditEvent.SCRAPE_CLASSIFIED,
+        credential_id=cred_id,
+        details={
+            "reason": reason,
+            "retryable": meta_patch.get("last_scrape_retryable"),
+            "next_action": meta_patch.get("last_scrape_next_action"),
+            "message_count": len(getattr(scrape_result, "messages", scrape_result or [])),
+            "strategy_count": len(attempts),
+        },
+        success=reason in ("success", "no_new_messages"),
+    )
+    for attempt in attempts:
+        attempt_data = _strategy_attempt_to_dict(attempt)
+        AuditLogger.log(
+            AuditEvent.SCRAPE_STRATEGY_ATTEMPT,
+            credential_id=cred_id,
+            details=attempt_data,
+            success=bool(attempt_data.get("success")),
+        )
+
+
+def _broadcast_retry_delay_seconds(reason: str, retryable: bool, retry_after_seconds: int | None) -> int:
+    if retry_after_seconds:
+        return max(60, int(retry_after_seconds) + 30)
+    if not retryable:
+        return 24 * 3600
+    if reason == "timeout":
+        return 5 * 60
+    if reason == "network_disconnect":
+        return 10 * 60
+    if reason == "topic_missing":
+        return 60
+    if reason == "flood_wait":
+        return 30 * 60
+    return 15 * 60
+
+
+_BROADCAST_RELIABILITY_COLUMNS_AVAILABLE: bool | None = None
+_BROADCAST_RELIABILITY_LAST_CHECK = 0.0
+
+
+def _is_missing_broadcast_reliability_column(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return (
+        any(
+            column in text
+            for column in ("broadcast_error", "broadcast_attempts", "next_retry_at")
+        )
+        and (
+            "column" in text
+            or "schema cache" in text
+            or "does not exist" in text
+            or "42703" in text
+            or "pgrst204" in text
+        )
+    )
+
+
+def _can_use_broadcast_reliability_columns() -> bool:
+    if _BROADCAST_RELIABILITY_COLUMNS_AVAILABLE is not False:
+        return True
+    return time.time() - _BROADCAST_RELIABILITY_LAST_CHECK > 300
+
+
+def _set_broadcast_reliability_columns_available(value: bool) -> None:
+    global _BROADCAST_RELIABILITY_COLUMNS_AVAILABLE
+    global _BROADCAST_RELIABILITY_LAST_CHECK
+    _BROADCAST_RELIABILITY_COLUMNS_AVAILABLE = value
+    _BROADCAST_RELIABILITY_LAST_CHECK = time.time()
+
+
+async def _fetch_pending_broadcast_messages(batch_size: int, now_iso: str) -> List[Dict[str, Any]]:
+    base_query = (
+        db.table("exfiltrated_messages")
+        .select("*, discovered_credentials!inner(meta)")
+        .eq("is_broadcasted", False)
+    )
+
+    if _can_use_broadcast_reliability_columns():
+        try:
+            response = await async_execute(
+                base_query
+                .or_(f"next_retry_at.is.null,next_retry_at.lte.{now_iso}")
+                .order("telegram_msg_id", desc=False)
+                .limit(batch_size)
+            )
+            _set_broadcast_reliability_columns_available(True)
+            return response.data or []
+        except Exception as exc:
+            if not _is_missing_broadcast_reliability_column(exc):
+                raise
+            _set_broadcast_reliability_columns_available(False)
+            logger.warning(
+                "[Broadcast] Reliability columns missing; using legacy pending query. "
+                "Apply database/migrations/2026-08-02-scrape-broadcast-reliability.sql "
+                "to enable retry scheduling."
+            )
+
+    response = await async_execute(
+        db.table("exfiltrated_messages")
+        .select("*, discovered_credentials!inner(meta)")
+        .eq("is_broadcasted", False)
+        .order("telegram_msg_id", desc=False)
+        .limit(batch_size)
+    )
+    return response.data or []
+
+
+async def _update_message_broadcast_success(msg_id: str) -> None:
+    payload = {
+        "is_broadcasted": True,
+        "broadcast_claimed_at": None,
+    }
+    if _can_use_broadcast_reliability_columns():
+        try:
+            await async_execute(
+                db.table("exfiltrated_messages")
+                .update({
+                    **payload,
+                    "broadcast_error": None,
+                    "next_retry_at": None,
+                })
+                .eq("id", msg_id)
+            )
+            _set_broadcast_reliability_columns_available(True)
+            return
+        except Exception as exc:
+            if not _is_missing_broadcast_reliability_column(exc):
+                raise
+            _set_broadcast_reliability_columns_available(False)
+            logger.warning(
+                "[Broadcast] Reliability columns missing on success update; "
+                "falling back to legacy broadcast status update."
+            )
+
+    await async_execute(db.table("exfiltrated_messages").update(payload).eq("id", msg_id))
+
+
+async def _mark_broadcast_failure(msg: Dict[str, Any], exc: BaseException) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    msg_id = msg["id"]
+    reason = getattr(exc, "reason", exc.__class__.__name__)
+    retryable = bool(getattr(exc, "retryable", True))
+    detail = getattr(exc, "detail", str(exc)) or reason
+    retry_after_seconds = getattr(exc, "retry_after_seconds", None)
+    now = datetime.now(timezone.utc)
+    attempts = int(msg.get("broadcast_attempts") or 0) + 1
+    delay_seconds = _broadcast_retry_delay_seconds(reason, retryable, retry_after_seconds)
+    next_retry_at = (now + timedelta(seconds=delay_seconds)).isoformat()
+    payload = {
+        "broadcast_claimed_at": None,
+        "broadcast_error": {
+            "reason": reason,
+            "detail": str(detail)[:500],
+            "retryable": retryable,
+            "failed_at": now.isoformat(),
+        },
+        "broadcast_attempts": attempts,
+        "next_retry_at": next_retry_at,
+    }
+    try:
+        await async_execute(db.table("exfiltrated_messages").update(payload).eq("id", msg_id))
+        _set_broadcast_reliability_columns_available(True)
+    except Exception as update_exc:
+        if not _is_missing_broadcast_reliability_column(update_exc):
+            raise
+        _set_broadcast_reliability_columns_available(False)
+        logger.warning(
+            "[Broadcast] Reliability columns missing on failure update; clearing claim only. "
+            "Apply database/migrations/2026-08-02-scrape-broadcast-reliability.sql "
+            "to persist broadcast errors and retry times."
+        )
+        await async_execute(
+            db.table("exfiltrated_messages")
+            .update({"broadcast_claimed_at": None})
+            .eq("id", msg_id)
+        )
+    AuditLogger.log(
+        AuditEvent.BROADCAST_FAILED,
+        credential_id=msg.get("credential_id"),
+        details={
+            "message_id": msg_id,
+            "reason": reason,
+            "retryable": retryable,
+            "attempts": attempts,
+            "next_retry_at": next_retry_at,
+        },
+        success=False,
+    )
+
+
 # Redis Client for Locking
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
@@ -224,7 +468,6 @@ async def _exfiltrate_logic(cred_id: str):
     record = response.data[0]
     encrypted_token = record["bot_token"]
     chat_id = record["chat_id"]
-    current_meta = record.get("meta") or {}
 
     logger.info(f"    [Exfil] Found Chat ID: {chat_id}")
 
@@ -279,15 +522,8 @@ async def _exfiltrate_logic(cred_id: str):
                 db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id)
             )
             return "Record inactive; marked revoked during preflight."
-        if meta_info.get("webhook_url"):
-            latest_meta_res = await async_execute(
-                db.table("discovered_credentials").select("meta").eq("id", cred_id).single()
-            )
-            merged_meta = dict((latest_meta_res.data or {}).get("meta") or current_meta)
-            merged_meta["webhook_url"] = meta_info["webhook_url"]
-            await async_execute(
-                db.table("discovered_credentials").update({"meta": merged_meta}).eq("id", cred_id)
-            )
+        if meta_info:
+            await _merge_credential_meta(cred_id, meta_info)
         if updates:
             for u in updates:
                 u["credential_id"] = cred_id
@@ -307,15 +543,38 @@ async def _exfiltrate_logic(cred_id: str):
         logger.info(f"⏳ [Exfil] Calling scraper service for chat {chat_id}...")
         await broadcaster.send_log(f"⏳ Scraping chat `{chat_id}`...")
         
-        messages = await scraper_service.scrape_history(bot_token, chat_id)
+        scrape_result = await scraper_service.scrape_history(bot_token, chat_id)
+        await _persist_scrape_classification(cred_id, scrape_result)
+        messages = list(getattr(scrape_result, "messages", scrape_result))
         
         logger.info(f"✅ [Exfil] Scraper returned {len(messages)} messages.")
-        await broadcaster.send_log(f"✅ Scraped {len(messages)} messages.")
+        reason = getattr(scrape_result, "reason_code", "success" if messages else "no_new_messages")
+        await broadcaster.send_log(f"✅ Scraped {len(messages)} messages (`{reason}`).")
     except SoftTimeLimitExceeded:
         logger.warning(f"⏰ [Exfil] Scraping timed out for chat {chat_id}. Continuing with 0 messages.")
+        from app.services._scraper.results import ScrapeReason, ScrapeResult
+
+        await _persist_scrape_classification(
+            cred_id,
+            ScrapeResult(
+                messages=[],
+                reason=ScrapeReason.TIMEOUT,
+                retryable=True,
+                evidence={"exception": "SoftTimeLimitExceeded", "chat_id": chat_id},
+                strategy_attempts=[],
+            ),
+        )
         messages = []
     except Exception as e:
         err_str = str(e)
+        from app.services._scraper.results import ScrapeResultClassifier
+
+        classified = ScrapeResultClassifier().result_from_attempts(
+            [],
+            [ScrapeResultClassifier().classify_exception(e, strategy="scrape_history")],
+            evidence={"chat_id": chat_id},
+        )
+        await _persist_scrape_classification(cred_id, classified)
         # Only mark revoked for definitive Telegram rejection — NOT transient errors.
         # Transient: network failures, timeouts, flood waits, server errors.
         # Permanent: bot kicked/banned, token invalid (401), account deactivated.
@@ -434,7 +693,7 @@ async def _enrich_logic(cred_id: str):
     # Discover
     bot_info = {}
     try:
-        logger.info(f"🔎 [Enrich] Discovering chats via ScraperService...")
+        logger.info("🔎 [Enrich] Discovering chats via ScraperService...")
         bot_info, chats = await scraper_service.discover_chats(bot_token)
         logger.info(f"✅ [Enrich] Discovery returned {len(chats) if chats else 0} chats.")
         if chats:
@@ -442,7 +701,7 @@ async def _enrich_logic(cred_id: str):
             logger.info(f"    [Enrich] Chats found: {chat_list}")
             await broadcaster.send_log(f"✅ Discovered chats: {chat_list}")
         else:
-            logger.info(f"    [Enrich] No chats found.")
+            logger.info("    [Enrich] No chats found.")
             await broadcaster.send_log("⚠️ No chats found.")
     except Exception as e:
         logger.error(f"❌ [Enrich] Discovery failed: {e}")
@@ -455,7 +714,7 @@ async def _enrich_logic(cred_id: str):
 
     if not real_chats:
         # Valid token, but no open dialogs (or only bot_self placeholder).
-        logger.info(f"    [Enrich] No real chats via API. Skipping Orphan Match (Disabled).")
+        logger.info("    [Enrich] No real chats via API. Skipping Orphan Match (Disabled).")
         # Mark as 'active' - token works but truly no chats accessible
         await async_execute(db.table("discovered_credentials").update({"status": "active"}).eq("id", cred_id))
         return "Token valid, but no real chats found. Status updated to 'active'."
@@ -520,7 +779,7 @@ async def _enrich_logic(cred_id: str):
     
     # Trigger Exfiltration for Primary
     logger.info(f"🚀 [Enrich] Triggering exfiltration for {cred_id}...")
-    await broadcaster.send_log(f"🚀 Triggering background exfiltration task.")
+    await broadcaster.send_log("🚀 Triggering background exfiltration task.")
     exfiltrate_chat.delay(cred_id)
 
     msg = f"Enriched {cred_id} with chat {first_chat['id']}."
@@ -634,21 +893,14 @@ async def _broadcast_logic():
 
     from app.core.constants import CLAIM_TIMEOUT_MINUTES
     stale_threshold = datetime.now(timezone.utc) - timedelta(minutes=CLAIM_TIMEOUT_MINUTES)
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     # Batch size: env-configurable. Default 200 (200 × 1.5s = 300s per run,
     # fits inside CLAIM_TIMEOUT_MINUTES=15 with headroom).
     # Raise via BROADCAST_BATCH_SIZE=500 if you have enough bot credentials
     # in the rotation pool to sustain the higher send rate without flood-wait.
     BROADCAST_BATCH_SIZE = int(os.getenv("BROADCAST_BATCH_SIZE", 200))
-    response = await async_execute(
-        db.table("exfiltrated_messages")
-        .select("*, discovered_credentials!inner(meta)")
-        .eq("is_broadcasted", False)
-        .order("telegram_msg_id", desc=False)
-        .limit(BROADCAST_BATCH_SIZE)
-    )
-
-    messages = response.data
+    messages = await _fetch_pending_broadcast_messages(BROADCAST_BATCH_SIZE, now_iso)
     if not messages:
         # Only log periodically or if verbose debug needed? 
         # For now, let's log it to confirm the task is running.
@@ -781,10 +1033,16 @@ async def _broadcast_logic():
                     thread_id = await broadcaster.ensure_topic(group_id, topic_name)
                 except Exception as e_topic:
                     logger.error(f"    ❌ [Broadcast] Topic creation failed for {cred_id}: {e_topic}")
-                    # Clear claim so this message is retried on next broadcast run
-                    await async_execute(db.table("exfiltrated_messages").update({
-                        "broadcast_claimed_at": None
-                    }).eq("id", msg_id))
+                    from app.services.broadcaster_srv import BroadcastSendError
+
+                    await _mark_broadcast_failure(
+                        msg,
+                        BroadcastSendError(
+                            "topic_missing",
+                            f"Could not create topic '{topic_name}': {e_topic}",
+                            retryable=True,
+                        ),
+                    )
                     continue
 
                 # Re-fetch meta before write — prevents overwriting concurrent enrich updates
@@ -805,7 +1063,13 @@ async def _broadcast_logic():
             except Exception as e:
                 # Check for topic deletion/not found
                 err_str = str(e)
-                if "Topic_deleted" in err_str or "message thread not found" in err_str or "TOPIC_DELETED" in err_str:
+                failure_reason = getattr(e, "reason", "")
+                if (
+                    failure_reason == "topic_missing"
+                    or "Topic_deleted" in err_str
+                    or "message thread not found" in err_str
+                    or "TOPIC_DELETED" in err_str
+                ):
                     logger.warning(f"    ⚠️ Topic {thread_id} deleted! Recreating '{topic_name}'...")
                     try:
                         thread_id = await broadcaster.ensure_topic(group_id, topic_name)
@@ -820,38 +1084,28 @@ async def _broadcast_logic():
                         send_success = True
                     except Exception as retry_e:
                         logger.error(f"    ❌ Failed after topic recreation: {retry_e}")
+                        await _mark_broadcast_failure(msg, retry_e)
                 else:
                     logger.error(f"    ❌ Send failed: {e}")
+                    await _mark_broadcast_failure(msg, e)
             
             if send_success:
                 # ==============================================
                 # SUCCESS: Mark as broadcasted and clear claim
                 # ==============================================
-                await async_execute(db.table("exfiltrated_messages").update({
-                    "is_broadcasted": True,
-                    "broadcast_claimed_at": None  # Clear claim
-                }).eq("id", msg_id))
+                await _update_message_broadcast_success(msg_id)
                 sent_count += 1
                 logger.info(f"    ✅ Broadcasted msg {msg_id}")
             else:
-                # ==============================================
-                # FAILED: Clear claim so it can be retried
-                # ==============================================
-                await async_execute(db.table("exfiltrated_messages").update({
-                    "broadcast_claimed_at": None
-                }).eq("id", msg_id))
-                logger.warning(f"    🔄 Cleared claim for retry: {msg_id}")
+                logger.warning(f"    🔄 Broadcast failure recorded for retry: {msg_id}")
             
             # Rate limit
             await asyncio.sleep(2.0) 
 
         except Exception as e:
             logger.error(f"Error broadcasting msg {msg_id}: {e}")
-            # Clear claim on error so message can be retried
             try:
-                await async_execute(db.table("exfiltrated_messages").update({
-                    "broadcast_claimed_at": None
-                }).eq("id", msg_id))
+                await _mark_broadcast_failure(msg, e)
             except Exception as e_claim:
                 logger.error(f"Failed to clear broadcast claim for msg {msg_id}: {e_claim} — message may be stuck until stale-claim TTL expires")
             continue
@@ -885,6 +1139,151 @@ def system_heartbeat():
     from app.workers.celery_app import get_worker_loop
     get_worker_loop().run_until_complete(get_broadcaster().send_log(msg))
     return "Heartbeat sent."
+
+
+@app.task(name="flow.queue_monitor")
+def queue_monitor():
+    """Return queue depths and oldest tracked job age for operational monitoring."""
+    try:
+        from app.core.queue_monitor import get_queue_snapshot
+
+        snapshot = get_queue_snapshot(redis_client)
+        logger.info(f"[QueueMonitor] {snapshot}")
+        return snapshot
+    except Exception as e:
+        logger.warning(f"[QueueMonitor] failed: {e}")
+        return {"error": str(e)}
+
+
+@app.task(name="flow.canary_flow_check")
+def canary_flow_check():
+    """Run a synthetic DB -> broadcast -> visibility canary when configured."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_canary_flow_check_logic())
+
+
+async def _canary_flow_check_logic():
+    from datetime import datetime, timezone
+
+    cred_id = settings.CANARY_CREDENTIAL_ID
+    if not cred_id:
+        return {"status": "disabled", "reason": "CANARY_CREDENTIAL_ID not configured"}
+
+    now = datetime.now(timezone.utc)
+    telegram_msg_id = -int(time.time())
+    content = f"{settings.CANARY_EXPECTED_TEXT} {now.isoformat()}"
+    row = {
+        "credential_id": cred_id,
+        "telegram_msg_id": telegram_msg_id,
+        "sender_name": "telegramhunter-canary",
+        "content": content,
+        "media_type": "text",
+        "file_meta": {"source": "canary", "created_at": now.isoformat()},
+        "is_broadcasted": False,
+        "broadcast_error": None,
+        "broadcast_attempts": 0,
+        "next_retry_at": None,
+    }
+    legacy_row = {
+        key: value
+        for key, value in row.items()
+        if key not in {"broadcast_error", "broadcast_attempts", "next_retry_at"}
+    }
+    result: dict[str, Any] = {
+        "status": "started",
+        "credential_id": cred_id,
+        "telegram_msg_id": telegram_msg_id,
+        "inserted": False,
+        "broadcasted": False,
+        "frontend_visible": None,
+    }
+    try:
+        try:
+            await async_execute(
+                db.table("exfiltrated_messages").upsert(
+                    row,
+                    on_conflict="credential_id,telegram_msg_id",
+                    ignore_duplicates=False,
+                )
+            )
+            _set_broadcast_reliability_columns_available(True)
+        except Exception as insert_exc:
+            if not _is_missing_broadcast_reliability_column(insert_exc):
+                raise
+            _set_broadcast_reliability_columns_available(False)
+            await async_execute(
+                db.table("exfiltrated_messages").upsert(
+                    legacy_row,
+                    on_conflict="credential_id,telegram_msg_id",
+                    ignore_duplicates=False,
+                )
+            )
+        result["inserted"] = True
+
+        result["broadcast_result"] = await _broadcast_logic()
+        select_columns = (
+            "id,is_broadcasted,broadcast_error"
+            if _can_use_broadcast_reliability_columns()
+            else "id,is_broadcasted"
+        )
+        try:
+            check = await async_execute(
+                db.table("exfiltrated_messages")
+                .select(select_columns)
+                .eq("credential_id", cred_id)
+                .eq("telegram_msg_id", telegram_msg_id)
+                .limit(1)
+            )
+            if "broadcast_error" in select_columns:
+                _set_broadcast_reliability_columns_available(True)
+        except Exception as select_exc:
+            if not _is_missing_broadcast_reliability_column(select_exc):
+                raise
+            _set_broadcast_reliability_columns_available(False)
+            check = await async_execute(
+                db.table("exfiltrated_messages")
+                .select("id,is_broadcasted")
+                .eq("credential_id", cred_id)
+                .eq("telegram_msg_id", telegram_msg_id)
+                .limit(1)
+            )
+        rows = check.data or []
+        if rows:
+            result["broadcasted"] = bool(rows[0].get("is_broadcasted"))
+            result["broadcast_error"] = rows[0].get("broadcast_error")
+
+        if settings.PUBLIC_FRONTEND_URL:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(settings.PUBLIC_FRONTEND_URL)
+                result["frontend_visible"] = response.status_code < 500
+                result["frontend_status_code"] = response.status_code
+            except Exception as frontend_exc:
+                result["frontend_visible"] = False
+                result["frontend_error"] = str(frontend_exc)[:300]
+
+        passed = bool(result["inserted"] and result["broadcasted"])
+        if result["frontend_visible"] is False:
+            passed = False
+        result["status"] = "ok" if passed else "failed"
+        AuditLogger.log(
+            AuditEvent.CANARY_FLOW_CHECK,
+            credential_id=cred_id,
+            details=result,
+            success=passed,
+        )
+        return result
+    except Exception as e:
+        result["status"] = "failed"
+        result["error"] = str(e)[:500]
+        AuditLogger.log(
+            AuditEvent.CANARY_FLOW_CHECK,
+            credential_id=cred_id,
+            details=result,
+            success=False,
+        )
+        return result
 
 
 @app.task(name="flow.system_help")

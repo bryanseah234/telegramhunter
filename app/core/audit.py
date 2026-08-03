@@ -45,6 +45,10 @@ class AuditEvent:
     TOKEN_VALIDATED = "token_validated"
     TOKEN_REVOKED = "token_revoked"
     BROADCAST_SENT = "broadcast_sent"
+    BROADCAST_FAILED = "broadcast.failed"
+    SCRAPE_CLASSIFIED = "scrape.classified"
+    SCRAPE_STRATEGY_ATTEMPT = "scrape.strategy_attempt"
+    CANARY_FLOW_CHECK = "canary.flow_check"
     SCANNER_RUN = "scanner_run"
 
 
@@ -125,6 +129,10 @@ class AuditLogger:
             AuditEvent.TOKEN_DECRYPTED,
             AuditEvent.TOKEN_REVOKED,
             AuditEvent.CREDENTIAL_CREATED,
+            AuditEvent.SCRAPE_CLASSIFIED,
+            AuditEvent.SCRAPE_STRATEGY_ATTEMPT,
+            AuditEvent.BROADCAST_FAILED,
+            AuditEvent.CANARY_FLOW_CHECK,
         ]
         return event_type in high_importance
 

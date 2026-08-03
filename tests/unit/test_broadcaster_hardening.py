@@ -4,7 +4,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from telegram.error import Forbidden
+from telegram.error import BadRequest, Forbidden, TimedOut
 
 
 class _FakeBot:
@@ -165,13 +165,15 @@ async def test_send_message_marks_forbidden_bot_failed(monkeypatch):
     monkeypatch.setattr(service, "_wait_for_rate_limit", no_wait)
     monkeypatch.setattr(service, "_get_bot_instance", lambda _token: fake_bot)
 
-    await service.send_message(
-        -100123,
-        1,
-        {"content": "hello", "sender_name": "tester", "media_type": "text", "telegram_msg_id": 77},
-    )
+    with pytest.raises(broadcaster_srv.BroadcastSendError) as exc_info:
+        await service.send_message(
+            -100123,
+            1,
+            {"content": "hello", "sender_name": "tester", "media_type": "text", "telegram_msg_id": 77},
+        )
 
     assert "123:ABC" in service._failed_tokens
+    assert exc_info.value.reason == "forbidden"
 
 
 @pytest.mark.asyncio
@@ -218,3 +220,15 @@ async def test_send_message_schedules_auto_archive_for_supported_media(monkeypat
         "telegram_msg_id": 88,
         "credential_id": "cred-1",
     }, 88)]
+
+
+def test_broadcast_exception_classifier_maps_timeout_and_topic_missing():
+    from app.services.broadcaster_srv import _classify_broadcast_exception
+
+    timeout = _classify_broadcast_exception(TimedOut("slow"))
+    topic = _classify_broadcast_exception(BadRequest("Message thread not found"))
+
+    assert timeout.reason == "timeout"
+    assert timeout.retryable is True
+    assert topic.reason == "topic_missing"
+    assert topic.retryable is True

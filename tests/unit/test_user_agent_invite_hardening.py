@@ -4,6 +4,8 @@ import pytest
 
 from app.services import user_agent_srv
 from app.services.user_agent_srv import UserAgentService
+from app.services._scraper.results import ScrapeReason
+from app.services._scraper.strategies import UserAgentJoinService
 
 
 class _FakeFloodWaitError(Exception):
@@ -50,3 +52,31 @@ async def test_invite_bot_to_group_does_not_fallback_on_flood_wait(monkeypatch):
     assert client.request_count == 1
     assert len(handled_errors) == 1
     assert disconnected == [True]
+
+
+def test_terminal_invite_error_detector_matches_too_many_bots():
+    assert user_agent_srv._is_terminal_invite_error(Exception("Too many bots in this chat"))
+
+
+@pytest.mark.asyncio
+async def test_user_agent_join_service_classifies_cooldown(monkeypatch):
+    service = UserAgentJoinService()
+
+    async def resolve(_token):
+        return "example_bot", {"getMe_status": 200}
+
+    class _Redis:
+        def is_on_cooldown(self, key):
+            return key == "user_agent"
+
+        def get_cooldown_remaining(self, _key):
+            return 123
+
+    monkeypatch.setattr(service, "resolve_bot_username", resolve)
+    monkeypatch.setattr("app.core.redis_srv.redis_srv", _Redis())
+
+    attempt = await service.invite_discovered_bot("123:ABC", -100123)
+
+    assert attempt.reason == ScrapeReason.USER_AGENT_INVITE_FAILED
+    assert attempt.retryable is True
+    assert attempt.evidence["cooldown_seconds"] == 123

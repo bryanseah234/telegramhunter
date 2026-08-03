@@ -4,7 +4,7 @@ import os
 import sys
 
 from celery import Celery
-from celery.signals import worker_ready, worker_shutdown, task_failure, task_prerun
+from celery.signals import before_task_publish, worker_ready, worker_shutdown, task_failure, task_prerun
 from celery.schedules import crontab
 
 from app.core.config import settings
@@ -124,24 +124,43 @@ def on_task_failure(task_id, exception, traceback, einfo, args, kwargs, **extra)
             import datetime
             loop = get_worker_loop()
             async def _insert():
-                await asyncio.to_thread(
-                    lambda: db.table("audit_logs").insert({
-                        "event_type": "task_permanent_failure",
-                        "actor": "celery_worker",
-                        "details": {
-                            "task_name": task_name,
-                            "task_id": task_id,
-                            "exception": exc_str,
-                        },
-                        "created_at": datetime.datetime.utcnow().isoformat(),
-                    }).execute()
-                )
+                try:
+                    await asyncio.to_thread(
+                        lambda: db.table("audit_logs").insert({
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "event_type": "task_permanent_failure",
+                            "user_agent": "celery_worker",
+                            "success": False,
+                            "details": {
+                                "task_name": task_name,
+                                "task_id": task_id,
+                                "exception": exc_str,
+                            },
+                        }).execute()
+                    )
+                except Exception as e:
+                    logger.warning(f"[DeadLetter] Could not persist failure to audit_logs: {e}")
             loop.call_soon_threadsafe(lambda: loop.create_task(_insert()))
         except Exception as e:
             logger.warning(f"[DeadLetter] Could not persist failure to audit_logs: {e}")
 
     import threading
     threading.Thread(target=_persist, daemon=True).start()
+
+
+@before_task_publish.connect
+def on_before_task_publish(sender=None, headers=None, body=None, routing_key=None, **kwargs):
+    """Track queue age independently of broker internals."""
+    try:
+        task_id = (headers or {}).get("id")
+        queue_name = routing_key or (headers or {}).get("queue") or "celery"
+        import redis as _redis
+        from app.core.queue_monitor import record_task_enqueued
+
+        client = _redis.from_url(settings.REDIS_URL, decode_responses=True)
+        record_task_enqueued(client, queue_name, task_id)
+    except Exception as e:
+        logger.debug(f"[QueueMonitor] enqueue tracking skipped: {e}")
 
 
 @task_prerun.connect
@@ -151,6 +170,15 @@ def on_task_prerun(task_id, task, args, kwargs, **extra):
     Waits up to 120s for connection before letting the task proceed.
     Tasks that only need Redis (heartbeat) are exempted.
     """
+    try:
+        import redis as _redis
+        from app.core.queue_monitor import record_task_started
+
+        client = _redis.from_url(settings.REDIS_URL, decode_responses=True)
+        record_task_started(client, task_id)
+    except Exception as e:
+        logger.debug(f"[QueueMonitor] start tracking skipped: {e}")
+
     # Exempt local-only tasks that don't need external APIs
     local_only_tasks = {"flow.system_heartbeat"}
     if task.name in local_only_tasks:
@@ -228,6 +256,14 @@ app.conf.update(
         # Heartbeat every 30 minutes
         "system-heartbeat-30min": {
             "task": "flow.system_heartbeat",
+            "schedule": crontab(minute="*/30"),
+        },
+        "queue-monitor-5min": {
+            "task": "flow.queue_monitor",
+            "schedule": crontab(minute="*/5"),
+        },
+        "canary-flow-check-30min": {
+            "task": "flow.canary_flow_check",
             "schedule": crontab(minute="*/30"),
         },
         # Periodic Help Guide (Every 6 hours)

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from datetime import datetime
 from uuid import UUID
 
@@ -28,6 +28,9 @@ class MessageOut(BaseModel):
     content: Optional[str] = None
     media_type: str
     is_broadcasted: bool
+    broadcast_error: Optional[Dict[str, Any]] = None
+    broadcast_attempts: int = 0
+    next_retry_at: Optional[datetime] = None
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)

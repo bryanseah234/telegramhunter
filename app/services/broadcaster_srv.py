@@ -1,11 +1,14 @@
-from telegram import Bot
-from telegram.request import HTTPXRequest
-from telegram.error import TelegramError, Forbidden
 import asyncio
+import itertools
 import logging
 import time
-import itertools
+
+from telegram import Bot
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
+from telegram.request import HTTPXRequest
+
 from app.core.config import settings
+from app.core.database import db
 from app.core.security import security
 from app.services.user_agent_srv import user_agent
 
@@ -13,7 +16,53 @@ logger = logging.getLogger("broadcaster")
 
 ARCHIVE_MEDIA_TYPES = {"document", "photo", "audio", "video"}
 
-from app.core.database import db
+
+class BroadcastSendError(RuntimeError):
+    def __init__(
+        self,
+        reason: str,
+        detail: str,
+        *,
+        retryable: bool = True,
+        retry_after_seconds: int | None = None,
+    ):
+        super().__init__(detail)
+        self.reason = reason
+        self.detail = detail
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _classify_broadcast_exception(exc: BaseException) -> BroadcastSendError:
+    text = str(exc)
+    lower = text.lower()
+    if isinstance(exc, RetryAfter):
+        retry_after = getattr(exc, "retry_after", None)
+        return BroadcastSendError(
+            "flood_wait",
+            text,
+            retryable=True,
+            retry_after_seconds=int(retry_after) if retry_after else None,
+        )
+    if isinstance(exc, (TimedOut, TimeoutError, asyncio.TimeoutError)):
+        return BroadcastSendError("timeout", text or "Telegram send timed out.", retryable=True)
+    if isinstance(exc, Forbidden):
+        return BroadcastSendError("forbidden", text, retryable=False)
+    if isinstance(exc, BadRequest):
+        if (
+            "message thread not found" in lower
+            or "topic_deleted" in lower
+            or "topic deleted" in lower
+        ):
+            return BroadcastSendError("topic_missing", text, retryable=True)
+        return BroadcastSendError("bad_request", text, retryable=False)
+    if isinstance(exc, NetworkError):
+        return BroadcastSendError("network_disconnect", text, retryable=True)
+    if isinstance(exc, TelegramError):
+        return BroadcastSendError("telegram_error", text, retryable=True)
+    if isinstance(exc, BroadcastSendError):
+        return exc
+    return BroadcastSendError("all_identities_failed", text or exc.__class__.__name__, retryable=True)
 
 
 async def _async_execute(query_builder):
@@ -146,9 +195,9 @@ class BroadcasterService:
 
         task.add_done_callback(_log_archive_result)
 
-    async def _download_media_bytes(self, file_id: str, credential_id: str) -> bytes | None:
+    async def _download_media_bytes(self, file_meta: dict, credential_id: str) -> bytes | None:
         """Download media bytes using the SOURCE bot's token (not the broadcaster's)."""
-        if not credential_id:
+        if not credential_id or not file_meta:
             return None
         try:
             res = await _async_execute(
@@ -162,12 +211,36 @@ class BroadcasterService:
                 return None
 
             decrypted_token = security.decrypt(rows[0]["bot_token"]).strip()
-            request = HTTPXRequest(read_timeout=15.0, write_timeout=15.0)
-            source_bot = Bot(token=decrypted_token, request=request)
-            tg_file = await source_bot.get_file(file_id)
-            data = await tg_file.download_as_bytearray()
-            logger.info(f"    📥 [Broadcaster] Downloaded {len(data)} bytes via source bot")
-            return bytes(data)
+
+            file_id = file_meta.get("file_id")
+            if file_id:
+                request = HTTPXRequest(read_timeout=15.0, write_timeout=15.0)
+                source_bot = Bot(token=decrypted_token, request=request)
+                tg_file = await source_bot.get_file(file_id)
+                data = await tg_file.download_as_bytearray()
+                logger.info(f"    📥 [Broadcaster] Downloaded {len(data)} bytes via Bot API source bot")
+                return bytes(data)
+
+            # Fallback to Telethon download if access_hash & id present
+            media_id = file_meta.get("id")
+            access_hash = file_meta.get("access_hash")
+            if media_id and access_hash:
+                from app.services.bot_manager_srv import bot_manager
+                from telethon.tl.types import InputPhoto, InputDocument
+                client = await bot_manager.get_client(decrypted_token)
+                file_ref = bytes.fromhex(file_meta.get("file_reference", "")) if file_meta.get("file_reference") else b""
+
+                wc = file_meta.get("wc")
+                if wc == "photo":
+                    input_location = InputPhoto(id=media_id, access_hash=access_hash, file_reference=file_ref)
+                else:
+                    input_location = InputDocument(id=media_id, access_hash=access_hash, file_reference=file_ref)
+
+                data = await client.download_media(input_location, bytes)
+                if data:
+                    logger.info(f"    📥 [Broadcaster] Downloaded {len(data)} bytes via Telethon client")
+                    return data
+            return None
         except Exception as exc:
             logger.warning(f"    ⚠️ [Broadcaster] _download_media_bytes failed: {exc}")
             return None
@@ -192,25 +265,30 @@ class BroadcasterService:
             to_send_text = f"{caption}\n\n[{media_type} Media Detected]"
 
         # Try up to N times (total size of pool)
+        last_failure: BroadcastSendError | None = None
         for _ in range(len(self._pool)):
             identity = next(self._cycle)
-            
+
             await self._wait_for_rate_limit()
 
             if identity["type"] == "bot":
                 token = identity["id"]
                 if token in self._failed_tokens: continue
-                
+
                 bot = self._get_bot_instance(token)
                 try:
                     logger.info(f"📤 [Broadcaster] Sending via Bot: {token[:10]}...")
-                    
-                    file_id = msg_obj.get("file_meta", {}).get("file_id")
+
+                    file_meta = msg_obj.get("file_meta") or {}
+                    file_id = file_meta.get("file_id")
+                    has_telethon_hash = bool(file_meta.get("id") and file_meta.get("access_hash"))
                     bot_thread_id = thread_id if thread_id != 1 else None
                     sent_via_media = False
-                    
-                    if file_id and media_type in ARCHIVE_MEDIA_TYPES:
-                        media_bytes = await self._download_media_bytes(file_id, msg_obj.get("credential_id"))
+
+                    logger.info(f"    🔍 DEBUG: media_type={media_type}, file_id={file_id}, fm={file_meta}")
+
+                    if (file_id or has_telethon_hash) and media_type in ARCHIVE_MEDIA_TYPES:
+                        media_bytes = await self._download_media_bytes(file_meta, msg_obj.get("credential_id"))
                         if media_bytes:
                             try:
                                 if media_type == "photo":
@@ -225,6 +303,7 @@ class BroadcasterService:
                                 sent_via_media = True
                                 logger.info(f"    ✅ [Broadcaster] Successfully sent {media_type} ({len(media_bytes)} bytes)")
                             except TelegramError as media_err:
+                                last_failure = _classify_broadcast_exception(media_err)
                                 logger.warning(f"⚠️ Failed to send media bytes: {media_err}. Falling back to text.")
 
                     if not sent_via_media:
@@ -240,20 +319,34 @@ class BroadcasterService:
                         ):
                             self._schedule_auto_archive(group_id, thread_id, msg_obj, msg_id)
                     return
-                except Forbidden:
+                except Forbidden as e:
                     self._failed_tokens.add(token)
+                    last_failure = _classify_broadcast_exception(e)
                     logger.warning(f"⚠️ Bot {token[:10]}... kicked. Rotating...")
+                except RetryAfter as e:
+                    last_failure = _classify_broadcast_exception(e)
+                    logger.warning(f"⚠️ Bot {token[:10]}... flood-waited. Rotating...")
+                except (TimedOut, NetworkError, asyncio.TimeoutError, TimeoutError) as e:
+                    last_failure = _classify_broadcast_exception(e)
+                    logger.warning(f"⚠️ Bot send transient failure: {last_failure.reason}: {e}")
                 except TelegramError as e:
-                    err_str = str(e)
-                    if ("Message thread not found" in err_str
-                        or "TOPIC_DELETED" in err_str
-                        or "Topic_deleted" in err_str):
+                    last_failure = _classify_broadcast_exception(e)
+                    if last_failure.reason == "topic_missing":
                         # Let the caller (broadcast_logic) handle topic recreation
                         # instead of silently dumping into General
-                        raise
+                        raise last_failure from e
                     logger.error(f"❌ Bot send failed: {e}")
+                    if not last_failure.retryable:
+                        raise last_failure from e
 
         logger.error("❌ All identities failed to send message.")
+        if last_failure:
+            raise last_failure
+        raise BroadcastSendError(
+            "all_identities_failed",
+            "All identities failed to send message",
+            retryable=True,
+        )
 
     async def send_log(self, message: str):
         """Sends a log to the General topic using a healthy bot."""

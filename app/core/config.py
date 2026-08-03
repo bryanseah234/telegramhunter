@@ -1,6 +1,6 @@
 import os
 from typing import Optional
-from pydantic import field_validator, model_validator, ValidationError
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     ARCHIVE_RETRY_ATTEMPTS: int = 2
     ARCHIVE_RETRY_BACKOFF_SECONDS: float = 2.0
     ARCHIVE_STALE_TMP_MAX_AGE_SECONDS: int = 1800
+    TELEGRAM_DELETE_WEBHOOK_FOR_SCRAPE: bool = False
+    TELEGRAM_HISTORY_TIMEOUT_SECONDS: float = 90.0
+    TELEGRAM_CLIENT_DISCONNECT_TIMEOUT_SECONDS: float = 10.0
+    CANARY_CREDENTIAL_ID: Optional[str] = None
+    CANARY_EXPECTED_TEXT: str = "telegramhunter-canary"
+    CANARY_MAX_AGE_SECONDS: int = 1800
+    PUBLIC_FRONTEND_URL: Optional[str] = None
 
     # Bot IDs that belong to US — never scan, validate, scrape, or broadcast about these.
     # Comma-separated bot IDs (numeric only, no tokens).

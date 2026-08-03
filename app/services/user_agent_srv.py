@@ -1,14 +1,14 @@
 import os
 import asyncio
-from telethon import TelegramClient, functions, types, errors
-from telethon.errors import SecurityError, FloodWaitError, AuthKeyUnregisteredError
+from telethon import TelegramClient, types, errors
+from telethon.errors import SecurityError
 from app.core.config import settings
 import time
 import logging
-import socket
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from app.services._scraper.lifecycle import TelegramClientLifecycle
 
 logger = logging.getLogger("user_agent")
 
@@ -44,6 +44,23 @@ def _credential_lookup_filter_for_source(source: int | str) -> str | None:
     except (TypeError, ValueError):
         return None
     return f"id.eq.{source_text}"
+
+
+def _is_terminal_invite_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    class_name = exc.__class__.__name__.lower()
+    terminal_terms = (
+        "too many bots",
+        "bots in this chat",
+        "userbotinvalid",
+        "user_bot_invalid",
+        "userprivac",
+        "privacy",
+        "chatadminrequired",
+        "chat_admin_required",
+        "forbidden",
+    )
+    return any(term in text or term in class_name for term in terminal_terms)
 
 
 def _telethon_media_info(message) -> tuple[str, dict]:
@@ -302,6 +319,7 @@ class UserAgentService:
                 if self._session_lock_key:
                     redis_srv.release_lock(self._session_lock_key)
                     self._session_lock_key = None
+                continue
 
 
             # 3. Check if already connected is THIS session
@@ -417,19 +435,29 @@ class UserAgentService:
         return removed
 
     async def _disconnect(self):
-        try:
+        async def _disconnect_client():
             if self.client and self.client.is_connected():
                 session_filename = getattr(self.client.session, 'filename', None)
                 await self.client.disconnect()
                 if session_filename:
                     self._cleanup_temp_session(session_filename)
-            if self._session_lock_key:
-                from app.core.redis_srv import redis_srv
-                redis_srv.release_lock(self._session_lock_key)
-                self._session_lock_key = None
-            await self._release_db_lease()
-        except Exception as e:
-            logger.warning(f"    ⚠️ [UserAgent] Error during disconnect: {e}")
+        try:
+            lifecycle = TelegramClientLifecycle(
+                disconnect=_disconnect_client,
+                disconnect_timeout=settings.TELEGRAM_CLIENT_DISCONNECT_TIMEOUT_SECONDS,
+                label="user_agent",
+                logger=logger,
+            )
+            await lifecycle.disconnect_safely()
+        finally:
+            try:
+                if self._session_lock_key:
+                    from app.core.redis_srv import redis_srv
+                    redis_srv.release_lock(self._session_lock_key)
+                    self._session_lock_key = None
+                await self._release_db_lease()
+            except Exception as e2:
+                logger.warning(f"    ⚠️ [UserAgent] Error releasing locks: {e2}")
 
     async def _acquire_db_lease(self, session_path: str) -> bool:
         try:
@@ -547,6 +575,9 @@ class UserAgentService:
                 except errors.FloodWaitError:
                     raise
                 except Exception as e_channel:
+                    if _is_terminal_invite_error(e_channel):
+                        logger.error(f"    ❌ [UserAgent] Terminal invite failure: {e_channel}")
+                        return False
                     logger.debug(f"    ℹ️ [UserAgent] InviteToChannelRequest skipped ({e_channel}), trying AddChatUserRequest...")
                     try:
                         await self.client(AddChatUserRequest(chat_id=group_entity.id, user_id=bot_entity, fwd_limit=0))
@@ -782,7 +813,8 @@ class UserAgentService:
             filename = f"{filename}_{original_name}"
         else:
             filename = f"{filename}.bin"
-        return os.path.join(ARCHIVE_TMP_DIR, filename)
+        archive_dir = ARCHIVE_TMP_DIR.rstrip("/\\")
+        return f"{archive_dir}/{filename}"
 
     @staticmethod
     def _archive_size_result(message) -> ArchiveMediaResult | None:
