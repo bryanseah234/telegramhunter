@@ -66,6 +66,13 @@ cp .env.template .env
 | `COMPOSE_PROJECT_NAME` | `telegramhunter` | Docker Compose namespace |
 | `EXTENSION_WRITE_SECRET` | *(unset)* | Secret for Chrome extension RLS policy. Must also be set in Supabase: `ALTER DATABASE postgres SET app.extension_write_secret = '<value>';` |
 | `TARGET_COUNTRIES` | *(built-in 50-country list)* | Optional JSON array of ISO-3166 codes for country-rotation scanning |
+| `TELEGRAM_DELETE_WEBHOOK_FOR_SCRAPE` | `False` | If `True`, `deleteWebhook` is called on 409 conflicts before polling. Destructive to any third party operating the bot. |
+| `TELEGRAM_HISTORY_TIMEOUT_SECONDS` | `90` | Per-scrape cap on Telethon history reads |
+| `TELEGRAM_CLIENT_DISCONNECT_TIMEOUT_SECONDS` | `10` | Grace period for lifecycle-safe Telethon cleanup |
+| `CANARY_CREDENTIAL_ID` | *(unset)* | UUID of a `discovered_credentials` row used as the synthetic parent for `flow.canary_flow_check`. Canary stays `disabled` until this is set. |
+| `CANARY_EXPECTED_TEXT` | `telegramhunter-canary` | Prefix for synthetic canary message content |
+| `CANARY_MAX_AGE_SECONDS` | `1800` | Age budget for a canary run before it's considered stale |
+| `PUBLIC_FRONTEND_URL` | *(unset)* | Optional public URL of the dashboard — canary hits it to verify frontend reachability |
 
 ### Optional  Scanner API Keys
 
@@ -197,6 +204,17 @@ curl -H "X-Monitor-Key: <your-key>" "http://localhost:8011/monitor/messages?limi
 curl -H "X-Monitor-Key: <your-key>" http://localhost:8011/health/detailed
 ```
 
+**Queue depths + oldest job age** (added by reliability rebuild):
+```bash
+curl -H "X-Monitor-Key: <your-key>" http://localhost:8011/health/queues
+```
+Returns per-queue `{length, oldest_job_age_seconds, oldest_enqueued_at}` for `celery`, `scrape`, `scanners`, `validation`.
+
+**Captured webhook URLs** — bots where a third party has registered a webhook (potential C2 / researcher endpoints):
+```bash
+curl -H "X-Monitor-Key: <your-key>" "http://localhost:8011/monitor/webhooks?limit=100"
+```
+
 **Circuit breaker status:**
 ```bash
 curl -H "X-Monitor-Key: <your-key>" http://localhost:8011/health/circuit-breakers
@@ -288,7 +306,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-**68 tests** across unit, integration, API, security, and Supabase R/W suites.
+**176 tests** (168 unit + 5 integration + 3 top-level) across unit, integration, API, security, and Supabase R/W suites — plus scrape classification, broadcast retry accounting, queue monitor, canary probe, and Telethon lifecycle coverage added by the reliability rebuild.
 
 ### Run specific suites
 
