@@ -150,6 +150,7 @@ async def list_captured_webhooks(
                     "webhook_pending_updates": meta.get("webhook_pending_update_count"),
                     "webhook_ip_address": meta.get("webhook_ip_address"),
                     "webhook_captured_at": meta.get("webhook_captured_at"),
+                    "webhook_probe": meta.get("webhook_probe"),
                     "created_at": row.get("created_at"),
                     "updated_at": row.get("updated_at"),
                 }
