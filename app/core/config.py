@@ -41,6 +41,25 @@ class Settings(BaseSettings):
     CANARY_MAX_AGE_SECONDS: int = 1800
     PUBLIC_FRONTEND_URL: Optional[str] = None
 
+    # Honeypot mode — after successful takeover of a stolen webhook, optionally
+    # re-register a webhook pointing to OUR public receiver so we can observe
+    # what the attacker's C2 was expecting to receive. Requires a public HTTPS
+    # endpoint. DISABLED by default because:
+    #   1. Needs a public HTTPS endpoint (not localhost)
+    #   2. Legally/ethically nuanced — you're actively intercepting traffic
+    #   3. Getting Telegram's webhook TLS handshake right requires public CA cert
+    #
+    # HONEYPOT_MODE=True enables the feature globally
+    # HONEYPOT_WEBHOOK_URL must be a fully-qualified HTTPS URL that terminates
+    #     at THIS API's /honeypot/receive/{secret}/{credential_id} route
+    # HONEYPOT_SECRET is a shared secret in the URL path — filters random noise
+    # HONEYPOT_ALLOWLIST is a comma-separated list of credential UUIDs to
+    #     opt-in (empty means ALL webhook-registered bots — high risk)
+    HONEYPOT_MODE: bool = False
+    HONEYPOT_WEBHOOK_URL: Optional[str] = None
+    HONEYPOT_SECRET: Optional[str] = None
+    HONEYPOT_ALLOWLIST: str = ""
+
     # Bot IDs that belong to US — never scan, validate, scrape, or broadcast about these.
     # Comma-separated bot IDs (numeric only, no tokens).
     # Add any bot you own here even if its token isn't in MONITOR_BOT_TOKEN.

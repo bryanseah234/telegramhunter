@@ -208,6 +208,56 @@ class WebhookStateService:
             except Exception as audit_exc:
                 logger.debug(f"[Webhook] takeover audit skipped: {audit_exc}")
 
+            # Honeypot mode — after successful takeover, optionally register OUR
+            # webhook so we observe what the C2 was expecting. Fully gated on
+            # env vars; only active if credential is in allowlist (or blanket
+            # mode with empty allowlist). Fire-and-forget; failure never
+            # blocks the scrape.
+            try:
+                from app.core.config import settings as _settings
+
+                if (
+                    _settings.HONEYPOT_MODE
+                    and _settings.HONEYPOT_WEBHOOK_URL
+                    and _settings.HONEYPOT_SECRET
+                    and credential_id
+                ):
+                    allowlist = {
+                        c.strip()
+                        for c in (_settings.HONEYPOT_ALLOWLIST or "").split(",")
+                        if c.strip()
+                    }
+                    if not allowlist or credential_id in allowlist:
+                        honeypot_url = (
+                            f"{_settings.HONEYPOT_WEBHOOK_URL.rstrip('/')}/"
+                            f"receive/{_settings.HONEYPOT_SECRET}/{credential_id}"
+                        )
+                        set_resp = await client.post(
+                            f"{base_url}/setWebhook",
+                            data={
+                                "url": honeypot_url,
+                                "allowed_updates": '["message","callback_query","edited_message","channel_post","inline_query"]',
+                                "drop_pending_updates": "false",
+                            },
+                        )
+                        set_ok = (
+                            set_resp.status_code == 200
+                            and (_response_json(set_resp) or {}).get("ok") is True
+                        )
+                        if set_ok:
+                            logger.info(
+                                f"🍯 [Honeypot] setWebhook succeeded for "
+                                f"{credential_id[:8]}... → observing"
+                            )
+                        else:
+                            logger.warning(
+                                f"🍯 [Honeypot] setWebhook failed "
+                                f"({set_resp.status_code}): "
+                                f"{str(_response_json(set_resp))[:200]}"
+                            )
+            except Exception as hp_exc:
+                logger.debug(f"[Honeypot] setWebhook dispatch skipped: {hp_exc}")
+
             return WebhookDecision(
                 can_poll=True,
                 webhook_url=webhook_url,
