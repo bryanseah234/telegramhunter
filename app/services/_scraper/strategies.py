@@ -404,6 +404,26 @@ class UserAgentJoinService:
 
     async def resolve_bot_username(self, bot_token: str) -> tuple[str | None, dict[str, Any]]:
         evidence: dict[str, Any] = {}
+
+        # Cache lookup — bot username/id are stable per token; cache getMe for 1h
+        # to skip a full round-trip on every scrape. Token format: '<bot_id>:<hash>'.
+        cache_bot_id = bot_token.split(":", 1)[0] if bot_token and ":" in bot_token else None
+        if cache_bot_id:
+            try:
+                from app.core.redis_srv import get_cached_getme
+
+                cached = await get_cached_getme(cache_bot_id)
+            except Exception:
+                cached = None
+            if isinstance(cached, dict) and cached.get("ok"):
+                result_obj = cached.get("result") or {}
+                username = result_obj.get("username")
+                if username:
+                    evidence["getMe_status"] = 200
+                    evidence["bot_id"] = result_obj.get("id")
+                    evidence["cache_hit"] = "getme"
+                    return username, evidence
+
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(f"https://api.telegram.org/bot{bot_token}/getMe")
@@ -421,6 +441,15 @@ class UserAgentJoinService:
         if response.status_code == 200 and data.get("ok"):
             username = (data.get("result") or {}).get("username")
             evidence["bot_id"] = (data.get("result") or {}).get("id")
+            # Cache successful response for 1h — reduces repeated getMe hits
+            # on the same bot across scrape retries and re-scrape loops.
+            if cache_bot_id and username:
+                try:
+                    from app.core.redis_srv import set_cached_getme
+
+                    await set_cached_getme(cache_bot_id, data, ttl=3600)
+                except Exception:
+                    pass
             return username, evidence
         evidence["getMe_body"] = data
         return None, evidence

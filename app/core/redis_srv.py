@@ -63,3 +63,107 @@ end
         self.client.delete(f"counter:{key}")
 
 redis_srv = RedisService()
+
+
+# ---------------------------------------------------------------------------
+# Async helpers — Bot API response cache + probe host cooldown
+# ---------------------------------------------------------------------------
+# These wrap the sync `redis_srv.client` in `async def` so callers in async
+# code (scraper strategies, webhook probes) can `await` them naturally.
+# The underlying redis client is sync but calls are local + fast; the async
+# signature keeps the call sites clean and lets us swap to `redis.asyncio`
+# later without touching consumers.
+import json as _json
+
+
+async def get_cached_getme(bot_id: str) -> dict | None:
+    """Return cached Bot API getMe response for `bot_id`, or None on miss."""
+    try:
+        raw = redis_srv.client.get(f"cache:getme:{bot_id}")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return _json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+async def set_cached_getme(bot_id: str, data: dict, ttl: int = 3600) -> None:
+    """Cache Bot API getMe response for `bot_id` with TTL (default 1h)."""
+    if not isinstance(data, dict):
+        return
+    try:
+        redis_srv.client.set(
+            f"cache:getme:{bot_id}",
+            _json.dumps(data, default=str),
+            ex=max(1, int(ttl)),
+        )
+    except Exception:
+        pass
+
+
+async def get_cached_getchat(bot_id: str, chat_id: int | str) -> dict | None:
+    """Return cached Bot API getChat response for (bot_id, chat_id), or None."""
+    try:
+        raw = redis_srv.client.get(f"cache:getchat:{bot_id}:{chat_id}")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return _json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+async def set_cached_getchat(
+    bot_id: str, chat_id: int | str, data: dict, ttl: int = 3600
+) -> None:
+    """Cache Bot API getChat response for (bot_id, chat_id) with TTL (default 1h)."""
+    if not isinstance(data, dict):
+        return
+    try:
+        redis_srv.client.set(
+            f"cache:getchat:{bot_id}:{chat_id}",
+            _json.dumps(data, default=str),
+            ex=max(1, int(ttl)),
+        )
+    except Exception:
+        pass
+
+
+# Probe cooldown: after 3 failures in 1h we back off from `hostname` for 24h.
+_PROBE_FAIL_WINDOW_SECONDS = 3600
+_PROBE_FAIL_THRESHOLD = 3
+_PROBE_COOLDOWN_SECONDS = 86400
+
+
+async def probe_host_is_cooling(hostname: str) -> bool:
+    """Return True if `hostname` is currently on probe cooldown."""
+    if not hostname:
+        return False
+    try:
+        return redis_srv.client.exists(f"probe:cooldown:{hostname}") > 0
+    except Exception:
+        return False
+
+
+async def probe_host_mark_failure(hostname: str) -> None:
+    """Record a probe failure. After 3 fails in 1h, cool `hostname` for 24h."""
+    if not hostname:
+        return
+    try:
+        pipe = redis_srv.client.pipeline()
+        pipe.incr(f"probe:fail:{hostname}")
+        pipe.expire(f"probe:fail:{hostname}", _PROBE_FAIL_WINDOW_SECONDS)
+        count, _ = pipe.execute()
+        if int(count) >= _PROBE_FAIL_THRESHOLD:
+            redis_srv.client.set(
+                f"probe:cooldown:{hostname}",
+                "active",
+                ex=_PROBE_COOLDOWN_SECONDS,
+            )
+    except Exception:
+        pass
