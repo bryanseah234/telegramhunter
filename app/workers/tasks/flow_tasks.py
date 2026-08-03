@@ -1348,6 +1348,18 @@ async def _probe_webhook_url(url: str) -> dict:
         result["scheme"] = parsed.scheme
         result["path"] = parsed.path
 
+        # Cooldown check — bail early if this host has failed 3x in the last
+        # hour. Prevents wasted work + rate-limit backlash on dead C2 hosts.
+        if hostname:
+            try:
+                from app.core.redis_srv import probe_host_is_cooling
+
+                if await probe_host_is_cooling(hostname):
+                    result["skipped"] = "host_cooldown"
+                    return result
+            except Exception:
+                pass
+
         # DNS resolution
         try:
             infos = await asyncio.get_event_loop().getaddrinfo(hostname, port)
@@ -1355,6 +1367,13 @@ async def _probe_webhook_url(url: str) -> dict:
             result["ip_addresses"] = ips
         except Exception as dns_exc:
             result["dns_error"] = str(dns_exc)[:150]
+            if hostname:
+                try:
+                    from app.core.redis_srv import probe_host_mark_failure
+
+                    await probe_host_mark_failure(hostname)
+                except Exception:
+                    pass
 
         # HTTP fingerprint — GET with no verify, no redirect follow
         try:
@@ -1387,10 +1406,32 @@ async def _probe_webhook_url(url: str) -> dict:
             result["http_headers"] = {k: headers[k] for k in interesting if k in headers}
             body_text = resp.text[:_WEBHOOK_PROBE_BODY_PREVIEW_BYTES]
             result["http_body_preview"] = body_text
+            # Non-2xx counts as a probe failure (dead endpoint, cf challenge, etc.)
+            if hostname and not (200 <= resp.status_code < 300):
+                try:
+                    from app.core.redis_srv import probe_host_mark_failure
+
+                    await probe_host_mark_failure(hostname)
+                except Exception:
+                    pass
         except httpx.TimeoutException:
             result["http_error"] = "timeout"
+            if hostname:
+                try:
+                    from app.core.redis_srv import probe_host_mark_failure
+
+                    await probe_host_mark_failure(hostname)
+                except Exception:
+                    pass
         except Exception as http_exc:
             result["http_error"] = f"{type(http_exc).__name__}: {str(http_exc)[:150]}"
+            if hostname:
+                try:
+                    from app.core.redis_srv import probe_host_mark_failure
+
+                    await probe_host_mark_failure(hostname)
+                except Exception:
+                    pass
 
         # TLS cert introspection (https only) — parse DER via cryptography lib
         if parsed.scheme == "https":
@@ -1476,45 +1517,58 @@ _WEB_RECON_STATUS_PATHS = (
 
 
 async def _probe_web_recon(base_url: str) -> dict:
-    """Probe common recon paths — bounded, best-effort, tight timeout per path."""
+    """Probe common recon paths concurrently — bounded, best-effort, tight timeout per path."""
     import re
+
+    async def _fetch_preview(client: httpx.AsyncClient, path: str) -> tuple[str, dict]:
+        entry: dict[str, Any] = {}
+        try:
+            r = await client.get(base_url + path)
+            entry["status"] = r.status_code
+            if r.status_code == 200:
+                text = r.text
+                entry["preview"] = text[:400]
+                if path == "/":
+                    m = re.search(r"<title[^>]*>([^<]{0,200})</title>", text, re.IGNORECASE)
+                    if m:
+                        entry["title"] = m.group(1).strip()
+        except httpx.TimeoutException:
+            entry["error"] = "timeout"
+        except Exception as e:
+            entry["error"] = f"{type(e).__name__}: {str(e)[:80]}"
+        return path, entry
+
+    async def _fetch_status(client: httpx.AsyncClient, path: str) -> tuple[str, dict]:
+        entry: dict[str, Any] = {}
+        try:
+            r = await client.get(base_url + path)
+            entry["status"] = r.status_code
+            if r.status_code in (301, 302, 303, 307, 308):
+                entry["location"] = r.headers.get("location")
+            elif r.status_code == 200 and path in ("/.git/config", "/.env", "/server-status"):
+                # Sensitive file leaks — capture a small preview
+                entry["leak_preview"] = r.text[:300]
+        except httpx.TimeoutException:
+            entry["error"] = "timeout"
+        except Exception as e:
+            entry["error"] = f"{type(e).__name__}: {str(e)[:80]}"
+        return path, entry
 
     findings: dict[str, dict] = {}
     async with httpx.AsyncClient(
         timeout=5.0, verify=False, follow_redirects=False
     ) as client:
-        for path in _WEB_RECON_PREVIEW_PATHS:
-            entry: dict[str, Any] = {}
-            try:
-                r = await client.get(base_url + path)
-                entry["status"] = r.status_code
-                if r.status_code == 200:
-                    text = r.text
-                    entry["preview"] = text[:400]
-                    if path == "/":
-                        m = re.search(r"<title[^>]*>([^<]{0,200})</title>", text, re.IGNORECASE)
-                        if m:
-                            entry["title"] = m.group(1).strip()
-            except httpx.TimeoutException:
-                entry["error"] = "timeout"
-            except Exception as e:
-                entry["error"] = f"{type(e).__name__}: {str(e)[:80]}"
-            findings[path] = entry
-
-        for path in _WEB_RECON_STATUS_PATHS:
-            entry = {}
-            try:
-                r = await client.get(base_url + path)
-                entry["status"] = r.status_code
-                if r.status_code in (301, 302, 303, 307, 308):
-                    entry["location"] = r.headers.get("location")
-                elif r.status_code == 200 and path in ("/.git/config", "/.env", "/server-status"):
-                    # Sensitive file leaks — capture a small preview
-                    entry["leak_preview"] = r.text[:300]
-            except httpx.TimeoutException:
-                entry["error"] = "timeout"
-            except Exception as e:
-                entry["error"] = f"{type(e).__name__}: {str(e)[:80]}"
+        # Fan out all path probes concurrently on a single client (connection
+        # pooled, tight per-request timeout). httpx.AsyncClient is safe for
+        # concurrent requests, and gather bounds fan-in to the fixed path lists.
+        tasks = [_fetch_preview(client, p) for p in _WEB_RECON_PREVIEW_PATHS] + [
+            _fetch_status(client, p) for p in _WEB_RECON_STATUS_PATHS
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for item in results:
+            if isinstance(item, BaseException):
+                continue
+            path, entry = item
             findings[path] = entry
 
     # Extract sitemap URLs from sitemap.xml if present
@@ -1531,41 +1585,59 @@ async def _probe_web_recon(base_url: str) -> dict:
 
 
 async def _probe_shodan_ips(ips: list[str]) -> dict:
-    """Look up each IP via Shodan REST — returns per-IP summary (org, ports, tags, hostnames)."""
+    """Look up each IP via Shodan REST concurrently — returns per-IP summary."""
     per_ip: dict[str, dict] = {}
     api_key = settings.SHODAN_KEY
+
+    async def _lookup(client: httpx.AsyncClient, ip: str) -> tuple[str, dict]:
+        try:
+            r = await client.get(
+                f"https://api.shodan.io/shodan/host/{ip}",
+                params={"key": api_key, "minify": "true"},
+            )
+            if r.status_code == 200:
+                d = r.json()
+                return ip, {
+                    "org": d.get("org"),
+                    "isp": d.get("isp"),
+                    "asn": d.get("asn"),
+                    "country_code": d.get("country_code"),
+                    "city": d.get("city"),
+                    "hostnames": (d.get("hostnames") or [])[:8],
+                    "ports": d.get("ports") or [],
+                    "tags": d.get("tags") or [],
+                    "vulns": (d.get("vulns") or [])[:10],
+                    "last_update": d.get("last_update"),
+                }
+            if r.status_code == 404:
+                return ip, {"status": "not_indexed"}
+            if r.status_code == 401:
+                return ip, {"error": "shodan_key_unauthorized"}
+            return ip, {"error": f"http_{r.status_code}"}
+        except httpx.TimeoutException:
+            return ip, {"error": "timeout"}
+        except Exception as e:
+            return ip, {"error": f"{type(e).__name__}: {str(e)[:100]}"}
+
     async with httpx.AsyncClient(timeout=8.0) as client:
-        for ip in ips:
-            try:
-                r = await client.get(
-                    f"https://api.shodan.io/shodan/host/{ip}",
-                    params={"key": api_key, "minify": "true"},
-                )
-                if r.status_code == 200:
-                    d = r.json()
-                    per_ip[ip] = {
-                        "org": d.get("org"),
-                        "isp": d.get("isp"),
-                        "asn": d.get("asn"),
-                        "country_code": d.get("country_code"),
-                        "city": d.get("city"),
-                        "hostnames": (d.get("hostnames") or [])[:8],
-                        "ports": d.get("ports") or [],
-                        "tags": d.get("tags") or [],
-                        "vulns": (d.get("vulns") or [])[:10],
-                        "last_update": d.get("last_update"),
-                    }
-                elif r.status_code == 404:
-                    per_ip[ip] = {"status": "not_indexed"}
-                elif r.status_code == 401:
-                    per_ip[ip] = {"error": "shodan_key_unauthorized"}
-                    break  # no point probing further with a bad key
-                else:
-                    per_ip[ip] = {"error": f"http_{r.status_code}"}
-            except httpx.TimeoutException:
-                per_ip[ip] = {"error": "timeout"}
-            except Exception as e:
-                per_ip[ip] = {"error": f"{type(e).__name__}: {str(e)[:100]}"}
+        results = await asyncio.gather(
+            *(_lookup(client, ip) for ip in ips), return_exceptions=True
+        )
+        # If any lookup returned an unauthorized-key marker, short-circuit the
+        # rest of the display since the key won't authorize follow-ups either.
+        unauthorized = False
+        for item in results:
+            if isinstance(item, BaseException):
+                continue
+            ip, entry = item
+            per_ip[ip] = entry
+            if entry.get("error") == "shodan_key_unauthorized":
+                unauthorized = True
+        if unauthorized:
+            # Preserve prior semantics: mark remaining un-probed IPs implicitly
+            # by leaving them out of per_ip. asyncio.gather already fired them,
+            # so this is just a no-op documentation note.
+            pass
     return per_ip
 
 
@@ -2009,6 +2081,361 @@ async def _report_pin_metrics_logic() -> dict:
         "pinned": pinned_count,
         "top_hosts": len(top_hosts),
     }
+
+
+# ==============================================================================
+# OBSERVABILITY — takeover spike & exfil latency
+# ==============================================================================
+
+# Alert threshold — surface to monitor group when exceeded within the sample window.
+TAKEOVER_SPIKE_THRESHOLD = 20
+TAKEOVER_SPIKE_WINDOW_SECONDS = 3600  # 1 hour
+EXFIL_LATENCY_SAMPLE_SIZE = 1000
+
+
+@app.task(name="flow.takeover_spike_check")
+def takeover_spike_check():
+    """Alert monitor group when webhook takeover rate spikes.
+
+    Counts ``audit_logs`` rows with ``event_type='webhook.takeover'`` in the
+    last hour. If the count exceeds ``TAKEOVER_SPIKE_THRESHOLD`` we treat it
+    as a likely mass-exposure event and broadcast a warning. Silent when the
+    count is at or below threshold to keep the channel quiet.
+
+    Assumes ``webhook.takeover`` audit events are persisted to ``audit_logs``.
+    If persistence is not enabled the count will be zero and no alert fires
+    — that's still a valid observability signal (either no takeovers or the
+    audit persistence gate needs to be widened).
+    """
+    from app.workers.celery_app import get_worker_loop
+    return get_worker_loop().run_until_complete(_takeover_spike_check_logic())
+
+
+async def _takeover_spike_check_logic() -> dict:
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=TAKEOVER_SPIKE_WINDOW_SECONDS)
+    cutoff_iso = cutoff.isoformat()
+
+    try:
+        response = await async_execute(
+            db.table("audit_logs")
+            .select("id", count="exact")
+            .eq("event_type", "webhook.takeover")
+            .gte("timestamp", cutoff_iso)
+            .limit(1)  # we only need the count, not the rows
+        )
+    except Exception as e:
+        logger.warning(f"[TakeoverSpike] audit_logs query failed: {e}")
+        return {"status": "db_query_failed", "error": str(e)[:200]}
+
+    count = int(response.count or 0)
+    logger.info(
+        f"[TakeoverSpike] {count} webhook.takeover events in last "
+        f"{TAKEOVER_SPIKE_WINDOW_SECONDS // 60} min (threshold={TAKEOVER_SPIKE_THRESHOLD})"
+    )
+
+    if count <= TAKEOVER_SPIKE_THRESHOLD:
+        return {"status": "ok", "count": count, "threshold": TAKEOVER_SPIKE_THRESHOLD}
+
+    alert = (
+        "🚨 Webhook Takeover Spike\n"
+        f"{count} takeovers in the last hour (threshold: {TAKEOVER_SPIKE_THRESHOLD}).\n"
+        "Likely mass exposure event — investigate."
+    )
+    try:
+        await get_broadcaster().send_log(alert)
+    except Exception as e:
+        logger.warning(f"[TakeoverSpike] broadcast failed: {e}")
+        return {"status": "broadcast_failed", "count": count, "error": str(e)[:200]}
+
+    return {"status": "alerted", "count": count, "threshold": TAKEOVER_SPIKE_THRESHOLD}
+
+
+@app.task(name="flow.exfil_latency_report")
+def exfil_latency_report():
+    """Broadcast P50/P95/P99 exfiltration→broadcast latency for the last N messages.
+
+    Sample size is capped at ``EXFIL_LATENCY_SAMPLE_SIZE`` (1000). The
+    ``exfiltrated_messages`` schema does not currently persist an explicit
+    ``broadcasted_at`` timestamp — the closest usable columns are
+    ``created_at`` (message insert time) and ``broadcast_claimed_at`` (reset
+    to NULL on success). We therefore compute an UPPER-BOUND latency proxy:
+    ``NOW - created_at`` for rows where ``is_broadcasted = True``. Actual
+    broadcast occurred somewhere between ``created_at`` and ``NOW``, so the
+    percentiles represent worst-case age. The report body labels this
+    explicitly so consumers don't mistake it for the true latency.
+    """
+    from app.workers.celery_app import get_worker_loop
+    return get_worker_loop().run_until_complete(_exfil_latency_report_logic())
+
+
+async def _exfil_latency_report_logic() -> dict:
+    import statistics
+    from datetime import datetime, timezone
+
+    try:
+        response = await async_execute(
+            db.table("exfiltrated_messages")
+            .select("id, created_at, is_broadcasted, broadcast_claimed_at")
+            .order("created_at", desc=True)
+            .limit(EXFIL_LATENCY_SAMPLE_SIZE)
+        )
+    except Exception as e:
+        logger.warning(f"[ExfilLatency] db query failed: {e}")
+        return {"status": "db_query_failed", "error": str(e)[:200]}
+
+    rows = response.data or []
+    if not rows:
+        return {"status": "no_data", "sample_size": 0}
+
+    now = datetime.now(timezone.utc)
+    latencies: list[float] = []
+    broadcasted = 0
+    pending = 0
+
+    for row in rows:
+        created_raw = row.get("created_at")
+        if not created_raw:
+            continue
+        try:
+            # Supabase returns ISO-8601; handle trailing 'Z' for py<3.11 safety.
+            created_at = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        if row.get("is_broadcasted"):
+            broadcasted += 1
+            latencies.append((now - created_at).total_seconds())
+        else:
+            pending += 1
+
+    if not latencies:
+        msg = (
+            "📊 **Exfil Latency Report**\n"
+            f"Sample: {len(rows)} messages — none broadcasted yet.\n"
+            f"Pending: {pending}"
+        )
+        try:
+            await get_broadcaster().send_log(msg)
+        except Exception as e:
+            logger.warning(f"[ExfilLatency] broadcast failed: {e}")
+        return {"status": "no_broadcasted_rows", "sample_size": len(rows), "pending": pending}
+
+    latencies.sort()
+
+    def _pct(sorted_values: list[float], p: float) -> float:
+        """Nearest-rank percentile for a sorted list (matches operational reporting)."""
+        if not sorted_values:
+            return 0.0
+        idx = min(len(sorted_values) - 1, max(0, int(round(p / 100.0 * len(sorted_values))) - 1))
+        return sorted_values[idx]
+
+    p50 = _pct(latencies, 50)
+    p95 = _pct(latencies, 95)
+    p99 = _pct(latencies, 99)
+    mean = statistics.fmean(latencies)
+
+    msg = (
+        "📊 **Exfil Latency Report**\n"
+        f"Sample: last {len(rows)} messages "
+        f"(broadcasted={broadcasted}, pending={pending})\n"
+        f"Latency proxy = NOW − created_at for is_broadcasted=True rows "
+        "(upper bound — schema lacks broadcasted_at)\n"
+        f"• P50: {p50:,.1f}s\n"
+        f"• P95: {p95:,.1f}s\n"
+        f"• P99: {p99:,.1f}s\n"
+        f"• Mean: {mean:,.1f}s"
+    )
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        logger.warning(f"[ExfilLatency] broadcast failed: {e}")
+        return {
+            "status": "broadcast_failed",
+            "sample_size": len(rows),
+            "p50": p50, "p95": p95, "p99": p99,
+            "error": str(e)[:200],
+        }
+
+    return {
+        "status": "ok",
+        "sample_size": len(rows),
+        "broadcasted": broadcasted,
+        "pending": pending,
+        "p50_seconds": p50,
+        "p95_seconds": p95,
+        "p99_seconds": p99,
+        "mean_seconds": mean,
+    }
+
+
+@app.task(name="flow.reclassify_dark_matter")
+def reclassify_dark_matter(max_credentials: int = 500):
+    """Sweep credentials that are neither 'active' nor 'revoked' — call getMe
+    for each and reclassify. Live bots → active; 401/404 tokens → revoked.
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(
+        _reclassify_dark_matter_logic(max_credentials)
+    )
+
+
+async def _reclassify_dark_matter_logic(max_credentials: int) -> dict:
+    import httpx
+    from app.core.security import security
+
+    try:
+        res = await async_execute(
+            db.table("discovered_credentials")
+            .select("id, bot_token, status")
+            .not_.in_("status", ["active", "revoked"])
+            .limit(max_credentials)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    to_active: list[str] = []
+    to_revoke: list[str] = []
+    inspected = 0
+
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for row in res.data or []:
+            enc = row.get("bot_token")
+            if not enc:
+                continue
+            try:
+                token = security.decrypt(enc).strip()
+            except Exception:
+                continue
+            inspected += 1
+            try:
+                r = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+                if r.status_code == 200 and (r.json() or {}).get("ok"):
+                    to_active.append(row["id"])
+                elif r.status_code in (401, 404):
+                    to_revoke.append(row["id"])
+            except Exception:
+                # Ambiguous — leave alone this pass
+                continue
+
+    # Apply updates in batches
+    for cred_id in to_active:
+        try:
+            await async_execute(
+                db.table("discovered_credentials")
+                .update({"status": "active"})
+                .eq("id", cred_id)
+            )
+        except Exception:
+            pass
+    for cred_id in to_revoke:
+        try:
+            await async_execute(
+                db.table("discovered_credentials")
+                .update({"status": "revoked"})
+                .eq("id", cred_id)
+            )
+        except Exception:
+            pass
+
+    msg = (
+        f"🔄 Dark-matter reclassify — inspected {inspected}, "
+        f"reactivated {len(to_active)}, revoked {len(to_revoke)}"
+    )
+    logger.info(msg)
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "inspected": inspected,
+        "reactivated": len(to_active),
+        "revoked": len(to_revoke),
+    }
+
+
+@app.task(name="flow.source_quality_report")
+def source_quality_report():
+    """Rank OSINT sources by validated + live + message-rich yield.
+    Broadcasts a per-source scorecard to the monitor group.
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_source_quality_report_logic())
+
+
+async def _source_quality_report_logic() -> dict:
+    from collections import defaultdict
+
+    try:
+        rows = await async_execute(
+            db.table("discovered_credentials")
+            .select("source, status, meta")
+            .limit(5000)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    per_source: dict = defaultdict(
+        lambda: {
+            "total": 0,
+            "active": 0,
+            "revoked": 0,
+            "with_webhook": 0,
+            "with_messages": 0,
+        }
+    )
+    for r in rows.data or []:
+        src = (r.get("source") or "unknown").split(":", 1)[0]
+        meta = r.get("meta") or {}
+        status = r.get("status")
+        per_source[src]["total"] += 1
+        if status == "active":
+            per_source[src]["active"] += 1
+        elif status == "revoked":
+            per_source[src]["revoked"] += 1
+        if meta.get("webhook_url"):
+            per_source[src]["with_webhook"] += 1
+        # message evidence: last_scrape_reason == 'success' OR message_count in meta
+        if meta.get("last_scrape_reason") == "success" or meta.get("total_messages_scraped", 0) > 0:
+            per_source[src]["with_messages"] += 1
+
+    # Score = active_rate * 0.5 + webhook_rate * 0.2 + message_rate * 0.3
+    scored: list[tuple[str, float, dict]] = []
+    for src, stats in per_source.items():
+        total = stats["total"]
+        if total < 3:
+            continue
+        active_rate = stats["active"] / total
+        webhook_rate = stats["with_webhook"] / total
+        message_rate = stats["with_messages"] / total
+        score = active_rate * 0.5 + webhook_rate * 0.2 + message_rate * 0.3
+        scored.append((src, score, stats))
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    lines = ["📊 **Source Quality Scorecard**", ""]
+    lines.append("Score: 0.5×active_rate + 0.2×webhook_rate + 0.3×message_rate")
+    lines.append("")
+    for src, score, stats in scored[:15]:
+        lines.append(
+            f"• `{src}` score={score:.2f} n={stats['total']} "
+            f"active={stats['active']} webhook={stats['with_webhook']} "
+            f"msg={stats['with_messages']}"
+        )
+
+    msg = "\n".join(lines)[:3900]
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        return {"status": "broadcast_failed", "error": str(e)[:200]}
+
+    return {"status": "ok", "sources_ranked": len(scored)}
 
 
 @app.task(name="flow.system_help")

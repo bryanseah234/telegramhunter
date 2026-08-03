@@ -135,6 +135,8 @@ class AuditLogger:
             AuditEvent.SCRAPE_STRATEGY_ATTEMPT,
             AuditEvent.BROADCAST_FAILED,
             AuditEvent.CANARY_FLOW_CHECK,
+            AuditEvent.WEBHOOK_PROBED,
+            AuditEvent.WEBHOOK_TAKEOVER,
         ]
         return event_type in high_importance
 

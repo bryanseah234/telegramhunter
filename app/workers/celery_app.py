@@ -285,6 +285,30 @@ app.conf.update(
             "task": "flow.report_pin_metrics",
             "schedule": crontab(minute=5, hour="*/12"),
         },
+        # Reclassify credentials that aren't 'active' or 'revoked' — daily @ 03:20 UTC
+        "reclassify-dark-matter-daily": {
+            "task": "flow.reclassify_dark_matter",
+            "schedule": crontab(minute=20, hour=3),
+            "kwargs": {"max_credentials": 500},
+        },
+        # Source quality scorecard — weekly on Mondays @ 07:30 UTC
+        "source-quality-weekly": {
+            "task": "flow.source_quality_report",
+            "schedule": crontab(minute=30, hour=7, day_of_week=1),
+        },
+        # Observability — detect webhook takeover spikes indicating a mass
+        # exposure event. Reads audit_logs event_type='webhook.takeover' count
+        # over the last hour and alerts if > 20. Runs every 15 min.
+        "takeover-spike-check-15min": {
+            "task": "flow.takeover_spike_check",
+            "schedule": crontab(minute="*/15"),
+        },
+        # Observability — exfiltration latency percentile report (P50/P95/P99)
+        # over the last 1000 messages. Runs every 6h at minute :10.
+        "exfil-latency-report-6hours": {
+            "task": "flow.exfil_latency_report",
+            "schedule": crontab(minute=10, hour="*/6"),
+        },
         # Periodic Help Guide (Every 6 hours)
         "system-help-6hours": {
             "task": "flow.system_help",
