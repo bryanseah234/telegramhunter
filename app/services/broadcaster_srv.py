@@ -360,6 +360,51 @@ class BroadcasterService:
         except Exception as e:
             logger.error(f"Failed to send log: {e}")
 
+    async def send_to_thread(
+        self,
+        group_id: int | str,
+        thread_id: int,
+        text: str,
+        parse_mode: str | None = "Markdown",
+    ) -> int | None:
+        """Send a raw text message to a specific forum topic thread.
+        Returns the sent Telegram message_id, or None on failure.
+        """
+        await self._wait_for_rate_limit()
+        bot = self._get_bot_instance(self.bot_tokens[0])
+        try:
+            bot_thread_id = thread_id if thread_id and thread_id != 1 else None
+            sent = await bot.send_message(
+                chat_id=group_id,
+                message_thread_id=bot_thread_id,
+                text=text,
+                parse_mode=parse_mode,
+            )
+            return getattr(sent, "message_id", None)
+        except Exception as e:
+            logger.warning(f"[Broadcaster] send_to_thread failed thread={thread_id}: {e}")
+            return None
+
+    async def pin_message(
+        self,
+        group_id: int | str,
+        message_id: int,
+        disable_notification: bool = True,
+    ) -> bool:
+        """Pin a Telegram message in the group. Returns True on success."""
+        await self._wait_for_rate_limit()
+        bot = self._get_bot_instance(self.bot_tokens[0])
+        try:
+            await bot.pin_chat_message(
+                chat_id=group_id,
+                message_id=message_id,
+                disable_notification=disable_notification,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[Broadcaster] pin_message failed msg_id={message_id}: {e}")
+            return False
+
     async def ensure_topic(self, group_id: int | str, topic_name: str) -> int:
         """Ensures a forum topic exists. Retries once before raising."""
         try:

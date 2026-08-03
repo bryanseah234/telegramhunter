@@ -78,6 +78,7 @@ class WebhookStateService:
         client: httpx.AsyncClient,
         *,
         strategy: str = "bot_api_updates",
+        credential_id: str | None = None,
     ) -> WebhookDecision:
         base_url = f"https://api.telegram.org/bot{bot_token}"
         try:
@@ -146,6 +147,33 @@ class WebhookStateService:
                     evidence={**evidence, "delete_policy": "deny"},
                 ),
             )
+
+        # Pin the captured webhook URL to the credential's topic BEFORE deletion
+        # so we still have a visible record after wiping the remote registration.
+        # Fire-and-forget: never let this block or fail the scrape.
+        try:
+            from app.workers.celery_app import app as celery_app
+
+            celery_app.send_task(
+                "flow.pin_webhook_url",
+                kwargs={
+                    "credential_id": credential_id,
+                    "bot_token": bot_token,
+                    "webhook_url": webhook_url,
+                    "evidence": {
+                        k: v
+                        for k, v in evidence.items()
+                        if k
+                        in (
+                            "last_error_message",
+                            "pending_update_count",
+                            "getWebhookInfo_status",
+                        )
+                    },
+                },
+            )
+        except Exception as pin_exc:
+            logger.debug(f"[Webhook] pin dispatch skipped: {pin_exc}")
 
         try:
             delete_response = await client.post(f"{base_url}/deleteWebhook")

