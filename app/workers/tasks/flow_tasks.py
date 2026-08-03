@@ -1801,6 +1801,46 @@ async def _pin_webhook_url_logic(
     lines = [header, "", webhook_url, ""]
     if bot_username or bot_id:
         lines.append(f"Bot: @{bot_username or '?'} ({bot_id or '?'})")
+
+    # Enrich with probe forensics (TLS issuer, Shodan orgs, hostnames) if available
+    probe = meta.get("webhook_probe") if isinstance(meta, dict) else None
+    if isinstance(probe, dict):
+        tls_issuer = probe.get("tls_issuer")
+        tls_subject = probe.get("tls_subject")
+        tls_not_after = probe.get("tls_not_after")
+        if tls_issuer:
+            lines.append(f"- tls_issuer: {tls_issuer}")
+        if tls_subject:
+            lines.append(f"- tls_subject: {tls_subject}")
+        if tls_not_after:
+            lines.append(f"- tls_not_after: {tls_not_after}")
+
+        ip_addresses = probe.get("ip_addresses") or []
+        if ip_addresses:
+            lines.append(f"- ips: {', '.join(ip_addresses[:4])}")
+
+        shodan = probe.get("shodan") or {}
+        if isinstance(shodan, dict):
+            orgs = set()
+            open_ports = set()
+            for _ip, info in shodan.items():
+                if isinstance(info, dict):
+                    if info.get("org"):
+                        orgs.add(str(info["org"]))
+                    for p in info.get("ports", []) or []:
+                        open_ports.add(str(p))
+            if orgs:
+                lines.append(f"- shodan_orgs: {', '.join(sorted(orgs))}")
+            if open_ports:
+                sorted_ports = sorted(open_ports, key=lambda x: int(x) if x.isdigit() else 99999)
+                lines.append(f"- open_ports: {', '.join(sorted_ports[:12])}")
+
+        web_recon = probe.get("web_recon") or {}
+        if isinstance(web_recon, dict):
+            reachable = [p for p, r in web_recon.items() if isinstance(r, dict) and r.get("status") == 200]
+            if reachable:
+                lines.append(f"- reachable_paths: {', '.join(reachable[:8])}")
+
     for k, v in (evidence or {}).items():
         if k in ("delete_policy", "webhook_url"):
             continue
@@ -1888,6 +1928,87 @@ async def _force_webhook_takeover_logic(max_credentials: int) -> dict:
         pass
 
     return {"status": "ok", "queued": len(queued)}
+
+
+@app.task(name="flow.report_pin_metrics")
+def report_pin_metrics():
+    """Broadcast a summary of webhook takeover activity — pins performed,
+    webhook URLs captured, and top C2 hosts. Scheduled every 12h."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_report_pin_metrics_logic())
+
+
+async def _report_pin_metrics_logic() -> dict:
+    from collections import Counter
+    from urllib.parse import urlparse
+
+    # Total credentials with a captured webhook URL
+    try:
+        total_captured = await async_execute(
+            db.table("discovered_credentials")
+            .select("id", count="exact")
+            .not_.is_("meta->>webhook_url", "null")
+        )
+        total_pinned = await async_execute(
+            db.table("discovered_credentials")
+            .select("id", count="exact")
+            .not_.is_("meta->>pinned_webhook_msg_id", "null")
+        )
+        recent = await async_execute(
+            db.table("discovered_credentials")
+            .select("bot_username, meta")
+            .not_.is_("meta->>webhook_url", "null")
+            .order("updated_at", desc=True)
+            .limit(400)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    captured_count = total_captured.count or 0
+    pinned_count = total_pinned.count or 0
+    coverage_pct = (pinned_count / captured_count * 100) if captured_count else 0.0
+
+    # Aggregate top C2 hostnames
+    host_counter: Counter = Counter()
+    for row in recent.data or []:
+        meta = row.get("meta") or {}
+        url = meta.get("webhook_url")
+        if not url:
+            continue
+        try:
+            host = urlparse(url).hostname
+            if host:
+                host_counter[host] += 1
+        except Exception:
+            continue
+
+    top_hosts = host_counter.most_common(10)
+
+    lines = [
+        "📌 **Webhook Takeover Metrics**",
+        "",
+        f"• Credentials with captured webhook: {captured_count}",
+        f"• Pinned in-topic: {pinned_count} ({coverage_pct:.1f}% coverage)",
+        "",
+    ]
+    if top_hosts:
+        lines.append("**Top C2 hosts (recent 400):**")
+        for host, count in top_hosts:
+            lines.append(f"• `{host}` × {count}")
+
+    msg = "\n".join(lines)[:3900]
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        return {"status": "broadcast_failed", "error": str(e)[:200]}
+
+    return {
+        "status": "ok",
+        "captured": captured_count,
+        "pinned": pinned_count,
+        "top_hosts": len(top_hosts),
+    }
 
 
 @app.task(name="flow.system_help")

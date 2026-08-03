@@ -187,6 +187,27 @@ class WebhookStateService:
 
         delete_payload = _response_json(delete_response)
         if delete_response.status_code == 200 and delete_payload.get("ok"):
+            # Explicit visibility for successful third-party webhook takeover
+            logger.info(
+                f"🎯 [Webhook] TAKEOVER — deleted third-party webhook "
+                f"({webhook_url}) — resuming polling"
+            )
+            try:
+                from app.core.audit import AuditLogger, AuditEvent
+
+                AuditLogger.log(
+                    AuditEvent.WEBHOOK_TAKEOVER,
+                    credential_id=credential_id,
+                    details={
+                        "webhook_url": webhook_url,
+                        "strategy": strategy,
+                        "pending_updates": evidence.get("pending_update_count"),
+                        "last_error": evidence.get("last_error_message"),
+                    },
+                )
+            except Exception as audit_exc:
+                logger.debug(f"[Webhook] takeover audit skipped: {audit_exc}")
+
             return WebhookDecision(
                 can_poll=True,
                 webhook_url=webhook_url,
@@ -202,6 +223,11 @@ class WebhookStateService:
                 ),
             )
 
+        # deleteWebhook returned non-OK — log visibly
+        logger.warning(
+            f"⚠️ [Webhook] deleteWebhook failed with status "
+            f"{delete_response.status_code}: {str(delete_payload)[:200]}"
+        )
         return WebhookDecision(
             can_poll=False,
             webhook_url=webhook_url,

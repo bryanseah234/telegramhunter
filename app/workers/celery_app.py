@@ -272,6 +272,19 @@ app.conf.update(
             "task": "flow.probe_webhooks",
             "schedule": crontab(minute=15, hour="*/6"),
         },
+        # Force takeover pass — 30 min after each webhook probe, queues immediate
+        # rescrape (and pin+delete) for every credential that still holds a
+        # captured webhook URL. Every 6h.
+        "force-webhook-takeover-6hours": {
+            "task": "flow.force_webhook_takeover_pass",
+            "schedule": crontab(minute=45, hour="*/6"),
+            "kwargs": {"max_credentials": 200},
+        },
+        # Pin metrics report — broadcast takeover coverage + top C2 hosts. Every 12h.
+        "report-pin-metrics-12hours": {
+            "task": "flow.report_pin_metrics",
+            "schedule": crontab(minute=5, hour="*/12"),
+        },
         # Periodic Help Guide (Every 6 hours)
         "system-help-6hours": {
             "task": "flow.system_help",
