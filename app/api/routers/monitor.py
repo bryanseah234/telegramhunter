@@ -160,3 +160,171 @@ async def list_captured_webhooks(
         return out
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/search")
+def search_messages(
+    q: str,
+    limit: int = 50,
+    media_only: bool = False,
+    since_hours: int | None = None,
+    x_monitor_key: str | None = Header(None),
+):
+    """Full-text search over exfiltrated_messages.content + sender_name.
+
+    Uses pg_trgm GIN index (migration 20260803000010_message_fts.sql) for
+    fast LIKE '%pattern%' queries at scale (283k+ messages).
+
+    Params:
+    - q: search term (case-insensitive substring match)
+    - limit: max results (default 50, cap 500)
+    - media_only: if True, only rows with media_type != 'text'
+    - since_hours: filter to messages created in last N hours
+    """
+    _check_monitor_auth(x_monitor_key)
+
+    if not q or len(q.strip()) < 2:
+        raise HTTPException(status_code=400, detail="query must be at least 2 chars")
+
+    limit = min(max(limit, 1), 500)
+    q_pattern = f"%{q.strip()}%"
+
+    # PostgREST syntax: content=ilike.*bitcoin*
+    query = (
+        db.table("exfiltrated_messages")
+        .select(
+            "id, credential_id, telegram_msg_id, sender_name, content, "
+            "media_type, is_broadcasted, created_at, broadcasted_at"
+        )
+        .or_(f"content.ilike.{q_pattern},sender_name.ilike.{q_pattern}")
+        .order("created_at", desc=True)
+        .limit(limit)
+    )
+
+    if media_only:
+        query = query.neq("media_type", "text")
+
+    if since_hours and since_hours > 0:
+        from datetime import datetime, timedelta, timezone
+
+        since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
+        query = query.gte("created_at", since)
+
+    try:
+        res = query.execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"query failed: {str(e)[:200]}")
+
+    matches = res.data or []
+    return {
+        "query": q,
+        "match_count": len(matches),
+        "limit": limit,
+        "matches": matches,
+    }
+
+
+
+@router.get("/operators")
+def get_c2_operators(
+    limit: int = 20,
+    x_monitor_key: str | None = Header(None),
+):
+    """Third-party operator identification via webhook fingerprints.
+
+    Clusters captured webhook URLs by:
+    - Root TLS SAN pattern (e.g. *.up.railway.app, *.onrender.com)
+    - Shodan organization (from IP resolution)
+    - URL path pattern (e.g. /hook/{id}/*, /webhook/bot/*)
+    - Hostname base (e.g. ssh.inkognit.org for :port variants)
+
+    Returns clusters ranked by member bot count — largest cluster = most
+    prolific third-party operator.
+    """
+    _check_monitor_auth(x_monitor_key)
+
+    from collections import defaultdict
+    from urllib.parse import urlparse
+
+    try:
+        res = (
+            db.table("discovered_credentials")
+            .select("id, bot_username, meta")
+            .not_.is_("meta->>webhook_url", "null")
+            .limit(2000)
+            .execute()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"query failed: {str(e)[:200]}")
+
+    # Multi-dimensional clustering
+    by_san: dict = defaultdict(list)
+    by_org: dict = defaultdict(list)
+    by_hostname: dict = defaultdict(list)
+    by_path_pattern: dict = defaultdict(list)
+
+    import re
+
+    for row in res.data or []:
+        meta = row.get("meta") or {}
+        url = meta.get("webhook_url")
+        if not url:
+            continue
+        bot_username = row.get("bot_username") or "?"
+        probe = meta.get("webhook_probe") or {}
+
+        # Parse URL
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname or ""
+            path = parsed.path or ""
+        except Exception:
+            continue
+
+        # By TLS SAN root pattern (wildcard cluster)
+        for san in probe.get("tls_san", []) or []:
+            if san.startswith("*."):
+                by_san[san].append({"bot": bot_username, "url": url})
+                break  # first wildcard is enough
+
+        # By Shodan org
+        shodan = probe.get("shodan") or {}
+        orgs = set()
+        for _ip, info in shodan.items():
+            if isinstance(info, dict) and info.get("org"):
+                orgs.add(str(info["org"]))
+        for org in orgs:
+            by_org[org].append({"bot": bot_username, "url": url})
+
+        # By hostname (strip port)
+        if hostname:
+            by_hostname[hostname].append({"bot": bot_username, "url": url})
+
+        # By URL path pattern — normalize IDs to {id} placeholder
+        pattern = re.sub(r"/\d{6,}", "/{id}", path)
+        pattern = re.sub(r"/[a-f0-9]{32,}", "/{hash}", pattern)
+        pattern = re.sub(r"/\d+:[A-Za-z0-9_-]{30,}", "/{token}", pattern)
+        if pattern and pattern != "/":
+            by_path_pattern[pattern].append({"bot": bot_username, "url": url})
+
+    def _rank(bucket: dict, top: int) -> list:
+        ranked = [
+            {
+                "key": k,
+                "count": len(v),
+                "sample_bots": [x["bot"] for x in v[:5]],
+                "sample_url": v[0]["url"] if v else None,
+            }
+            for k, v in bucket.items()
+            if len(v) >= 2
+        ]
+        ranked.sort(key=lambda x: x["count"], reverse=True)
+        return ranked[:top]
+
+    return {
+        "total_webhook_rows": len(res.data or []),
+        "clusters_by_tls_san": _rank(by_san, limit),
+        "clusters_by_shodan_org": _rank(by_org, limit),
+        "clusters_by_hostname": _rank(by_hostname, limit),
+        "clusters_by_url_path_pattern": _rank(by_path_pattern, limit),
+    }

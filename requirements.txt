@@ -25,3 +25,8 @@ pytest-asyncio==0.24.0
 hypothesis==6.131.11
 tornado>=6.5.7 # not directly required, pinned by Snyk to avoid a vulnerability
 zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
+
+
+# Media forensics — perceptual hashing for duplicate photo detection across bots
+Pillow==11.0.0
+imagehash==4.3.1

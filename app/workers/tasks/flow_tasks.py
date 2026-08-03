@@ -2497,6 +2497,291 @@ async def _source_quality_report_logic() -> dict:
     return {"status": "ok", "sources_ranked": len(scored)}
 
 
+@app.task(name="flow.cluster_c2_operators")
+def cluster_c2_operators():
+    """Analyze captured webhook URLs and broadcast the top C2 operator clusters
+    to the monitor group. Uses same clustering logic as /monitor/operators."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_cluster_c2_operators_logic())
+
+
+async def _cluster_c2_operators_logic() -> dict:
+    from collections import defaultdict
+    from urllib.parse import urlparse
+    import re
+
+    try:
+        res = await async_execute(
+            db.table("discovered_credentials")
+            .select("id, bot_username, meta")
+            .not_.is_("meta->>webhook_url", "null")
+            .limit(2000)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    by_san: dict = defaultdict(list)
+    by_org: dict = defaultdict(list)
+    by_hostname: dict = defaultdict(list)
+
+    for row in res.data or []:
+        meta = row.get("meta") or {}
+        url = meta.get("webhook_url")
+        if not url:
+            continue
+        probe = meta.get("webhook_probe") or {}
+        try:
+            hostname = urlparse(url).hostname or ""
+        except Exception:
+            hostname = ""
+
+        for san in probe.get("tls_san", []) or []:
+            if san.startswith("*."):
+                by_san[san].append(row.get("bot_username") or "?")
+                break
+
+        for _ip, info in (probe.get("shodan") or {}).items():
+            if isinstance(info, dict) and info.get("org"):
+                by_org[info["org"]].append(row.get("bot_username") or "?")
+
+        if hostname:
+            by_hostname[hostname].append(row.get("bot_username") or "?")
+
+    def _top(bucket: dict, n: int = 8) -> list[tuple[str, int]]:
+        items = [(k, len(v)) for k, v in bucket.items() if len(v) >= 2]
+        items.sort(key=lambda x: x[1], reverse=True)
+        return items[:n]
+
+    lines = ["🎯 **C2 Operator Clusters**", ""]
+    lines.append("**Top TLS SAN wildcards (hosted-service tenants):**")
+    for san, count in _top(by_san):
+        lines.append(f"• `{san}` × {count}")
+    lines.append("")
+    lines.append("**Top Shodan orgs (network providers):**")
+    for org, count in _top(by_org):
+        lines.append(f"• {org} × {count}")
+    lines.append("")
+    lines.append("**Top hostnames (same C2 operator, many bots):**")
+    for host, count in _top(by_hostname):
+        lines.append(f"• `{host}` × {count}")
+
+    msg = "\n".join(lines)[:3900]
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        return {"status": "broadcast_failed", "error": str(e)[:200]}
+
+    return {
+        "status": "ok",
+        "san_clusters": len([k for k, v in by_san.items() if len(v) >= 2]),
+        "org_clusters": len([k for k, v in by_org.items() if len(v) >= 2]),
+        "hostname_clusters": len([k for k, v in by_hostname.items() if len(v) >= 2]),
+    }
+
+
+@app.task(name="flow.hash_exfil_media")
+def hash_exfil_media(max_messages: int = 100):
+    """Download + hash exfiltrated media files that haven't been hashed yet.
+    Stores SHA-256 in media_hashes table for duplicate detection across bots.
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_hash_exfil_media_logic(max_messages))
+
+
+async def _hash_exfil_media_logic(max_messages: int) -> dict:
+    import hashlib
+
+    # Find media messages that don't have a hash entry yet
+    try:
+        res = await async_execute(
+            db.table("exfiltrated_messages")
+            .select("id, credential_id, media_type, file_meta")
+            .neq("media_type", "text")
+            .not_.is_("file_meta", "null")
+            .order("created_at", desc=True)
+            .limit(max_messages * 3)  # over-fetch — many will already be hashed
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    candidate_rows = res.data or []
+    if not candidate_rows:
+        return {"status": "no_candidates"}
+
+    # Filter to unhashed ones
+    ids = [r["id"] for r in candidate_rows]
+    try:
+        already = await async_execute(
+            db.table("media_hashes").select("message_id").in_("message_id", ids)
+        )
+        hashed_ids = {r["message_id"] for r in (already.data or [])}
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    to_hash = [r for r in candidate_rows if r["id"] not in hashed_ids][:max_messages]
+    if not to_hash:
+        return {"status": "all_hashed", "candidates_seen": len(candidate_rows)}
+
+    # Reuse broadcaster's media download logic (uses source bot's token)
+    broadcaster = get_broadcaster()
+
+    hashed_count = 0
+    failed_count = 0
+    duplicate_count = 0
+    seen_sha256_in_batch: set[str] = set()
+
+    for row in to_hash:
+        msg_id = row["id"]
+        cred_id = row.get("credential_id")
+        file_meta = row.get("file_meta") or {}
+        media_type = row.get("media_type")
+
+        try:
+            data = await broadcaster._download_media_bytes(file_meta, cred_id)
+        except Exception as exc:
+            data = None
+            error = str(exc)[:200]
+        else:
+            error = None
+
+        if not data:
+            # Log failure so we don't retry it forever
+            try:
+                await async_execute(
+                    db.table("media_hashes").insert(
+                        {
+                            "message_id": msg_id,
+                            "credential_id": cred_id,
+                            "sha256": f"__failed__{msg_id[:8]}",  # sentinel unique per row
+                            "media_type": media_type,
+                            "error": error or "download_returned_none",
+                        }
+                    )
+                )
+            except Exception:
+                pass
+            failed_count += 1
+            continue
+
+        sha = hashlib.sha256(data).hexdigest()
+        if sha in seen_sha256_in_batch:
+            duplicate_count += 1
+        seen_sha256_in_batch.add(sha)
+
+        # Compute perceptual hash for images (imagehash lib is optional)
+        phash: str | None = None
+        try:
+            if media_type == "photo":
+                from io import BytesIO
+                from PIL import Image
+                import imagehash
+
+                img = Image.open(BytesIO(data))
+                phash = str(imagehash.phash(img))
+        except Exception:
+            phash = None
+
+        try:
+            await async_execute(
+                db.table("media_hashes").insert(
+                    {
+                        "message_id": msg_id,
+                        "credential_id": cred_id,
+                        "sha256": sha,
+                        "phash": phash,
+                        "file_size_bytes": len(data),
+                        "mime_type": file_meta.get("mime"),
+                        "media_type": media_type,
+                    }
+                )
+            )
+            hashed_count += 1
+        except Exception as exc:
+            logger.warning(f"[MediaHash] insert failed for {msg_id}: {exc}")
+
+    logger.info(
+        f"[MediaHash] hashed={hashed_count} failed={failed_count} "
+        f"in_batch_dupes={duplicate_count} candidates={len(candidate_rows)}"
+    )
+
+    return {
+        "status": "ok",
+        "hashed": hashed_count,
+        "failed": failed_count,
+        "in_batch_duplicates": duplicate_count,
+        "candidates_seen": len(candidate_rows),
+    }
+
+
+@app.task(name="flow.media_duplicate_report")
+def media_duplicate_report():
+    """Broadcast summary of duplicate media SHA-256s across bots — a same
+    file being sent by many bots suggests a common operator or automated payload.
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_media_duplicate_report_logic())
+
+
+async def _media_duplicate_report_logic() -> dict:
+    try:
+        # Group by sha256 with count > 1
+        res = await async_execute(
+            db.table("media_hashes")
+            .select("sha256, credential_id, media_type")
+            .not_.like("sha256", "__failed__%")
+            .limit(5000)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    from collections import defaultdict
+
+    by_hash: dict = defaultdict(set)
+    hash_type: dict = {}
+    for row in res.data or []:
+        sha = row.get("sha256")
+        cred = row.get("credential_id")
+        if not sha or not cred:
+            continue
+        by_hash[sha].add(cred)
+        hash_type[sha] = row.get("media_type")
+
+    duplicates = [
+        (sha, len(creds), hash_type.get(sha))
+        for sha, creds in by_hash.items()
+        if len(creds) >= 2
+    ]
+    duplicates.sort(key=lambda x: x[1], reverse=True)
+
+    if not duplicates:
+        try:
+            await get_broadcaster().send_log(
+                "🔎 **Media Duplicate Report** — no shared media across bots yet."
+            )
+        except Exception:
+            pass
+        return {"status": "no_duplicates"}
+
+    lines = [
+        "🔎 **Media Duplicate Report**",
+        "Same file (SHA-256) sent by multiple compromised bots — likely common operator.",
+        "",
+    ]
+    for sha, count, mtype in duplicates[:15]:
+        lines.append(f"• `{sha[:16]}...` ({mtype}) × {count} bots")
+
+    msg = "\n".join(lines)[:3900]
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        return {"status": "broadcast_failed", "error": str(e)[:200]}
+
+    return {"status": "ok", "duplicate_hashes": len(duplicates)}
+
+
 @app.task(name="flow.system_help")
 def system_help():
     """Periodic guide on how to use system commands."""

@@ -296,6 +296,24 @@ app.conf.update(
             "task": "flow.source_quality_report",
             "schedule": crontab(minute=30, hour=7, day_of_week=1),
         },
+        # C2 operator clusters — daily @ 08:00 UTC. Ranks hosted-service
+        # tenants (railway/onrender/etc), Shodan orgs, and hostname operators.
+        "cluster-c2-operators-daily": {
+            "task": "flow.cluster_c2_operators",
+            "schedule": crontab(minute=0, hour=8),
+        },
+        # Media forensics — hash new photos/documents every 30 min.
+        # Enables cross-bot duplicate detection (same photo → common operator).
+        "hash-exfil-media-30min": {
+            "task": "flow.hash_exfil_media",
+            "schedule": crontab(minute="*/30"),
+            "kwargs": {"max_messages": 100},
+        },
+        # Duplicate report — daily @ 08:15 UTC.
+        "media-duplicate-report-daily": {
+            "task": "flow.media_duplicate_report",
+            "schedule": crontab(minute=15, hour=8),
+        },
         # Observability — detect webhook takeover spikes indicating a mass
         # exposure event. Reads audit_logs event_type='webhook.takeover' count
         # over the last hour and alerts if > 20. Runs every 15 min.
