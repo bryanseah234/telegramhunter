@@ -3237,6 +3237,103 @@ async def _reconcile_topics_from_db_logic(max_credentials: int) -> dict:
     }
 
 
+@app.task(name="flow.pin_general_readme")
+def pin_general_readme():
+    """One-shot: post a README to the General topic and pin it (chat-level pin
+    so it's visible to anyone stumbling into the group). Safe to re-run —
+    replaces existing pinned readme by unpinning previous first."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_pin_general_readme_logic())
+
+
+async def _pin_general_readme_logic() -> dict:
+    from datetime import datetime, timezone
+
+    webapp_url = "https://theprawnhunter.hong-yi.me"
+    readme = (
+        "🦐 **Prawn Hunter — Monitor Group**\n"
+        "\n"
+        "This group receives *passive OSINT observations* on Telegram bots whose "
+        "tokens have been exposed publicly (GitHub, extension scrapes, etc). "
+        "Each topic below is one compromised bot; messages you see are what real "
+        "users are sending to those bots — captured after we take over their "
+        "third-party webhook.\n"
+        "\n"
+        "**What we do**\n"
+        "• Scan 13+ public data sources for leaked bot tokens\n"
+        "• Passively fingerprint any third-party C2 (TLS, Shodan, web recon)\n"
+        "• Delete third-party webhooks and poll updates ourselves\n"
+        "• Broadcast captured messages to per-bot topics here\n"
+        "\n"
+        "**What we don't do**\n"
+        "• Message users on those bots\n"
+        "• Modify or scam anyone\n"
+        "• Reveal your identity — all telemetry is server-side\n"
+        "\n"
+        f"**Live dashboard**: {webapp_url}\n"
+        "(mobile-friendly; anon read-only view of Discovered Bots + Telemetry)\n"
+        "\n"
+        "**Admin commands** (whitelisted users only):\n"
+        "`/status` `/pause` `/resume` `/bots` `/starthunter` `/help`\n"
+        "\n"
+        f"_Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}_"
+    )
+
+    broadcaster = get_broadcaster()
+
+    # Unpin previous readme (best-effort)
+    try:
+        prev = await async_execute(
+            db.table("system_state")
+            .select("value")
+            .eq("key", "pinned_readme_msg_id")
+            .limit(1)
+        )
+        if prev.data:
+            prev_id = int(prev.data[0]["value"])
+            try:
+                await broadcaster.unpin_message(settings.MONITOR_GROUP_ID, prev_id)
+            except Exception:
+                pass
+    except Exception:
+        # system_state table might not exist yet — that's fine
+        pass
+
+    # Send new readme to General topic (no thread_id → chat-level = General)
+    try:
+        bot = broadcaster._get_bot_instance(broadcaster.bot_tokens[0])
+        sent = await bot.send_message(
+            chat_id=settings.MONITOR_GROUP_ID,
+            text=readme,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+        sent_id = sent.message_id
+    except Exception as e:
+        return {"status": "send_failed", "error": str(e)[:200]}
+
+    # Pin chat-wide (in General/main chat)
+    try:
+        pinned = await broadcaster.pin_message(settings.MONITOR_GROUP_ID, sent_id)
+    except Exception as e:
+        return {"status": "pin_failed", "message_id": sent_id, "error": str(e)[:200]}
+
+    # Track the pinned id so re-runs unpin previous
+    try:
+        await async_execute(
+            db.table("system_state").upsert(
+                {"key": "pinned_readme_msg_id", "value": str(sent_id)},
+                on_conflict="key",
+            )
+        )
+    except Exception:
+        # system_state may not exist — pin still works, just no dedup
+        pass
+
+    return {"status": "ok", "message_id": sent_id, "pinned": pinned}
+
+
 @app.task(name="flow.system_help")
 def system_help():
     """Periodic guide on how to use system commands."""

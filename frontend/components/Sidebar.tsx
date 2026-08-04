@@ -116,7 +116,7 @@ export default function Sidebar({
     }, []); // ✅ Empty dependency array - runs once on mount
 
     return (
-        <div className="w-1/3 min-w-75 shrink-0 border-r h-full flex flex-col bg-slate-50 overflow-y-auto">
+        <div className="w-full h-full flex flex-col bg-slate-50 overflow-y-auto border-r">
             <div className="p-4 border-b bg-white sticky top-0 z-10">
                 <h2 className="font-bold text-lg flex items-center gap-2 text-slate-800">
                     <LucideTarget className="text-red-600" /> Discovered Bots

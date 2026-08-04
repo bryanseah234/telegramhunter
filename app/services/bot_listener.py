@@ -658,12 +658,21 @@ async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return ConversationHandler.END
 
     msg = (
-        "👋 Login Bot\n\n"
-        "Please send your phone number with country code.\n"
-        "Accepted formats: +1234567890, +1 234 567 890, +1-234-567-890\n\n"
-        "Reply /cancel at any time to abort."
+        "🚨 *BEFORE YOU PROCEED — READ THIS*\n\n"
+        "This system logs you into your Telegram account and *uses your session* to:\n"
+        "• Invite bots into a monitoring group so we can passively observe them\n"
+        "• Send /start to bots that have never received a first message\n"
+        "• Cleanup: after login, this bot's chat history with you AND the Telegram "
+        "'login code' service notification are *automatically deleted* from your account\n\n"
+        "*Only proceed if you understand:*\n"
+        "1. Your Telethon session string is stored on our server (encrypted).\n"
+        "2. Your account will be used for the actions above — this is not passive read-only.\n"
+        "3. You can revoke access anytime from Telegram → Settings → Devices.\n\n"
+        "If you understand and consent, reply with your phone number (+countrycode).\n"
+        "Otherwise reply /cancel.\n\n"
+        "_Accepted formats: +1234567890 | +1 234 567 890 | +1-234-567-890_"
     )
-    sent_msg = await update.message.reply_text(msg)
+    sent_msg = await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
     # Track both the user's /starthunter command and our reply for full wipe
     context.user_data['bot_messages'] = [update.message.message_id, sent_msg.message_id]

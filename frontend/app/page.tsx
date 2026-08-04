@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import Sidebar from "@/components/Sidebar";
 import ChatWindow from "@/components/ChatWindow";
 import TelemetryAnalyticsView from "@/components/TelemetryAnalyticsView";
-import { LucideTarget, LucideSmartphone } from "lucide-react";
+import { LucideMenu, LucideX } from "lucide-react";
 
 export type DashboardView = "chat" | "telemetry";
 
@@ -27,7 +27,6 @@ export interface Credential {
   id: string;
   created_at: string;
   source: string;
-  // Bundle 4: surfaced as top-level int columns from the DB view (generated columns)
   confidence_score?: number | null;
   chat_member_count?: number | null;
   meta?: {
@@ -44,6 +43,7 @@ export default function Home() {
   const [selected, setSelected] = useState<Credential | null>(null);
   const [activeView, setActiveView] = useState<DashboardView>("chat");
   const [isMobile, setIsMobile] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
     const checkMobile = () => {
@@ -54,46 +54,76 @@ export default function Home() {
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
-  if (isMobile) {
-    return (
-      <main className="flex h-screen w-full flex-col items-center justify-center bg-gradient-to-br from-slate-900 to-slate-800 p-8 text-center">
-        <LucideTarget className="w-20 h-20 text-red-500 mb-6" />
-        <h1 className="text-2xl font-bold text-white mb-2">
-          Mobile Not Supported
-        </h1>
-        <p className="text-slate-400 mb-8 max-w-sm">
-          This dashboard is designed for desktop viewing. To see live chats, join our Telegram channel instead!
-        </p>
-        <a
-          href="https://t.me/theprawnhunter"
-          className="inline-flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white font-semibold py-3 px-6 rounded-full transition-colors shadow-lg"
-        >
-          <LucideSmartphone className="w-5 h-5" />
-          Open in Telegram
-        </a>
-        <p className="text-slate-500 text-xs mt-4">
-          t.me/theprawnhunter
-        </p>
-      </main>
-    );
-  }
+  // Auto-close sidebar when selecting on mobile
+  const handleSelectMobile = (cred: Credential) => {
+    setSelected(cred);
+    setActiveView("chat");
+    if (isMobile) setSidebarOpen(false);
+  };
 
   return (
     <main className="flex h-screen w-full overflow-hidden bg-white">
-      <Sidebar
-        selected={selected}
-        activeView={activeView}
-        onViewChange={setActiveView}
-        onSelect={(cred) => {
-          setSelected(cred);
-          setActiveView("chat");
-        }}
-      />
-      {activeView === "telemetry" ? (
-        <TelemetryAnalyticsView />
-      ) : (
-        <ChatWindow credential={selected} />
+      {isMobile && (
+        <>
+          {/* Mobile top bar */}
+          <div className="fixed top-0 left-0 right-0 z-30 flex items-center gap-2 border-b bg-white px-3 py-2 shadow-sm">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen((v) => !v)}
+              className="rounded p-1.5 text-slate-700 hover:bg-slate-100"
+              aria-label={sidebarOpen ? "Close menu" : "Open menu"}
+            >
+              {sidebarOpen ? <LucideX className="h-5 w-5" /> : <LucideMenu className="h-5 w-5" />}
+            </button>
+            <span className="truncate text-sm font-semibold text-slate-800">
+              {selected?.meta?.bot_username
+                ? `@${selected.meta.bot_username}`
+                : "Prawn Hunter"}
+            </span>
+          </div>
+          {/* Backdrop */}
+          {sidebarOpen && (
+            <div
+              className="fixed inset-0 z-20 bg-black/40"
+              onClick={() => setSidebarOpen(false)}
+            />
+          )}
+        </>
       )}
+
+      {/* Sidebar: fixed drawer on mobile, static column on desktop */}
+      <div
+        className={
+          isMobile
+            ? `fixed inset-y-0 left-0 z-30 w-4/5 max-w-xs transform bg-white shadow-xl transition-transform duration-200 ${
+                sidebarOpen ? "translate-x-0" : "-translate-x-full"
+              }`
+            : "w-1/3 min-w-75 shrink-0"
+        }
+      >
+        <Sidebar
+          selected={selected}
+          activeView={activeView}
+          onViewChange={(v) => {
+            setActiveView(v);
+            if (isMobile) setSidebarOpen(false);
+          }}
+          onSelect={handleSelectMobile}
+        />
+      </div>
+
+      {/* Main content */}
+      <div
+        className={`flex flex-1 flex-col overflow-hidden ${
+          isMobile ? "pt-12" : ""
+        }`}
+      >
+        {activeView === "telemetry" ? (
+          <TelemetryAnalyticsView />
+        ) : (
+          <ChatWindow credential={selected} />
+        )}
+      </div>
     </main>
   );
 }
