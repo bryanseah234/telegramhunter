@@ -1,4 +1,4 @@
-# TelegramHunter - Fix Supabase Auto-Pause Issue
+# TheprawnHunter - Fix Supabase Auto-Pause Issue
 
 ## Summary
 Successfully implemented a fix for Supabase auto-pause issue. Created a dedicated keepalive table and updated GitHub Actions workflow to prevent the 7-day inactivity pause.
@@ -239,5 +239,5 @@ SELECT cron.schedule(
 ---
 
 **Date**: 2025-05-05
-**Project**: TelegramHunter
+**Project**: TheprawnHunter
 **Impact**: Prevents automatic Supabase pause due to inactivity

@@ -6,7 +6,7 @@
 
 | Field | Value |
 |-------|-------|
-| Project Name | telegramhunter |
+| Project Name | TheprawnHunter |
 | Language(s) | Python |
 | Framework(s) | (from requirements.txt) |
 | Core Purpose | Personal project |

@@ -63,14 +63,14 @@ cp .env.template .env
 | `API_PORT` | `8011` | Host-side port for the API service |
 | `REDIS_PORT` | `6379` | Host-side port for Redis |
 | `FLOWER_PORT` | `8555` | Host-side port for the Flower Celery monitor |
-| `COMPOSE_PROJECT_NAME` | `telegramhunter` | Docker Compose namespace |
+| `COMPOSE_PROJECT_NAME` | `TheprawnHunter` | Docker Compose namespace |
 | `EXTENSION_WRITE_SECRET` | *(unset)* | Secret for Chrome extension RLS policy. Must also be set in Supabase: `ALTER DATABASE postgres SET app.extension_write_secret = '<value>';` |
 | `TARGET_COUNTRIES` | *(built-in 50-country list)* | Optional JSON array of ISO-3166 codes for country-rotation scanning |
 | `TELEGRAM_DELETE_WEBHOOK_FOR_SCRAPE` | `False` | If `True`, `deleteWebhook` is called on 409 conflicts before polling. Destructive to any third party operating the bot. |
 | `TELEGRAM_HISTORY_TIMEOUT_SECONDS` | `90` | Per-scrape cap on Telethon history reads |
 | `TELEGRAM_CLIENT_DISCONNECT_TIMEOUT_SECONDS` | `10` | Grace period for lifecycle-safe Telethon cleanup |
 | `CANARY_CREDENTIAL_ID` | *(unset)* | UUID of a `discovered_credentials` row used as the synthetic parent for `flow.canary_flow_check`. Canary stays `disabled` until this is set. |
-| `CANARY_EXPECTED_TEXT` | `telegramhunter-canary` | Prefix for synthetic canary message content |
+| `CANARY_EXPECTED_TEXT` | `TheprawnHunter-canary` | Prefix for synthetic canary message content |
 | `CANARY_MAX_AGE_SECONDS` | `1800` | Age budget for a canary run before it's considered stale |
 | `PUBLIC_FRONTEND_URL` | *(unset)* | Optional public URL of the dashboard — canary hits it to verify frontend reachability |
 

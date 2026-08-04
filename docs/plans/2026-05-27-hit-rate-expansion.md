@@ -1,8 +1,8 @@
-# TelegramHunter Hit-Rate Expansion Plan (Free Sources Only)
+# TheprawnHunter Hit-Rate Expansion Plan (Free Sources Only)
 
 > **For Hermes:** Execute via ralph loop — checkpoint after each task, build/restart between bundles, verify at runtime bar.
 
-**Goal:** Expand TelegramHunter hit rate via 11 enhancements grouped into 4 bundles. **Strictly free sources only** — no paid subscriptions.
+**Goal:** Expand TheprawnHunter hit rate via 11 enhancements grouped into 4 bundles. **Strictly free sources only** — no paid subscriptions.
 
 **Architecture:**
 - Bundle 1 hooks the validator success path: when a token validates, fan out 4 pivot tasks before returning.
@@ -18,12 +18,12 @@
 
 ## Pre-flight
 
-**Prerequisite:** all containers healthy, redact_secrets disabled (already done). Working directory `C:\telegramhunter`. All commits go to `main`. Push after every bundle.
+**Prerequisite:** all containers healthy, redact_secrets disabled (already done). Working directory `C:\theprawnhunter`. All commits go to `main`. Push after every bundle.
 
 Check before starting:
 
 ```bash
-docker ps --format "table {{.Names}}\t{{.Status}}" | grep telegramhunter
+docker ps --format "table {{.Names}}\t{{.Status}}" | grep TheprawnHunter
 ```
 
 Expected: 9 containers up, redis healthy.
@@ -402,7 +402,7 @@ Extend pivot block:
 docker compose build worker-scanners worker-validators
 docker compose up -d --force-recreate worker-scanners worker-validators
 sleep 25
-docker logs telegramhunter_worker-validators --tail 30 2>&1 | grep -iE "pivot\.|validation\."
+docker logs theprawnhunter_worker-validators --tail 30 2>&1 | grep -iE "pivot\.|validation\."
 ```
 
 Expected: see `pivot.search_github_user`, `pivot.search_bot_username`, `pivot.search_webhook_host` registered alongside `validation.validate_token`.
@@ -410,9 +410,9 @@ Expected: see `pivot.search_github_user`, `pivot.search_bot_username`, `pivot.se
 **Smoke test:** trigger Exa scan, watch for pivot fan-out:
 
 ```bash
-docker exec telegramhunter_worker-scanners celery -A app.workers.celery_app call scanner.scan_exa
+docker exec theprawnhunter_worker-scanners celery -A app.workers.celery_app call scanner.scan_exa
 sleep 90
-docker logs telegramhunter_worker-validators --since 2m 2>&1 | grep -iE "Pivot|webhook|validate.*✅"
+docker logs theprawnhunter_worker-validators --since 2m 2>&1 | grep -iE "Pivot|webhook|validate.*✅"
 ```
 
 Expected: at least one `[Pivot:...]` line per validated token. Push:
@@ -629,8 +629,8 @@ python -c "import ast; ast.parse(open('app/workers/tasks/firehose_tasks.py').rea
 docker compose build worker-scanners beat
 docker compose up -d --force-recreate worker-scanners beat
 sleep 30
-docker logs telegramhunter_beat --since 1m 2>&1 | grep -i firehose
-docker logs telegramhunter_worker-scanners --since 1m 2>&1 | grep -iE "firehose|enqueued"
+docker logs theprawnhunter_beat --since 1m 2>&1 | grep -i firehose
+docker logs theprawnhunter_worker-scanners --since 1m 2>&1 | grep -iE "firehose|enqueued"
 ```
 
 Expected: see firehose tick every 30s, intermittent "enqueued N tokens" lines.
@@ -873,9 +873,9 @@ Add `commoncrawl_srv = CommonCrawlService()` near other srv singletons + import.
 ```bash
 docker compose build worker-scanners
 docker compose up -d --force-recreate worker-scanners
-docker exec telegramhunter_worker-scanners celery -A app.workers.celery_app call scanner.scan_commoncrawl
+docker exec theprawnhunter_worker-scanners celery -A app.workers.celery_app call scanner.scan_commoncrawl
 sleep 60
-docker logs telegramhunter_worker-scanners --since 2m 2>&1 | grep -iE "commoncrawl|enqueued|error" | tail -15
+docker logs theprawnhunter_worker-scanners --since 2m 2>&1 | grep -iE "commoncrawl|enqueued|error" | tail -15
 ```
 
 Expected: at least one `[CommonCrawl] returned N matches` line, and ideally non-zero enqueued.
@@ -1110,7 +1110,7 @@ Apply via Supabase SQL editor.
 After all bundles deployed:
 
 1. Verify all containers healthy: `docker ps`
-2. Tail logs for 2 minutes, look for errors: `docker logs -f telegramhunter_worker-validators 2>&1 | grep -iE "error|exception"` 
+2. Tail logs for 2 minutes, look for errors: `docker logs -f theprawnhunter_worker-validators 2>&1 | grep -iE "error|exception"` 
 3. Push final state: `git push`
 4. Update memory:
    ```

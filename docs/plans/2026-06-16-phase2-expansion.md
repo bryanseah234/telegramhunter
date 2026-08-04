@@ -1,6 +1,6 @@
 # Phase 2: Zero-Cost Hit Rate Expansion
 
-This document details the architecture and tasks for Phase 2 of the TelegramHunter hit rate expansion. All data sources detailed below rely on public, unauthenticated, or free-tier APIs ($0 cost).
+This document details the architecture and tasks for Phase 2 of the TheprawnHunter hit rate expansion. All data sources detailed below rely on public, unauthenticated, or free-tier APIs ($0 cost).
 
 ## 1. GitHub Firehose Expansion (Issues & PRs)
 **Goal:** Developers frequently leak `.env` variables or console logs into GitHub Issues and Pull Requests when asking for help debugging.

@@ -1085,7 +1085,7 @@ class CommonCrawlService:
         async with httpx.AsyncClient(
             timeout=self.timeout,
             follow_redirects=True,
-            headers={"User-Agent": "telegramhunter/1.0 (+research)"},
+            headers={"User-Agent": "TheprawnHunter/1.0 (+research)"},
         ) as client:
             # Step 1: discover the newest crawl
             try:
@@ -1212,7 +1212,7 @@ class SourcegraphService:
         async with get_async_http_client(
             timeout=self.timeout,
             follow_redirects=True,
-            headers={"User-Agent": "telegramhunter/1.0 (+research)"},
+            headers={"User-Agent": "TheprawnHunter/1.0 (+research)"},
         ) as client:
             for q in queries:
                 try:

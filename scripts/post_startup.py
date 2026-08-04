@@ -1,5 +1,5 @@
 """
-TelegramHunter post-startup cleanup.
+TheprawnHunter post-startup cleanup.
 Runs after docker compose up to clear stale session leases
 that were left from the previous session.
 """
@@ -10,7 +10,7 @@ import requests
 # Load env
 env = {}
 try:
-    with open(r"C:\telegramhunter\.env") as f:
+    with open(r"C:\theprawnhunter\.env") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:

@@ -1,6 +1,6 @@
 # Scanner Source Expansion Plan
 
-> **Goal:** Add 5 new/improved scanner sources to TelegramHunter to recover the hit-rate lost from disabling Google CSE and GitLab.
+> **Goal:** Add 5 new/improved scanner sources to TheprawnHunter to recover the hit-rate lost from disabling Google CSE and GitLab.
 
 **Architecture:** All scanners follow the existing pattern: Celery task → service class returns `[{token, chat_id?, meta}]` → enqueues to `validation` queue (already built last session). Each scanner gets a Redis cooldown on auth failures and runs on a stagger schedule.
 
@@ -31,7 +31,7 @@ Replace lines `"scan-pastebin-12hours": { ... },` block.
 
 **Step 1.2: Set Redis cooldown to silence any in-flight task**
 ```bash
-docker exec telegramhunter_redis redis-cli SET "cooldown:scanner:pastebin_api_broken" "disabled" EX 86400
+docker exec theprawnhunter_redis redis-cli SET "cooldown:scanner:pastebin_api_broken" "disabled" EX 86400
 ```
 
 **Step 1.3: Verify**
@@ -171,9 +171,9 @@ docker compose up -d --force-recreate worker-scanners
 
 **Step 3.6: Runtime smoke (single token, before Bryan adds pool)**
 ```bash
-docker exec telegramhunter_worker-scanners celery -A app.workers.celery_app call scanner.scan_github
+docker exec theprawnhunter_worker-scanners celery -A app.workers.celery_app call scanner.scan_github
 sleep 60
-docker logs telegramhunter_worker-scanners --tail 30 2>&1 | grep -iE "github|enqueue"
+docker logs theprawnhunter_worker-scanners --tail 30 2>&1 | grep -iE "github|enqueue"
 ```
 Expected: scanner runs, enqueues tokens (proves single-token fallback path works).
 
@@ -416,7 +416,7 @@ docker compose up -d --force-recreate worker-scanners beat
 
 **Step 4.6: Runtime smoke — limited probe**
 ```bash
-docker exec telegramhunter_worker-scanners python3 -c "
+docker exec theprawnhunter_worker-scanners python3 -c "
 from app.services.scanners import WaybackService
 import asyncio
 async def main():
@@ -669,7 +669,7 @@ docker compose up -d --force-recreate worker-scanners worker-scrape beat
 
 **Step 5.6: Runtime smoke — single query, 10 result limit**
 ```bash
-docker exec telegramhunter_worker-scanners python3 -c "
+docker exec theprawnhunter_worker-scanners python3 -c "
 import asyncio
 from app.services.user_agent_srv import UserAgentService
 async def main():
@@ -701,12 +701,12 @@ After all 5 tasks committed:
 
 ```bash
 # Show all 4 commits in order
-cd /c/telegramhunter && git log --oneline -5
+cd /c/TheprawnHunter && git log --oneline -5
 
 # Confirm beat schedule has new entries
-docker exec telegramhunter_beat celery -A app.workers.celery_app inspect scheduled 2>/dev/null | head -50
+docker exec theprawnhunter_beat celery -A app.workers.celery_app inspect scheduled 2>/dev/null | head -50
 # OR
-docker logs telegramhunter_beat --tail 30 2>&1 | grep -iE "wayback|telegram_search|publicwww"
+docker logs theprawnhunter_beat --tail 30 2>&1 | grep -iE "wayback|telegram_search|publicwww"
 ```
 
 Push:

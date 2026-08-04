@@ -1,4 +1,4 @@
-# AUDIT.md — telegramhunter
+# AUDIT.md — TheprawnHunter
 
 Generated: 20260524
 

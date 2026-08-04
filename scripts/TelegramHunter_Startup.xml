@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Start TelegramHunter Docker containers on login and clear stale session leases</Description>
+    <Description>Start TheprawnHunter Docker containers on login and clear stale session leases</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -28,7 +28,7 @@
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>C:\telegramhunter\scripts\startup.bat</Command>
+      <Command>C:\theprawnhunter\scripts\startup.bat</Command>
     </Exec>
   </Actions>
 </Task>

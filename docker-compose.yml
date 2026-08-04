@@ -1,4 +1,4 @@
-name: telegramhunter
+name: theprawnhunter
 
 # Port defaults — override in .env if you have conflicts:
 #   API_PORT=8011   (host port → container 8001)
@@ -7,7 +7,7 @@ name: telegramhunter
 services:
   redis:
     image: redis:7-alpine
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_redis
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_redis
     restart: always
     init: true
     command: redis-server --appendonly yes --appendfsync everysec --maxmemory 1gb --maxmemory-policy allkeys-lru
@@ -28,7 +28,7 @@ services:
 
   api:
     build: .
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_api
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_api
     restart: always
     init: true
     ports:
@@ -57,7 +57,7 @@ services:
 
   worker-core:
     build: .
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_worker-core
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_worker-core
     restart: always
     init: true
     env_file: .env
@@ -85,7 +85,7 @@ services:
 
   worker-scanners:
     build: .
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_worker-scanners
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_worker-scanners
     restart: always
     init: true
     env_file: .env
@@ -110,7 +110,7 @@ services:
 
   worker-scrape:
     build: .
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_worker-scrape
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_worker-scrape
     restart: always
     init: true
     env_file: .env
@@ -140,7 +140,7 @@ services:
   # gates total throughput so concurrency just controls in-flight depth.
   worker-validators:
     build: .
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_worker-validators
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_worker-validators
     restart: always
     init: true
     env_file: .env
@@ -165,7 +165,7 @@ services:
 
   beat:
     build: .
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_beat
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_beat
     restart: always
     init: true
     env_file: .env
@@ -199,7 +199,7 @@ services:
       args:
         NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL}
         NEXT_PUBLIC_SUPABASE_KEY: ${SUPABASE_KEY}
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_frontend
     restart: always
     init: true
     ports:
@@ -212,7 +212,7 @@ services:
 
   bot:
     build: .
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_bot
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_bot
     restart: always
     init: true
     env_file: .env
@@ -242,7 +242,7 @@ services:
 
   flower:
     build: .
-    container_name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_flower
+    container_name: ${COMPOSE_PROJECT_NAME:-theprawnhunter}_flower
     restart: always
     init: true
     env_file: .env
@@ -259,11 +259,15 @@ services:
         max-file: "3"
 
 volumes:
+  # Volume names pinned to legacy 'telegramhunter_*' prefix — these are the
+  # physical volumes created before the project rename to 'theprawnhunter'.
+  # Docker has no volume rename primitive, so we keep the old names to avoid
+  # losing Redis state, Telethon sessions, and beat schedule DB.
   redis_data:
-    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_redis_data
+    name: telegramhunter_redis_data
   sessions:
-    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_sessions
+    name: telegramhunter_sessions
   imports:
-    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_imports
+    name: telegramhunter_imports
   beat_schedule:
-    name: ${COMPOSE_PROJECT_NAME:-telegramhunter}_beat_schedule
+    name: telegramhunter_beat_schedule
