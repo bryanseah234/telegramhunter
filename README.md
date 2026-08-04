@@ -500,3 +500,5 @@ Notes:
 ## License
 
 See [LICENSE](LICENSE).
+
+<!-- repo renamed to theprawnhunter on 2026-08-04 -->
