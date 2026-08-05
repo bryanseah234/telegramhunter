@@ -13,6 +13,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ConversationHandler,
+    ChatMemberHandler,
     filters,
     Application
 )
@@ -951,6 +952,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     lambda: db.table("telegram_accounts").upsert({
                         "phone": context.user_data.get('phone'),
                         "session_path": os.path.abspath(final_path),
+                        "telegram_user_id": me.id,
                         "status": "active",
                         "updated_at": "now()"
                     }).execute()
@@ -1079,6 +1081,111 @@ async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "No text"
     logger.info(f"🔄 Update from {user.id if user else 'Unknown'} in {chat_id}: {text}")
 
+async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Auto-promote joining user-agent session accounts with MINIMAL admin rights.
+
+    Fires whenever the bot sees a chat_member update in any chat. We only act
+    when: (1) it's the monitor group, (2) the changed member matches a row in
+    telegram_accounts.telegram_user_id, and (3) they just transitioned to
+    'member' (i.e. joined).
+
+    Permissions granted (all others explicitly False):
+      • can_invite_users=True  — required so user_agent can InviteToChannel bots
+    Permissions denied (nuke-protection):
+      • can_change_info, can_delete_messages, can_restrict_members,
+        can_pin_messages, can_promote_members, can_manage_video_chats
+      • is_anonymous=False (stays visible as themselves in admin list)
+
+    Note: Telegram's can_invite_users doesn't distinguish bot vs person invites.
+    The membership audit task will detect and revert any non-bot user additions
+    performed by session accounts.
+    """
+    cmu = update.chat_member
+    if not cmu:
+        return
+
+    # Only care about the monitor group
+    if cmu.chat.id != settings.MONITOR_GROUP_ID:
+        return
+
+    new_status = cmu.new_chat_member.status if cmu.new_chat_member else None
+    old_status = cmu.old_chat_member.status if cmu.old_chat_member else None
+    user = cmu.new_chat_member.user if cmu.new_chat_member else None
+    if not user or user.is_bot:
+        return  # bots are handled separately by user_agent.invite_bot_to_group
+
+    # Only act on transitions into 'member' state (join or unbanned)
+    if new_status != "member" or old_status == "member":
+        return
+
+    # Match against telegram_accounts.telegram_user_id
+    try:
+        res = await asyncio.to_thread(
+            lambda: db.table("telegram_accounts")
+                .select("id, phone, status, is_admin_promoted")
+                .eq("telegram_user_id", user.id)
+                .limit(1)
+                .execute()
+        )
+    except Exception as e:
+        logger.debug(f"[MemberJoin] db lookup failed for user {user.id}: {e}")
+        return
+
+    rows = res.data or []
+    if not rows:
+        logger.info(
+            f"[MemberJoin] user {user.id} (@{user.username or '?'}) joined but has "
+            f"no telegram_accounts row — treating as regular guest, not promoting"
+        )
+        return
+
+    account = rows[0]
+    if account.get("status") != "active":
+        logger.warning(
+            f"[MemberJoin] user {user.id} matches inactive account {account['id']} — "
+            f"not promoting"
+        )
+        return
+
+    # Promote with MINIMAL admin rights
+    try:
+        await context.bot.promote_chat_member(
+            chat_id=settings.MONITOR_GROUP_ID,
+            user_id=user.id,
+            can_manage_chat=False,
+            can_delete_messages=False,
+            can_manage_video_chats=False,
+            can_restrict_members=False,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=True,          # REQUIRED for inviting bots via user session
+            can_pin_messages=False,
+            can_post_messages=False,
+            can_edit_messages=False,
+            is_anonymous=False,
+        )
+        # Mark promoted in DB
+        await asyncio.to_thread(
+            lambda: db.table("telegram_accounts")
+                .update({
+                    "is_admin_promoted": True,
+                    "promoted_at": "now()",
+                    "in_monitor_group": True,
+                    "last_membership_check_at": "now()",
+                })
+                .eq("id", account["id"])
+                .execute()
+        )
+        logger.info(
+            f"[MemberJoin] ✅ promoted @{user.username or user.id} "
+            f"(account {account['id']}) with invite-only admin rights"
+        )
+    except Exception as e:
+        logger.warning(
+            f"[MemberJoin] promote_chat_member failed for user {user.id}: {e}"
+        )
+
+
 def _build_application(token: str) -> Application:
     """Builds a python-telegram-bot Application for a single bot token."""
     request = HTTPXRequest(
@@ -1105,6 +1212,11 @@ def _build_application(token: str) -> Application:
     application.add_handler(CommandHandler("getfile", getfile_command))
     application.add_handler(CommandHandler("archive", getfile_command))
     application.add_handler(CommandHandler("backfill", backfill_command))
+
+    # Auto-promote logged-in session accounts when they join monitor group
+    application.add_handler(
+        ChatMemberHandler(on_chat_member_update, ChatMemberHandler.CHAT_MEMBER)
+    )
 
     login_conv_handler = ConversationHandler(
         entry_points=[CommandHandler('starthunter', starthunter)],
@@ -1155,7 +1267,10 @@ async def _run_bot(token: str, is_primary: bool = False):
         # may still be releasing its long-poll connection.
         for attempt in range(3):
             try:
-                await application.updater.start_polling(drop_pending_updates=False)
+                await application.updater.start_polling(
+                    drop_pending_updates=False,
+                    allowed_updates=Update.ALL_TYPES,
+                )
                 break
             except Conflict as e:
                 if attempt < 2:

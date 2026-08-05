@@ -316,6 +316,13 @@ app.conf.update(
             "task": "flow.reconcile_topics_from_db",
             "schedule": crontab(minute=25, hour="*"),
         },
+        # User-agent group membership audit — verifies every active session's
+        # account is still in the monitor group + has minimal admin perms.
+        # Every 30 min.
+        "audit-user-agent-membership-30min": {
+            "task": "flow.audit_user_agent_group_membership",
+            "schedule": crontab(minute="*/30"),
+        },
         # Duplicate report — daily @ 08:15 UTC.
         "media-duplicate-report-daily": {
             "task": "flow.media_duplicate_report",

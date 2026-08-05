@@ -3334,6 +3334,181 @@ async def _pin_general_readme_logic() -> dict:
     return {"status": "ok", "message_id": sent_id, "pinned": pinned}
 
 
+@app.task(name="flow.audit_user_agent_group_membership")
+def audit_user_agent_group_membership():
+    """Verify every active session's account is still a member of the monitor
+    group with proper admin permissions. Auto-fixes:
+      • Promotes members who aren't yet admin-promoted (catches ChatMemberHandler
+        missed events after bot restarts)
+      • Marks accounts as inactive when they've left the group
+    Broadcasts summary to monitor group.
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(
+        _audit_user_agent_group_membership_logic()
+    )
+
+
+async def _audit_user_agent_group_membership_logic() -> dict:
+    import httpx
+
+    monitor_bot_token = None
+    tokens = (settings.MONITOR_BOT_TOKEN or "").split(",")
+    if tokens and tokens[0].strip():
+        monitor_bot_token = tokens[0].strip()
+    if not monitor_bot_token:
+        return {"status": "no_bot_token"}
+
+    group_id = settings.MONITOR_GROUP_ID
+    if not group_id:
+        return {"status": "no_group_id"}
+
+    try:
+        res = await async_execute(
+            db.table("telegram_accounts")
+            .select("id, phone, telegram_user_id, is_admin_promoted")
+            .eq("status", "active")
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    accounts = res.data or []
+    if not accounts:
+        return {"status": "no_accounts"}
+
+    base_url = f"https://api.telegram.org/bot{monitor_bot_token}"
+    in_group = 0
+    not_in_group = 0
+    promoted_now = 0
+    already_promoted = 0
+    marked_inactive: list[str] = []
+    missing_user_id: list[str] = []
+
+    from datetime import datetime, timezone
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for acct in accounts:
+            user_id = acct.get("telegram_user_id")
+            if not user_id:
+                missing_user_id.append(acct["phone"])
+                continue
+
+            try:
+                r = await client.get(
+                    f"{base_url}/getChatMember",
+                    params={"chat_id": group_id, "user_id": user_id},
+                )
+                if r.status_code == 200 and (r.json() or {}).get("ok"):
+                    member_status = r.json()["result"]["status"]
+                    # Statuses: creator, administrator, member, restricted, left, kicked
+                    if member_status in ("left", "kicked"):
+                        not_in_group += 1
+                        # Mark inactive so pool stops trying to use it
+                        try:
+                            await async_execute(
+                                db.table("telegram_accounts")
+                                .update({
+                                    "status": "inactive",
+                                    "in_monitor_group": False,
+                                    "last_membership_check_at": datetime.now(timezone.utc).isoformat(),
+                                })
+                                .eq("id", acct["id"])
+                            )
+                            marked_inactive.append(acct["phone"])
+                        except Exception:
+                            pass
+                        continue
+
+                    in_group += 1
+
+                    # If in group but not promoted, promote now
+                    if member_status == "member" and not acct.get("is_admin_promoted"):
+                        promote_resp = await client.post(
+                            f"{base_url}/promoteChatMember",
+                            data={
+                                "chat_id": group_id,
+                                "user_id": user_id,
+                                "can_manage_chat": "false",
+                                "can_delete_messages": "false",
+                                "can_manage_video_chats": "false",
+                                "can_restrict_members": "false",
+                                "can_promote_members": "false",
+                                "can_change_info": "false",
+                                "can_invite_users": "true",
+                                "can_pin_messages": "false",
+                                "is_anonymous": "false",
+                            },
+                        )
+                        if promote_resp.status_code == 200 and (promote_resp.json() or {}).get("ok"):
+                            promoted_now += 1
+                            try:
+                                await async_execute(
+                                    db.table("telegram_accounts")
+                                    .update({
+                                        "is_admin_promoted": True,
+                                        "promoted_at": datetime.now(timezone.utc).isoformat(),
+                                        "in_monitor_group": True,
+                                        "last_membership_check_at": datetime.now(timezone.utc).isoformat(),
+                                    })
+                                    .eq("id", acct["id"])
+                                )
+                            except Exception:
+                                pass
+                    else:
+                        already_promoted += 1
+                        try:
+                            await async_execute(
+                                db.table("telegram_accounts")
+                                .update({
+                                    "in_monitor_group": True,
+                                    "last_membership_check_at": datetime.now(timezone.utc).isoformat(),
+                                })
+                                .eq("id", acct["id"])
+                            )
+                        except Exception:
+                            pass
+                else:
+                    logger.debug(
+                        f"[MembershipAudit] getChatMember non-ok for user_id={user_id}: "
+                        f"{r.status_code} {r.text[:200]}"
+                    )
+            except Exception as e:
+                logger.debug(f"[MembershipAudit] check failed for {user_id}: {e}")
+                continue
+
+    lines = [
+        "👥 **User-Agent Group Membership Audit**",
+        "",
+        f"• Active accounts checked: {len(accounts)}",
+        f"• In group + already promoted: {already_promoted}",
+        f"• In group but needed promotion (fixed): {promoted_now}",
+        f"• Not in group (marked inactive): {not_in_group}",
+        f"• Missing telegram_user_id (skipped): {len(missing_user_id)}",
+    ]
+    if marked_inactive:
+        lines.append("")
+        lines.append("Marked inactive:")
+        for p in marked_inactive[:5]:
+            lines.append(f"  • {p}")
+
+    msg = "\n".join(lines)[:3900]
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        return {"status": "broadcast_failed", "error": str(e)[:200]}
+
+    return {
+        "status": "ok",
+        "checked": len(accounts),
+        "in_group": in_group,
+        "not_in_group": not_in_group,
+        "promoted_now": promoted_now,
+        "already_promoted": already_promoted,
+        "missing_user_id": len(missing_user_id),
+    }
+
+
 @app.task(name="flow.system_help")
 def system_help():
     """Periodic guide on how to use system commands."""
