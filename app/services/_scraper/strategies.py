@@ -136,6 +136,29 @@ class WebhookStateService:
                 "pending_update_count": result.get("pending_update_count"),
             }
         )
+
+        # Detect third-party re-takeover of OUR honeypot webhook.
+        # If the found webhook_url is NOT ours but we're in honeypot mode
+        # with this credential allowlisted, someone overwrote our registration.
+        try:
+            from app.core.config import settings as _hp_settings
+            our_receiver = (_hp_settings.HONEYPOT_WEBHOOK_URL or "").rstrip("/")
+            if (
+                _hp_settings.HONEYPOT_MODE
+                and our_receiver
+                and credential_id
+                and webhook_url
+                and our_receiver not in webhook_url
+            ):
+                # Third party re-registered over us — log it as a counter-attack
+                logger.warning(
+                    f"🚨 [Webhook] COUNTER-TAKEOVER detected — third party re-registered "
+                    f"webhook ({webhook_url}) over our honeypot for cred {credential_id[:8]}... "
+                    f"Will delete + re-register ours."
+                )
+        except Exception:
+            pass
+
         if not self.allow_delete:
             return WebhookDecision(
                 can_poll=False,
