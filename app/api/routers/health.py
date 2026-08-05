@@ -2,7 +2,8 @@
 Health check router for monitoring system status.
 Provides endpoints to check database, Redis, and service health.
 """
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException
+from app.core.auth import require_monitor_key
 from app.core.config import settings
 from app.core.logger import get_logger
 
@@ -20,13 +21,11 @@ async def health_check():
     return {"status": "healthy", "service": "telegram-hunter-api"}
 
 
-@router.get("/detailed")
-async def detailed_health(x_monitor_key: str | None = Header(None)):
+@router.get("/detailed", dependencies=[Depends(require_monitor_key)])
+async def detailed_health():
     """
-    Detailed health check with dependency status (protected if MONITOR_API_KEY set).
+    Detailed health check with dependency status (protected by X-Monitor-Key).
     """
-    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     health_status = {
         "status": "healthy",
         "checks": {}
@@ -76,13 +75,11 @@ async def detailed_health(x_monitor_key: str | None = Header(None)):
     return health_status
 
 
-@router.get("/metrics")
-async def get_metrics(x_monitor_key: str | None = Header(None)):
+@router.get("/metrics", dependencies=[Depends(require_monitor_key)])
+async def get_metrics():
     """
-    Get system metrics (protected if MONITOR_API_KEY set).
+    Get system metrics (protected by X-Monitor-Key).
     """
-    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     from app.core.metrics import metrics
 
     return {
@@ -91,13 +88,11 @@ async def get_metrics(x_monitor_key: str | None = Header(None)):
     }
 
 
-@router.get("/queues")
-async def get_queue_health(x_monitor_key: str | None = Header(None)):
+@router.get("/queues", dependencies=[Depends(require_monitor_key)])
+async def get_queue_health():
     """
     Get operational queue depth and oldest tracked job age.
     """
-    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     try:
         import redis
         from app.core.queue_monitor import get_queue_snapshot
@@ -105,19 +100,18 @@ async def get_queue_health(x_monitor_key: str | None = Header(None)):
         client = redis.from_url(settings.REDIS_URL, decode_responses=True)
         return {"queues": get_queue_snapshot(client)}
     except Exception as e:
+        logger.exception("queue health failed")
         raise HTTPException(
             status_code=503,
-            detail={"status": "degraded", "error": str(e)},
+            detail={"status": "degraded", "error": "unavailable"},
         ) from e
 
 
-@router.get("/circuit-breakers")
-async def get_circuit_breakers(x_monitor_key: str | None = Header(None)):
+@router.get("/circuit-breakers", dependencies=[Depends(require_monitor_key)])
+async def get_circuit_breakers():
     """
-    Get circuit breaker status (protected if MONITOR_API_KEY set).
+    Get circuit breaker status (protected by X-Monitor-Key).
     """
-    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     from app.core.circuit_breaker import get_all_circuit_status
 
     return {
@@ -125,14 +119,15 @@ async def get_circuit_breakers(x_monitor_key: str | None = Header(None)):
     }
 
 
-@router.post("/circuit-breakers/{service}/reset")
-async def reset_circuit_breaker(service: str, x_monitor_key: str | None = Header(None)):
+@router.post(
+    "/circuit-breakers/{service}/reset",
+    dependencies=[Depends(require_monitor_key)],
+)
+async def reset_circuit_breaker(service: str):
     """
-    Manually reset a circuit breaker (protected if MONITOR_API_KEY set).
+    Manually reset a circuit breaker (protected by X-Monitor-Key).
     Use this to force-enable a service after fixing issues.
     """
-    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     from app.core.circuit_breaker import get_circuit_breaker
 
     try:
@@ -140,7 +135,8 @@ async def reset_circuit_breaker(service: str, x_monitor_key: str | None = Header
         breaker.reset()
         return {"status": "success", "message": f"Circuit breaker for {service} reset"}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        logger.exception("circuit breaker reset failed")
+        raise HTTPException(status_code=400, detail="reset failed") from e
 
 
 # ==============================================================================
@@ -157,8 +153,8 @@ _QUOTA_LIMITS: dict[str, int] = {
 }
 
 
-@router.get("/quotas")
-async def get_quotas(x_monitor_key: str | None = Header(None)):
+@router.get("/quotas", dependencies=[Depends(require_monitor_key)])
+async def get_quotas():
     """Per-service daily API-budget usage.
 
     Reads Redis counters at ``quota:{service}:{yyyymmdd}`` (UTC date) for
@@ -166,9 +162,6 @@ async def get_quotas(x_monitor_key: str | None = Header(None)):
     pct}}``. Services whose Redis counter is absent report ``used_today=0``.
     ``limit`` is null when no budget is known for a service.
     """
-    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
-
     import redis
     from datetime import datetime, timezone
 
@@ -190,14 +183,15 @@ async def get_quotas(x_monitor_key: str | None = Header(None)):
             }
         return {"date_utc": today_key, "quotas": out}
     except Exception as e:
+        logger.exception("quota probe failed")
         raise HTTPException(
             status_code=503,
-            detail={"status": "degraded", "error": str(e)},
+            detail={"status": "degraded", "error": "unavailable"},
         ) from e
 
 
-@router.get("/bot-pool")
-async def get_bot_pool(x_monitor_key: str | None = Header(None)):
+@router.get("/bot-pool", dependencies=[Depends(require_monitor_key)])
+async def get_bot_pool():
     """Bot pool state — total configured, active bots (cluster-wide), and Redis lock view.
 
     ``total_bots`` counts tokens configured via ``MONITOR_BOT_TOKEN``.
@@ -219,9 +213,6 @@ async def get_bot_pool(x_monitor_key: str | None = Header(None)):
     ``LOCK_TTL_SECONDS − min(TTL)`` across all lock keys. A large value
     means a lock is nearing expiry (poller may have stopped renewing).
     """
-    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
-
     from app.core.constants import LOCK_TTL_SECONDS
     from app.services.bot_manager_srv import bot_manager
 

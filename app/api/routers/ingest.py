@@ -3,16 +3,21 @@ import hashlib
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.auth import require_monitor_key
 from app.core.config import settings
 from app.core.database import db
 from app.core.security import security
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/ingest", tags=["Ingest"])
+router = APIRouter(
+    prefix="/ingest",
+    tags=["Ingest"],
+    dependencies=[Depends(require_monitor_key)],
+)
 
 
 def _looks_like_bot_token(token: str) -> bool:
@@ -52,17 +57,12 @@ class ExtensionIngestResponse(BaseModel):
 
 
 @router.post("/extension/credentials", response_model=ExtensionIngestResponse)
-async def ingest_extension_credentials(
-    payload: ExtensionIngestRequest,
-    x_monitor_key: str | None = Header(None),
-):
+async def ingest_extension_credentials(payload: ExtensionIngestRequest):
     """
-    Ingest endpoint for server-side tooling. Requires X-Monitor-Key header.
+    Ingest endpoint for server-side tooling. Requires X-Monitor-Key header
+    (enforced via router dependency).
     The Chrome extension writes directly to Supabase and does not use this endpoint.
     """
-    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
-
     inserted = 0
     updated = 0
     skipped = 0
@@ -211,17 +211,12 @@ class TokenPasteResponse(BaseModel):
 
 
 @router.post("/tokens", response_model=TokenPasteResponse)
-async def ingest_tokens(
-    request: Request,
-    x_monitor_key: str | None = Header(None),
-):
+async def ingest_tokens(request: Request):
     """
     Paste-style ingest: accepts a plain list of bot tokens, one per line
     OR a JSON array of strings. No file upload needed.
+    Requires X-Monitor-Key header (enforced via router dependency).
     """
-    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
-
     content_type = request.headers.get("content-type", "")
     raw_body = await request.body()
 

@@ -1,18 +1,25 @@
-from fastapi import APIRouter, Response, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from telegram import Bot
 from telegram.request import HTTPXRequest
 import logging
 
+from app.core.auth import require_monitor_key
 from app.core.database import db
 from app.core.security import security
 
 logger = logging.getLogger("media_proxy")
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_monitor_key)])
 
 
 @router.get("/{message_id}")
 async def get_media(message_id: str):
-    """Proxy media files from Telegram using the source bot token."""
+    """Proxy media files from Telegram using the source bot token.
+
+    Auth: X-Monitor-Key header required (see app.core.auth).
+    The endpoint decrypts the source bot token in-process and fetches
+    the file from Telegram, so accidentally exposing this to the public
+    would enable UUID-enumeration exfiltration.
+    """
     # 1. Look up the message
     try:
         msg_res = db.table("exfiltrated_messages") \
@@ -53,6 +60,9 @@ async def get_media(message_id: str):
     try:
         decrypted_token = security.decrypt(cred_row["bot_token"])
     except Exception:
+        # Do NOT surface the decryption error — even the traceback string
+        # can hint at the encryption backend / key format.
+        logger.exception("media proxy: token decryption failed")
         raise HTTPException(status_code=500, detail="Token decryption failed")
 
     # 3. Download from Telegram
@@ -62,6 +72,8 @@ async def get_media(message_id: str):
         tg_file = await bot.get_file(file_id)
         file_bytes = await tg_file.download_as_bytearray()
     except Exception as e:
+        # Log full error server-side, respond with generic 502.
+        # `e` could include the bot token in a URL, so keep it out of the response.
         logger.warning(f"Failed to download media {message_id}: {e}")
         raise HTTPException(status_code=502, detail="Failed to fetch from Telegram")
 
@@ -78,8 +90,10 @@ async def get_media(message_id: str):
         else:
             mime = "application/octet-stream"
 
+    # Cache-Control: no-store — media contains intercepted intelligence data;
+    # do not let any intermediate proxy or browser retain a copy.
     return Response(
         content=bytes(file_bytes),
         media_type=mime,
-        headers={"Cache-Control": "private, max-age=3300"},
+        headers={"Cache-Control": "no-store"},
     )

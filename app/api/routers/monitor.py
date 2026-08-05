@@ -1,24 +1,22 @@
-from fastapi import APIRouter, HTTPException, Header
+import logging
+from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from app.core.database import db
+from app.core.auth import require_monitor_key
 from app.schemas.models import CredentialOut, MessageOut, StatsOut
-from app.core.config import settings
 
-router = APIRouter(prefix="/monitor", tags=["Monitor"])
+logger = logging.getLogger(__name__)
 
-
-def _check_monitor_auth(x_monitor_key: str | None):
-    """Raises 403 if key is absent or wrong. Raises 503 if key not configured on server."""
-    if not settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=503, detail="Monitor API key not configured on server")
-    if not x_monitor_key or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
+router = APIRouter(
+    prefix="/monitor",
+    tags=["Monitor"],
+    dependencies=[Depends(require_monitor_key)],
+)
 
 
 @router.get("/stats", response_model=StatsOut)
-async def get_stats(x_monitor_key: str | None = Header(None)):
-    """Get system stats. Requires X-Monitor-Key header if MONITOR_API_KEY is configured."""
-    _check_monitor_auth(x_monitor_key)
+async def get_stats():
+    """Get system stats. Requires X-Monitor-Key header."""
     try:
         c_res = db.table("discovered_credentials").select("*", count="exact").execute()
         total_creds = c_res.count if c_res.count is not None else len(c_res.data)
@@ -47,7 +45,6 @@ async def list_credentials(
     limit: int = 100,
     sort_by: str = "created_at",
     order: str = "desc",
-    x_monitor_key: str | None = Header(None),
 ):
     """List recent credentials.
 
@@ -57,9 +54,8 @@ async def list_credentials(
                  'chat_member_count'. The latter two read from meta jsonb.
         order: 'desc' (default) or 'asc'.
 
-    Requires X-Monitor-Key header if MONITOR_API_KEY is configured.
+    Requires X-Monitor-Key header.
     """
-    _check_monitor_auth(x_monitor_key)
     limit = max(1, min(limit, 1000))
     desc = order.lower() != "asc"
 
@@ -96,9 +92,8 @@ async def list_credentials(
 
 
 @router.get("/messages", response_model=List[MessageOut])
-async def list_messages(limit: int = 100, x_monitor_key: str | None = Header(None)):
-    """List recent exfiltrated messages. Requires X-Monitor-Key header if MONITOR_API_KEY is configured."""
-    _check_monitor_auth(x_monitor_key)
+async def list_messages(limit: int = 100):
+    """List recent exfiltrated messages. Requires X-Monitor-Key header."""
     limit = max(1, min(limit, 1000))  # Clamp to [1, 1000]
     try:
         res = db.table("exfiltrated_messages").select("*").order("created_at", desc=True).limit(limit).execute()
@@ -108,19 +103,15 @@ async def list_messages(limit: int = 100, x_monitor_key: str | None = Header(Non
 
 
 @router.get("/webhooks")
-async def list_captured_webhooks(
-    limit: int = 200,
-    x_monitor_key: str | None = Header(None),
-):
+async def list_captured_webhooks(limit: int = 200):
     """List credentials with a captured webhook URL (someone else's C2 / research endpoint).
 
     Surfaces `meta.webhook_url` and related fields that `validation_tasks.py` records
     when it hits a bot with an active webhook. Useful for OSINT pivoting on third-party
     infrastructure hosting the stolen tokens.
 
-    Requires X-Monitor-Key header if MONITOR_API_KEY is configured.
+    Requires X-Monitor-Key header.
     """
-    _check_monitor_auth(x_monitor_key)
     limit = max(1, min(limit, 1000))
     try:
         # Fetch a bounded slice; population is small (~2k credentials) so
@@ -168,7 +159,6 @@ def search_messages(
     limit: int = 50,
     media_only: bool = False,
     since_hours: int | None = None,
-    x_monitor_key: str | None = Header(None),
 ):
     """Full-text search over exfiltrated_messages.content + sender_name.
 
@@ -181,8 +171,6 @@ def search_messages(
     - media_only: if True, only rows with media_type != 'text'
     - since_hours: filter to messages created in last N hours
     """
-    _check_monitor_auth(x_monitor_key)
-
     if not q or len(q.strip()) < 2:
         raise HTTPException(status_code=400, detail="query must be at least 2 chars")
 
@@ -226,10 +214,7 @@ def search_messages(
 
 
 @router.get("/operators")
-def get_c2_operators(
-    limit: int = 20,
-    x_monitor_key: str | None = Header(None),
-):
+def get_c2_operators(limit: int = 20):
     """Third-party operator identification via webhook fingerprints.
 
     Clusters captured webhook URLs by:
@@ -241,8 +226,6 @@ def get_c2_operators(
     Returns clusters ranked by member bot count — largest cluster = most
     prolific third-party operator.
     """
-    _check_monitor_auth(x_monitor_key)
-
     from collections import defaultdict
     from urllib.parse import urlparse
 

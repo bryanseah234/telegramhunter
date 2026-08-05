@@ -1,28 +1,29 @@
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException
+from app.core.auth import require_monitor_key
 from app.schemas.models import ScanRequest
 from app.workers.celery_app import app as celery_app
 from app.core.config import settings
 
-router = APIRouter(prefix="/scan", tags=["Scanner"])
+router = APIRouter(
+    prefix="/scan",
+    tags=["Scanner"],
+    dependencies=[Depends(require_monitor_key)],
+)
 
 
 @router.post("/trigger")
-async def trigger_scan(request: ScanRequest, x_monitor_key: str | None = Header(None)):
+async def trigger_scan(request: ScanRequest):
     """
     Manually trigger an OSINT scan task.
     DISABLED in Production to prevent public abuse.
-    Requires X-Monitor-Key header in all environments.
-    Valid sources: shodan, fofa, github, gitlab, urlscan
+    Requires X-Monitor-Key header (enforced via router dependency).
+    Valid sources: shodan, fofa, github, gitlab, urlscan, sourcegraph, searchcode
     """
     if settings.ENV == "production":
         raise HTTPException(
             status_code=403,
             detail="Manual triggering is disabled in production. Scheduled tasks only."
         )
-
-    # Require API key in all environments to prevent abuse
-    if not settings.MONITOR_API_KEY or not x_monitor_key or x_monitor_key != settings.MONITOR_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
 
     task_name = f"scanner.scan_{request.source.lower()}"
 
@@ -47,6 +48,9 @@ async def trigger_scan(request: ScanRequest, x_monitor_key: str | None = Header(
             "source": request.source,
             "query": request.query,
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to queue task: {str(e)}")
-
+    except Exception:
+        # Do NOT echo raw exception text — it can contain broker URLs
+        # (Redis DSN with password) or other secrets.
+        import logging
+        logging.getLogger(__name__).exception("scan trigger failed")
+        raise HTTPException(status_code=500, detail="Failed to queue task")
