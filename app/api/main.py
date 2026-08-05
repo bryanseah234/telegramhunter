@@ -65,6 +65,36 @@ app = FastAPI(
     openapi_url=None if settings.ENV == "production" else "/openapi.json"
 )  # Don't block shutdown
 
+# ── Rate limiting ─────────────────────────────────────────────────────
+# Uses Redis for cross-worker limits (all uvicorn workers share the same
+# counters). Keyed on X-Monitor-Key when present, else remote IP.
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
+
+
+def _rate_key(request):
+    """Prefer X-Monitor-Key so a leaked key can't outrun the per-IP budget,
+    fall back to remote IP for unauth endpoints (honeypot receiver)."""
+    hdr = request.headers.get("X-Monitor-Key")
+    if hdr:
+        # Bucket by first 12 chars — enough entropy to distinguish keys
+        # without dumping the whole key into Redis
+        return f"key:{hdr[:12]}"
+    return f"ip:{get_remote_address(request)}"
+
+
+limiter = Limiter(
+    key_func=_rate_key,
+    storage_uri=settings.REDIS_URL,
+    default_limits=["120/minute"],  # global default; endpoints can override
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+# ─────────────────────────────────────────────────────────────────────
+
 # Allow browser-based clients (including the Chrome extension) to call the API.
 # This API should rely on explicit API keys for sensitive operations.
 # CORS: always use an explicit allowlist — never wildcard, even in dev.

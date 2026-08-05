@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     # decrypt ciphertext that predates the current ENCRYPTION_KEY. See
     # app/core/security.py for rotation runbook.
     ENCRYPTION_KEY_LEGACY: str = ""
+
+    # If False (default), /starthunter is only usable by whitelisted admins
+    # in DM. If True, ANY Telegram user can DM the login bot and add their
+    # own account to the session pool — dangerous, use with caution.
+    ALLOW_PUBLIC_STARTHUNTER: bool = False
     MONITOR_API_KEY: str  # Required — protects /monitor and /health/detailed endpoints
 
     # Telegram Monitoring (The Bot(s) WE control - supports multi-bot rotation)

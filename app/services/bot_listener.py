@@ -671,7 +671,9 @@ async def _wipe_conversation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, b
     asyncio.create_task(_do_wipe())
 
 async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Starts the login flow. Open to any user — no admin check."""
+    """Starts the login flow. Gated on ALLOW_PUBLIC_STARTHUNTER unless caller
+    is a whitelisted admin. Rate-limited per user to prevent session-pool
+    pollution (3 attempts per 24h)."""
     if update.effective_chat.type != "private":
         bot_username = context.bot.username or "telehunter234bot"
         await update.message.reply_text(
@@ -680,6 +682,37 @@ async def starthunter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             parse_mode=ParseMode.MARKDOWN
         )
         return ConversationHandler.END
+
+    # Public flag OR admin gate. Non-admins in ALLOW_PUBLIC_STARTHUNTER=False
+    # deployments get a polite refusal.
+    if not settings.ALLOW_PUBLIC_STARTHUNTER and not is_admin(update):
+        logger.warning(
+            f"[starthunter] rejected non-admin user_id={update.effective_user.id} "
+            f"(ALLOW_PUBLIC_STARTHUNTER=False)"
+        )
+        await update.message.reply_text(
+            "🔒 This bot is not accepting new logins right now.",
+        )
+        return ConversationHandler.END
+
+    # Per-user rate limit: 3 attempts per 24h. Redis-backed so it survives
+    # bot restarts. Key format: rl:starthunter:<user_id>
+    try:
+        from app.core.redis_srv import redis_srv
+        user_id = update.effective_user.id
+        rl_key = f"rl:starthunter:{user_id}"
+        attempts = redis_srv.incr_key(rl_key, ttl_seconds=86400)
+        if attempts > 3:
+            logger.warning(
+                f"[starthunter] rate-limited user_id={user_id} attempt={attempts}/3 in 24h"
+            )
+            await update.message.reply_text(
+                "🕒 Too many login attempts. Try again tomorrow.",
+            )
+            return ConversationHandler.END
+    except Exception as rl_exc:
+        # Redis down — don't fail closed, just log and let through
+        logger.debug(f"[starthunter] rate-limit check skipped: {rl_exc}")
 
     msg = (
         "🚨 *BEFORE YOU PROCEED — READ THIS*\n\n"
