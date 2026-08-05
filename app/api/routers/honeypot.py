@@ -27,7 +27,7 @@ traffic because we never call setWebhook.
 """
 
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Header, Request
 
 from app.core.config import settings
 from app.core.database import db
@@ -126,47 +126,19 @@ async def receive_webhook_update(credential_id: str, request: Request):
     return {"ok": True}
 
 
-# Legacy path-based endpoint kept for backward compat with existing setWebhook
-# registrations. Emits a warning on every hit — operator should migrate to
-# the header-based route above.
-@router.post("/receive/{legacy_secret}/{credential_id}")
-async def receive_webhook_update_legacy(
-    legacy_secret: str, credential_id: str, request: Request
-):
-    if not settings.HONEYPOT_MODE:
-        raise HTTPException(status_code=404, detail="honeypot mode disabled")
-
-    if not settings.HONEYPOT_SECRET or legacy_secret != settings.HONEYPOT_SECRET:
-        return {"ok": True}
-
-    logger.warning(
-        "[Honeypot] LEGACY path-based-secret endpoint used — "
-        "migrate to header-based /receive/{credential_id} (X-Telegram-Bot-Api-Secret-Token)"
-    )
-    # Delegate to the header-checked handler by re-injecting the secret header
-    # Note: can't cleanly forward FastAPI Request objects; instead re-implement
-    # the safe minimum inline.
-    if not _honeypot_credential_allowed(credential_id):
-        return {"ok": True}
-    try:
-        payload = await request.json()
-        if not isinstance(payload, dict) or "update_id" not in payload:
-            return {"ok": True}
-        db.table("honeypot_updates").insert({
-            "credential_id": credential_id,
-            "update_type": _classify_update(payload),
-            "payload": payload,
-            "received_at": datetime.now(timezone.utc).isoformat(),
-            "source_ip": request.client.host if request.client else None,
-        }).execute()
-    except Exception:
-        return {"ok": True}
-    return {"ok": True}
+# NOTE: Legacy path-secret endpoint (/receive/{secret}/{credential_id}) was
+# removed in the round-2 hardening pass. Any existing setWebhook registration
+# still using that path will fail auth silently (returns {ok: true} but
+# doesn't persist), and the operator must run flow.migrate_honeypot_webhooks
+# to reset those to the header-based scheme.
 
 
 @router.get("/status")
-async def honeypot_status():
-    """Report honeypot configuration state (no auth — helps diagnose deployment)."""
+async def honeypot_status(x_monitor_key: str | None = Header(None)):
+    """Report honeypot configuration state. Requires monitor API key so external
+    scanners can't fingerprint our deployment."""
+    if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
     return {
         "mode_enabled": settings.HONEYPOT_MODE,
         "receiver_url_configured": bool(settings.HONEYPOT_WEBHOOK_URL),

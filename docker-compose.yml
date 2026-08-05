@@ -10,7 +10,7 @@ services:
     container_name: theprawnhunter_redis
     restart: always
     init: true
-    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 1gb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 1gb --maxmemory-policy noeviction
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
@@ -246,7 +246,14 @@ services:
     restart: always
     init: true
     env_file: .env
-    command: celery -A app.workers.celery_app flower --port=5555 --basic_auth=${FLOWER_BASIC_AUTH:-admin:changeme}
+    command: >-
+      sh -c '
+      if [ -z "$$FLOWER_BASIC_AUTH" ] || [ "$$FLOWER_BASIC_AUTH" = "admin:changeme" ]; then
+        echo "REFUSING to start flower: FLOWER_BASIC_AUTH must be set to a non-default value in .env" >&2;
+        exit 1;
+      fi;
+      exec celery -A app.workers.flower_app flower --port=5555 --basic_auth="$$FLOWER_BASIC_AUTH"
+      '
     ports:
       - "127.0.0.1:${FLOWER_PORT:-8555}:5555"
     depends_on:

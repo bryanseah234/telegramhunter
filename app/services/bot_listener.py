@@ -146,9 +146,22 @@ def is_admin(update: Update) -> bool:
     if not user:
         return False
 
-    # 1. Check ID (Anonymous Admin)
+    # 1. Check ID (Anonymous Admin) — but ONLY when the message originated from
+    # the monitor group. Otherwise any Telegram admin using "send as group" in
+    # ANY chat where our bot is a member would inherit admin rights.
     if user.id == ANONYMOUS_ADMIN_ID:
-        return True
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        if chat_id and str(chat_id) == str(settings.MONITOR_GROUP_ID):
+            logger.info(
+                f"[is_admin] anonymous-admin from monitor group chat_id={chat_id} — allowed"
+            )
+            return True
+        logger.warning(
+            f"[is_admin] anonymous-admin id={user.id} outside monitor group "
+            f"(chat_id={chat_id}) — rejected"
+        )
+        return False
 
     whitelist = _get_whitelisted_usernames()
     # Only numeric entries count. Warn about any non-numeric (username) entries

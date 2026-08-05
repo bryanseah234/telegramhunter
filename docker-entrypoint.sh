@@ -33,17 +33,23 @@ fi
 # Execute the main command
 echo "🎯 [Entrypoint] Starting: $*"
 
-# For scrape/core workers: clear stale session leases left from previous container lifecycle.
-# Docker assigns new hostnames on each recreate, so old locked_by values are orphaned.
-# This is safe — if another container holds a genuine lease it will re-acquire within seconds.
+# For scrape/core workers: clear stale session leases whose lock has expired.
+# BEFORE round 2 this cleared ALL leases unconditionally — that broke live
+# sessions when 2+ workers restarted in parallel. Now we scope to leases
+# whose locked_until is in the past (or NULL — never acquired).
 if [[ "$*" == *"celery"* ]]; then
     python3 -c "
-import os, sys
+import os, sys, datetime
 sys.path.insert(0, '/app')
 try:
     from app.core.database import db
-    db.table('telegram_accounts').update({'locked_by': None, 'locked_until': None}).eq('status', 'active').execute()
-    print('🔓 [Entrypoint] Cleared stale session leases.')
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    # Only clear rows whose lock has expired. Active workers with locked_until
+    # in the future keep their lease.
+    db.table('telegram_accounts').update(
+        {'locked_by': None, 'locked_until': None}
+    ).eq('status', 'active').lt('locked_until', now_iso).execute()
+    print('🔓 [Entrypoint] Cleared expired session leases.')
 except Exception as e:
     print(f'⚠️ [Entrypoint] Could not clear leases: {e}')
 " 2>/dev/null || true

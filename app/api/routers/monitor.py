@@ -178,6 +178,17 @@ def search_messages(
     if not q or len(q.strip()) < 2:
         raise HTTPException(status_code=400, detail="query must be at least 2 chars")
 
+    # Whitelist: only allow alphanumeric + space + safe punctuation. This
+    # blocks PostgREST metacharacters that could smuggle extra .or_() clauses
+    # into the filter (e.g. ',is.null),content.eq.X('). Wildcards and quotes
+    # explicitly rejected.
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9 _.@\-]{2,80}", q.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="query must match [A-Za-z0-9 _.@-]{2,80} — no wildcards, punctuation, or spaces at limits",
+        )
+
     limit = min(max(limit, 1), 500)
     q_pattern = f"%{q.strip()}%"
 

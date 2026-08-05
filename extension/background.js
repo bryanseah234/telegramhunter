@@ -539,7 +539,7 @@ async function uploadToSupabase() {
     }
 
     const cfg = await new Promise((resolve) => {
-        chrome.storage.sync.get(["supabase_config"], (r) => resolve(r.supabase_config || {}));
+        chrome.storage.local.get(["supabase_config"], (r) => resolve(r.supabase_config || {}));
     });
 
     const apiUrl          = (cfg.apiUrl          || "").trim().replace(/\/+$/, "");

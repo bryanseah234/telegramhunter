@@ -10,14 +10,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const elTotal       = document.getElementById("count-total");
 
     // Load saved config
-    chrome.storage.sync.get(["supabase_config"], (result) => {
+    chrome.storage.local.get(["supabase_config"], (result) => {
         const cfg = result.supabase_config || {};
         if (cfg.apiUrl)     inputApiUrl.value = cfg.apiUrl;
         if (cfg.monitorKey) inputMonKey.value = cfg.monitorKey;
     });
 
     function saveConfig() {
-        chrome.storage.sync.set({
+        chrome.storage.local.set({
             supabase_config: {
                 apiUrl:     (inputApiUrl.value || "").trim(),
                 monitorKey: (inputMonKey.value || "").trim(),

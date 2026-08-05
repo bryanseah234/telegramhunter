@@ -155,6 +155,9 @@ class AuditLogger:
         Persist audit log to database (synchronous — run in a thread from async context).
         Writes to the audit_logs table for compliance tracking.
         Failures are logged but never raised — audit must not break the main flow.
+
+        Throttles the "audit_logs table missing" error to once per 5 minutes so
+        deployments that haven't applied init.sql don't flood stderr.
         """
         try:
             db.table("audit_logs").insert({
@@ -164,7 +167,21 @@ class AuditLogger:
                 "success":       audit_entry.get("success", True),
                 "details":       audit_entry.get("details", {}),
             }).execute()
+            # Reset throttle marker on success
+            AuditLogger._last_missing_table_log_ts = 0.0
         except Exception as e:
+            err = str(e)
+            if "audit_logs" in err and ("does not exist" in err or "42P01" in err):
+                # Table missing — throttle to once per 5 minutes
+                import time as _time
+                now = _time.time()
+                if now - getattr(AuditLogger, "_last_missing_table_log_ts", 0.0) > 300:
+                    logger.error(
+                        f"Audit DB persist failed — audit_logs table missing. "
+                        f"Run database/init.sql. Suppressing further occurrences for 5min."
+                    )
+                    AuditLogger._last_missing_table_log_ts = now
+                return
             logger.error(f"Audit DB persist failed for {audit_entry.get('event_type')}: {e}")
 
 
