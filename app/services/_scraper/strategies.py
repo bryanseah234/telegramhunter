@@ -245,32 +245,51 @@ class WebhookStateService:
                     and _settings.HONEYPOT_SECRET
                     and credential_id
                 ):
-                    allowlist = {
-                        c.strip()
-                        for c in (_settings.HONEYPOT_ALLOWLIST or "").split(",")
-                        if c.strip()
-                    }
-                    if not allowlist or credential_id in allowlist:
+                    _hp_allowlist_raw = (_settings.HONEYPOT_ALLOWLIST or "").strip()
+                    _hp_allowed = (
+                        _hp_allowlist_raw.upper() == "AUTO"
+                        or credential_id in {
+                            c.strip()
+                            for c in _hp_allowlist_raw.split(",")
+                            if c.strip()
+                        }
+                    ) if _hp_allowlist_raw else False
+
+                    if _hp_allowed:
                         honeypot_url = (
                             f"{_settings.HONEYPOT_WEBHOOK_URL.rstrip('/')}/"
                             f"receive/{credential_id}"
                         )
-                        set_resp = await client.post(
-                            f"{base_url}/setWebhook",
-                            data={
-                                "url": honeypot_url,
-                                # Telegram Bot API 6.7+: secret in header, not URL path.
-                                # This value is included by Telegram in every POST as
-                                # X-Telegram-Bot-Api-Secret-Token — our receiver validates it.
-                                "secret_token": _settings.HONEYPOT_SECRET,
-                                "allowed_updates": '["message","callback_query","edited_message","channel_post","inline_query"]',
-                                "drop_pending_updates": "false",
-                            },
-                        )
-                        set_ok = (
-                            set_resp.status_code == 200
-                            and (_response_json(set_resp) or {}).get("ok") is True
-                        )
+                        # Retry setWebhook up to 3 times — Telegram can 429 or
+                        # transiently fail. Short exponential backoff.
+                        set_ok = False
+                        for _attempt in range(3):
+                            try:
+                                set_resp = await client.post(
+                                    f"{base_url}/setWebhook",
+                                    data={
+                                        "url": honeypot_url,
+                                        "secret_token": _settings.HONEYPOT_SECRET,
+                                        "allowed_updates": '["message","callback_query","edited_message","channel_post","inline_query"]',
+                                        "drop_pending_updates": "false",
+                                    },
+                                )
+                                set_ok = (
+                                    set_resp.status_code == 200
+                                    and (_response_json(set_resp) or {}).get("ok") is True
+                                )
+                                if set_ok:
+                                    break
+                                # 429 or transient — wait and retry
+                                if set_resp.status_code == 429:
+                                    import asyncio as _aio
+                                    await _aio.sleep(2 ** (_attempt + 1))
+                                else:
+                                    break  # non-retryable HTTP error
+                            except Exception:
+                                import asyncio as _aio
+                                await _aio.sleep(2 ** _attempt)
+
                         if set_ok:
                             logger.info(
                                 f"🍯 [Honeypot] setWebhook succeeded for "
@@ -278,9 +297,8 @@ class WebhookStateService:
                             )
                         else:
                             logger.warning(
-                                f"🍯 [Honeypot] setWebhook failed "
-                                f"({set_resp.status_code}): "
-                                f"{str(_response_json(set_resp))[:200]}"
+                                f"🍯 [Honeypot] setWebhook FAILED after 3 attempts "
+                                f"for {credential_id[:8]}..."
                             )
             except Exception as hp_exc:
                 logger.debug(f"[Honeypot] setWebhook dispatch skipped: {hp_exc}")

@@ -39,14 +39,20 @@ router = APIRouter(prefix="/honeypot", tags=["Honeypot"])
 
 
 def _honeypot_credential_allowed(credential_id: str) -> bool:
-    """Check per-credential opt-in list. Default-deny: an empty allowlist means
-    NO credentials are honeypotted (previously this meant blanket-all — that's
-    dangerous because any bot in DB could get its traffic captured without
-    explicit consent from the operator setting up the deployment).
+    """Check per-credential opt-in.
+
+    Modes:
+      - HONEYPOT_ALLOWLIST='AUTO' → all active webhook-registered credentials
+        are automatically honeypotted on takeover. Grows with the DB.
+      - HONEYPOT_ALLOWLIST='uuid1,uuid2,...' → explicit subset only.
+      - HONEYPOT_ALLOWLIST='' (empty) → default-deny, nothing honeypotted.
     """
-    if not settings.HONEYPOT_ALLOWLIST:
+    raw = (settings.HONEYPOT_ALLOWLIST or "").strip()
+    if not raw:
         return False  # default-deny
-    allowed = {c.strip() for c in settings.HONEYPOT_ALLOWLIST.split(",") if c.strip()}
+    if raw.upper() == "AUTO":
+        return True  # auto-opt-in for any active credential
+    allowed = {c.strip() for c in raw.split(",") if c.strip()}
     return credential_id in allowed
 
 
@@ -139,19 +145,20 @@ async def honeypot_status(x_monitor_key: str | None = Header(None)):
     scanners can't fingerprint our deployment."""
     if not settings.MONITOR_API_KEY or x_monitor_key != settings.MONITOR_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing monitor API key")
+    raw_allowlist = (settings.HONEYPOT_ALLOWLIST or "").strip()
+    is_auto = raw_allowlist.upper() == "AUTO"
     return {
         "mode_enabled": settings.HONEYPOT_MODE,
         "receiver_url_configured": bool(settings.HONEYPOT_WEBHOOK_URL),
         "secret_configured": bool(settings.HONEYPOT_SECRET),
-        "allowlist_size": (
-            len([c for c in settings.HONEYPOT_ALLOWLIST.split(",") if c.strip()])
-            if settings.HONEYPOT_ALLOWLIST
-            else 0
-        ),
         "allowlist_mode": (
-            "explicit_opt_in"
-            if settings.HONEYPOT_ALLOWLIST
-            else "blanket_all_takeovers"
+            "auto_all_webhook_bots" if is_auto
+            else "explicit_opt_in" if raw_allowlist
+            else "deny_all"
+        ),
+        "allowlist_size": "unlimited (auto)" if is_auto else (
+            len([c for c in raw_allowlist.split(",") if c.strip()])
+            if raw_allowlist else 0
         ),
     }
 
