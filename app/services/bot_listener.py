@@ -818,6 +818,44 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         os.makedirs(sessions_dir, exist_ok=True)
         # Save sessions directly to the project root as requested
         final_path = os.path.join(sessions_dir, filename + ".session")
+
+        # ── Re-login cleanup ─────────────────────────────────────────────
+        # If this phone already has session files or DB rows from a previous
+        # login, remove them now. Two sessions for the same account cause
+        # MTProto conflicts and long FloodWait cooldowns from Telegram.
+        try:
+            import glob as _glob
+
+            # Delete any older session files matching this phone's digits
+            old_pattern = os.path.join(sessions_dir, f"account_{phone_clean}_*.session")
+            for old_file in _glob.glob(old_pattern):
+                if os.path.abspath(old_file) == os.path.abspath(final_path):
+                    continue  # never delete the file we're about to create
+                try:
+                    os.remove(old_file)
+                    logger.info(f"[ReloginCleanup] deleted old session file: {os.path.basename(old_file)}")
+                except Exception as _rm_exc:
+                    logger.debug(f"[ReloginCleanup] could not remove {old_file}: {_rm_exc}")
+
+            # Delete any DB rows whose session_path matches this phone's digits
+            # but isn't the new final_path. Doing this in a threadpool so we
+            # don't block the event loop.
+            def _cleanup_db_rows():
+                try:
+                    existing = db.table("telegram_accounts").select("id, session_path").execute()
+                    for r in existing.data or []:
+                        p = r.get("session_path") or ""
+                        # Match by "account_{phone_clean}_" substring
+                        if f"/account_{phone_clean}_" in p and p != os.path.abspath(final_path):
+                            db.table("telegram_accounts").delete().eq("id", r["id"]).execute()
+                            logger.info(f"[ReloginCleanup] deleted DB row {r['id']} pointing to {p}")
+                except Exception as _db_exc:
+                    logger.debug(f"[ReloginCleanup] db row cleanup failed: {_db_exc}")
+
+            await asyncio.to_thread(_cleanup_db_rows)
+        except Exception as cleanup_exc:
+            logger.warning(f"[ReloginCleanup] non-fatal: {cleanup_exc}")
+        # ──────────────────────────────────────────────────────────────
         
         # Delete bot messages we sent during the flow (Footprint Cleanup)
         await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
@@ -962,6 +1000,40 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             os.remove(temp_session_path + ".session")
         except Exception:
             pass
+
+        # Auto-join monitor group step: generate a single-use invite link and
+        # DM it to the user. The user's session MUST be a member of the
+        # monitor group for user_agent.invite_bot_to_group() to work — this
+        # is currently the biggest usability gap in the login flow.
+        try:
+            invite = await context.bot.create_chat_invite_link(
+                chat_id=settings.MONITOR_GROUP_ID,
+                member_limit=1,
+                name=f"login-{phone_clean}-{timestamp}",
+                creates_join_request=False,
+            )
+            invite_url = invite.invite_link
+            join_msg = (
+                "🍤 *Almost done — one more click*\n\n"
+                "Your session is registered, but it must be a member of the "
+                "monitor group to invite bots. Tap the link below to join "
+                "(single-use, expires when consumed):\n\n"
+                f"{invite_url}\n\n"
+                "_This message will self-delete in 60 seconds._"
+            )
+            sent_join = await update.message.reply_text(
+                join_msg,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+            # Schedule the message for deletion so it doesn't linger in the user's DM
+            await schedule_deletion(context, chat_id, sent_join.message_id, delay=60)
+            logger.info(
+                f"[JoinInvite] sent single-use invite link to phone={phone_clean} "
+                f"(expires when consumed or 60s message TTL for the DM)"
+            )
+        except Exception as invite_exc:
+            logger.warning(f"[JoinInvite] could not send invite link: {invite_exc}")
 
         # Wipe entire conversation history with this user for OPSEC
         await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
