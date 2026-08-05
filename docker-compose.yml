@@ -32,7 +32,7 @@ services:
     restart: always
     init: true
     ports:
-      - "${API_PORT:-8011}:8001"
+      - "127.0.0.1:${API_PORT:-8011}:8001"
     env_file: .env
     command: gunicorn app.api.main:app -k uvicorn.workers.UvicornWorker -w 4 --bind 0.0.0.0:8001 --timeout 120
     depends_on:
