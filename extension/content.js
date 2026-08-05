@@ -28,9 +28,10 @@ const RESULT_ROW_SELECTORS = [
     '[class*="host-item"]',
 ];
 
-// Token regex: 8-13 digit bot_id + colon + 35-char secret.
-// Aligned with backend validation. Matches both quoted and unquoted forms.
-const TOKEN_REGEX = /['"` ]?(\d{8,13}:[A-Za-z0-9_-]{35})['"` \n\r]?/g;
+// Token regex: 5-15 digit bot_id + colon + 20-50 char secret.
+// Broadened from 8-13:35 to catch edge cases (short bot IDs from early bots,
+// longer secrets from newer Telegram API versions).
+const TOKEN_REGEX = /['"` ]?(\d{5,15}:[A-Za-z0-9_-]{20,50})['"` \n\r]?/g;
 
 // --- STATE ---
 let isWorking  = false;

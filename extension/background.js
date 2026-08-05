@@ -58,7 +58,7 @@ chrome.storage.local.get(["activeTabId"], (r) => {
 chrome.storage.local.get(["activeTabId"], (r) => {
     if (!state.isRunning || state.isPaused) return;
     // Recreate watchdog alarm (idempotent — Chrome dedupes by name)
-    chrome.alarms.create("watchdog", { periodInMinutes: 2 });
+    chrome.alarms.create("watchdog", { periodInMinutes: 3 });
     // Check if scrape_page alarm is already pending; if not, fire next country
     chrome.alarms.get("scrape_page", (alarm) => {
         if (!alarm && r.activeTabId) {
@@ -214,7 +214,7 @@ async function startScan(userQuery, userDomain, userDomainMode) {
     activeTabId = tab.id;
     chrome.storage.local.set({ activeTabId: tab.id });
 
-    chrome.alarms.create("watchdog", { periodInMinutes: 2 });
+    chrome.alarms.create("watchdog", { periodInMinutes: 3 });
 
     broadcastState();
     processNextCountry();
@@ -581,23 +581,46 @@ async function uploadToSupabase() {
     if (monitorKey) headers["X-Monitor-Key"] = monitorKey;
 
     try {
-        const controller = new AbortController();
-        const timeout    = setTimeout(() => controller.abort(), 60000); // 60s — large payloads need time
-        const res = await fetch(`${apiUrl}/ingest/extension/credentials`, {
-            method:  "POST",
-            headers,
-            body:    JSON.stringify(payload),
-            signal:  controller.signal,
-        });
-        clearTimeout(timeout);
+        // Retry up to 3 times with exponential backoff (network hiccups, API restart)
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const controller = new AbortController();
+                const timeout    = setTimeout(() => controller.abort(), 60000);
+                const res = await fetch(`${apiUrl}/ingest/extension/credentials`, {
+                    method:  "POST",
+                    headers,
+                    body:    JSON.stringify(payload),
+                    signal:  controller.signal,
+                });
+                clearTimeout(timeout);
 
-        if (res.ok) {
-            const data   = await res.json().catch(() => ({}));
-            state.status = `✅ Uploaded: ${data.inserted || 0} new, ${data.updated || 0} updated, ${data.skipped || 0} skipped`;
-        } else {
-            const text   = await res.text().catch(() => "");
-            state.status = `❌ Upload failed (HTTP ${res.status}) — check API URL & monitor key`;
-            console.warn("Upload failed:", res.status, text);
+                if (res.ok) {
+                    const data   = await res.json().catch(() => ({}));
+                    state.status = `✅ Uploaded: ${data.inserted || 0} new, ${data.updated || 0} updated, ${data.skipped || 0} skipped`;
+                    lastErr = null;
+                    break;
+                } else if (res.status >= 500) {
+                    // Server error — retry
+                    lastErr = `HTTP ${res.status}`;
+                    await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+                    continue;
+                } else {
+                    // Client error (4xx) — don't retry
+                    const text   = await res.text().catch(() => "");
+                    state.status = `❌ Upload failed (HTTP ${res.status}) — check API URL & monitor key`;
+                    console.warn("Upload failed:", res.status, text);
+                    lastErr = null;
+                    break;
+                }
+            } catch (fetchErr) {
+                lastErr = fetchErr.message;
+                if (attempt < 2) await new Promise(r => setTimeout(r, 3000 * (attempt + 1)));
+            }
+        }
+        if (lastErr) {
+            state.status = `❌ Upload failed after 3 attempts: ${lastErr}`;
+            console.warn("Upload exhausted retries:", lastErr);
         }
     } catch (e) {
         state.status = `❌ Upload error: ${e.message}`;
