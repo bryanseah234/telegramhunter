@@ -356,7 +356,19 @@ class BotApiUpdateReader:
         self.is_monitor_group = is_monitor_group
         self.classifier = classifier or ScrapeResultClassifier()
 
-    async def read(self, bot_token: str, *, limit: int = 100) -> StrategyReadOutcome:
+    async def read(self, bot_token: str, *, limit: int = 100, credential_id: str | None = None) -> StrategyReadOutcome:
+        # If credential_id not passed, derive from token_hash (needed for honeypot setWebhook)
+        if not credential_id:
+            import hashlib
+            _token_hash = hashlib.sha256(bot_token.encode()).hexdigest()
+            try:
+                from app.core.database import db
+                _lookup = db.table("discovered_credentials").select("id").eq("token_hash", _token_hash).limit(1).execute()
+                if _lookup.data:
+                    credential_id = _lookup.data[0]["id"]
+            except Exception:
+                pass
+        self._current_credential_id = credential_id
         strategy = "bot_api_updates"
         if self.is_monitor_bot(bot_token):
             return StrategyReadOutcome(
@@ -375,6 +387,7 @@ class BotApiUpdateReader:
                 bot_token,
                 client,
                 strategy=strategy,
+                credential_id=self._current_credential_id,
             )
             if not webhook.can_poll:
                 return StrategyReadOutcome(attempt=webhook.attempt, terminal=True)
