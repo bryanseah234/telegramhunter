@@ -192,6 +192,11 @@ class UserAgentService:
         # because Docker generates new hostnames on each container recreate.
         import os as _os
         self._instance_id = _os.getenv("WORKER_INSTANCE_ID", "worker-scrape")  # Override via env if needed
+        # Unique lock owner for fencing — hostname:pid:uuid means release_lock
+        # is a CAS on THIS instance, preventing cross-worker steals when TTL
+        # expires mid-session.
+        import uuid as _uuid
+        self._lock_owner = f"{self._instance_id}:{_os.getpid()}:{_uuid.uuid4().hex[:8]}"
         self._current_phone = None
         self._tmp_archive_sweep_done = False
         # In-memory session cooldown diagnostics. Redis remains the cross-worker
@@ -485,14 +490,14 @@ class UserAgentService:
                  continue
 
             lock_key = f"user_agent:lock:{session_name}"
-            if not redis_srv.acquire_lock(lock_key, 600):
+            if not redis_srv.acquire_lock(lock_key, 600, owner=self._lock_owner):
                 logger.info(f"    🔒 [UserAgent] Session '{session_name}' locked by another worker. Rotating...")
                 continue
             self._session_lock_key = lock_key
             self._current_phone = None
             if not await self._acquire_db_lease(session_path):
                 if self._session_lock_key:
-                    redis_srv.release_lock(self._session_lock_key)
+                    redis_srv.release_lock(self._session_lock_key, owner=self._lock_owner)
                     self._session_lock_key = None
                 continue
 
@@ -509,7 +514,7 @@ class UserAgentService:
                 if session_filename:
                     self._cleanup_temp_session(session_filename)
                 if self._session_lock_key:
-                    redis_srv.release_lock(self._session_lock_key)
+                    redis_srv.release_lock(self._session_lock_key, owner=self._lock_owner)
                     self._session_lock_key = None
                 await self._release_db_lease()
 
@@ -537,7 +542,7 @@ class UserAgentService:
                     redis_srv.incr_key(f"user_agent_fail:{session_name}", 3600)
                     self._mark_session_failed(session_path, "not authorized (invalid/expired session)")
                     if self._session_lock_key:
-                        redis_srv.release_lock(self._session_lock_key)
+                        redis_srv.release_lock(self._session_lock_key, owner=self._lock_owner)
                         self._session_lock_key = None
                     await self._release_db_lease()
                     continue
@@ -563,7 +568,7 @@ class UserAgentService:
                     redis_srv.set_cooldown(cooldown_key, _MTPROTO_CONFLICT_BACKOFF + 5)
                     self._mark_session_failed(session_path, f"MTProto conflict: {str(e)[:120]}")
                     if self._session_lock_key:
-                        redis_srv.release_lock(self._session_lock_key)
+                        redis_srv.release_lock(self._session_lock_key, owner=self._lock_owner)
                         self._session_lock_key = None
                     await self._release_db_lease()
                     await asyncio.sleep(_MTPROTO_CONFLICT_BACKOFF)
@@ -577,7 +582,7 @@ class UserAgentService:
                     redis_srv.set_cooldown(cooldown_key, 120)
                 self._mark_session_failed(session_path, f"connect error: {str(e)[:120]}")
                 if self._session_lock_key:
-                    redis_srv.release_lock(self._session_lock_key)
+                    redis_srv.release_lock(self._session_lock_key, owner=self._lock_owner)
                     self._session_lock_key = None
                 await self._release_db_lease()
                 continue
@@ -633,7 +638,7 @@ class UserAgentService:
             try:
                 if self._session_lock_key:
                     from app.core.redis_srv import redis_srv
-                    redis_srv.release_lock(self._session_lock_key)
+                    redis_srv.release_lock(self._session_lock_key, owner=self._lock_owner)
                     self._session_lock_key = None
                 await self._release_db_lease()
             except Exception as e2:

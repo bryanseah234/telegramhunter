@@ -103,6 +103,8 @@ def on_task_failure(task_id, exception, traceback, einfo, args, kwargs, **extra)
     """
     Fires when a task exhausts all retries and is permanently failed.
     Logs to audit_logs so failures are visible without a dead-letter queue.
+    Routes through AuditLogger so the token-redaction pass runs on the
+    exception string (URLs like /bot<TOKEN>/sendMessage → /bot<REDACTED>/).
     Non-blocking: uses a fire-and-forget thread so the Celery signal handler
     never blocks the worker event loop.
     """
@@ -117,30 +119,30 @@ def on_task_failure(task_id, exception, traceback, einfo, args, kwargs, **extra)
         f"[DeadLetter] Task {task_name}[{task_id}] permanently failed: {exc_str}"
     )
 
-    # Persist to audit_logs asynchronously — don't block the Celery signal thread.
+    # Persist to audit_logs via AuditLogger (redaction pass applies)
     def _persist():
         try:
-            from app.core.database import db
-            import datetime
+            from app.core.audit import AuditLogger, AuditEvent
             loop = get_worker_loop()
-            async def _insert():
+
+            async def _log():
                 try:
                     await asyncio.to_thread(
-                        lambda: db.table("audit_logs").insert({
-                            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                            "event_type": "task_permanent_failure",
-                            "user_agent": "celery_worker",
-                            "success": False,
-                            "details": {
+                        lambda: AuditLogger.log(
+                            AuditEvent.TASK_FAILURE if hasattr(AuditEvent, "TASK_FAILURE")
+                            else "task_permanent_failure",
+                            details={
                                 "task_name": task_name,
                                 "task_id": task_id,
                                 "exception": exc_str,
                             },
-                        }).execute()
+                            user="celery_worker",
+                        )
                     )
                 except Exception as e:
-                    logger.warning(f"[DeadLetter] Could not persist failure to audit_logs: {e}")
-            loop.call_soon_threadsafe(lambda: loop.create_task(_insert()))
+                    logger.warning(f"[DeadLetter] AuditLogger persistence failed: {e}")
+
+            loop.call_soon_threadsafe(lambda: loop.create_task(_log()))
         except Exception as e:
             logger.warning(f"[DeadLetter] Could not persist failure to audit_logs: {e}")
 

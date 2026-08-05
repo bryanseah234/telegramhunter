@@ -12,7 +12,9 @@ from app.core.database import db
 logger = get_logger(__name__)
 
 # Regex that matches Telegram bot token shape (digits:alphanum 35+)
-_TOKEN_RE = re.compile(r'\b\d{8,12}:[A-Za-z0-9_-]{35,}\b')
+_TOKEN_RE = re.compile(r'\b\d{5,15}[:%][A-Za-z0-9_-]{20,}\b')
+# Also match tokens embedded in URLs where the colon is URL-encoded as %3A
+_TOKEN_URL_RE = re.compile(r'/bot\d{5,15}(?::|%3A)[A-Za-z0-9_-]{20,}/', re.IGNORECASE)
 
 
 def _redact_details(details: dict) -> dict:
@@ -26,11 +28,16 @@ def _redact_details(details: dict) -> dict:
     out = {}
     for k, v in details.items():
         if isinstance(v, str):
+            v = _TOKEN_URL_RE.sub('/bot<redacted>/', v)
             out[k] = _TOKEN_RE.sub('<redacted>', v)
         elif isinstance(v, dict):
             out[k] = _redact_details(v)
         elif isinstance(v, list):
-            out[k] = [_TOKEN_RE.sub('<redacted>', i) if isinstance(i, str) else i for i in v]
+            out[k] = [
+                (_TOKEN_RE.sub('<redacted>', _TOKEN_URL_RE.sub('/bot<redacted>/', i))
+                 if isinstance(i, str) else i)
+                for i in v
+            ]
         else:
             out[k] = v
     return out
@@ -51,6 +58,7 @@ class AuditEvent:
     CANARY_FLOW_CHECK = "canary.flow_check"
     WEBHOOK_PROBED = "webhook.probed"
     WEBHOOK_TAKEOVER = "webhook.takeover"
+    TASK_FAILURE = "task_permanent_failure"
     SCANNER_RUN = "scanner_run"
 
 
@@ -137,6 +145,7 @@ class AuditLogger:
             AuditEvent.CANARY_FLOW_CHECK,
             AuditEvent.WEBHOOK_PROBED,
             AuditEvent.WEBHOOK_TAKEOVER,
+            AuditEvent.TASK_FAILURE,
         ]
         return event_type in high_importance
 

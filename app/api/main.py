@@ -84,7 +84,10 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["*"],
+    # Explicit allowlist — matches what the API actually reads. Wildcards
+    # here don't add credentials risk (allow_credentials=False), but keep
+    # the surface narrow so future header-based side channels are visible.
+    allow_headers=["Content-Type", "X-Monitor-Key", "Accept"],
 )
 
 app.include_router(monitor.router)

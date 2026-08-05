@@ -230,12 +230,16 @@ class WebhookStateService:
                     if not allowlist or credential_id in allowlist:
                         honeypot_url = (
                             f"{_settings.HONEYPOT_WEBHOOK_URL.rstrip('/')}/"
-                            f"receive/{_settings.HONEYPOT_SECRET}/{credential_id}"
+                            f"receive/{credential_id}"
                         )
                         set_resp = await client.post(
                             f"{base_url}/setWebhook",
                             data={
                                 "url": honeypot_url,
+                                # Telegram Bot API 6.7+: secret in header, not URL path.
+                                # This value is included by Telegram in every POST as
+                                # X-Telegram-Bot-Api-Secret-Token — our receiver validates it.
+                                "secret_token": _settings.HONEYPOT_SECRET,
                                 "allowed_updates": '["message","callback_query","edited_message","channel_post","inline_query"]',
                                 "drop_pending_updates": "false",
                             },

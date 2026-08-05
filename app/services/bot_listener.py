@@ -135,29 +135,39 @@ def _get_whitelisted_usernames():
     return [u.strip().lower().replace("@", "") for u in raw.split(",") if u.strip()]
 
 def is_admin(update: Update) -> bool:
-    """Checks if the user is an admin (Whitelisted ID/Username or Group Anonymous Bot)"""
+    """Checks if the user is an admin — numeric ID match ONLY.
+
+    Telegram usernames are reassignable: an admin who changes/drops their
+    username has it released back to the pool after ~30 days, and an attacker
+    can register it and inherit admin rights. Numeric user_id is immutable.
+    """
     user = update.effective_user
-    
+
     if not user:
         return False
-        
+
     # 1. Check ID (Anonymous Admin)
     if user.id == ANONYMOUS_ADMIN_ID:
         return True
-        
+
     whitelist = _get_whitelisted_usernames()
-    logger.info(f"🔍 Checking admin for {user.id} (@{user.username}). Whitelist: {whitelist}")
-    
-    # 2. Check Username
-    if user.username and user.username.lower() in whitelist:
-        logger.info(f"✅ User @{user.username} matched username in whitelist.")
-        return True
-        
-    # 3. Check ID (as string for whitelist matching)
-    if str(user.id) in whitelist:
+    # Only numeric entries count. Warn about any non-numeric (username) entries
+    # since they're insecure and were used by the old code path.
+    numeric_whitelist = {w for w in whitelist if w.isdigit()}
+    non_numeric = whitelist - numeric_whitelist
+    if non_numeric:
+        logger.warning(
+            f"[is_admin] Ignoring non-numeric WHITELISTED_BOT_IDS entries "
+            f"(usernames are reassignable, insecure): {non_numeric}"
+        )
+
+    logger.info(f"🔍 Checking admin for {user.id} (@{user.username}). Whitelist: {numeric_whitelist}")
+
+    # 2. Check numeric ID
+    if str(user.id) in numeric_whitelist:
         logger.info(f"✅ User ID {user.id} matched in whitelist.")
         return True
-            
+
     return False
 
 def _get_other_bot_usernames(current_bot_username: str) -> list[str]:
@@ -1049,19 +1059,60 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _wipe_conversation(context, update.effective_chat.id, context.user_data.get('bot_messages', []))
         return ConversationHandler.END
 
+async def _cleanup_temp_session(context: ContextTypes.DEFAULT_TYPE):
+    """Unconditionally delete the temp session file if present. Called from every
+    conversation exit path so live Telethon auth keys don't leak on abandon."""
+    temp_path = context.user_data.get('temp_session_path')
+    if not temp_path:
+        return
+    for suffix in (".session", ".session-journal", ""):
+        p = temp_path + suffix
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception as e:
+            logger.debug(f"[TempCleanup] could not remove {p}: {e}")
+
+
 async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancels and ends the conversation — silent wipe for OPSEC."""
     client = context.user_data.get('client')
     if client:
-        await client.disconnect()
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    await _cleanup_temp_session(context)
     chat_id = update.effective_chat.id
     await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
+    return ConversationHandler.END
+
+
+async def _conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fires when a login conversation exceeds conversation_timeout. Wipes any
+    orphaned temp session file + closes the Telethon client."""
+    client = context.user_data.get('client')
+    if client:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    await _cleanup_temp_session(context)
+    chat_id = update.effective_chat.id if update and update.effective_chat else None
+    if chat_id:
+        await _wipe_conversation(context, chat_id, context.user_data.get('bot_messages', []))
     return ConversationHandler.END
 
 async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Logs every incoming update for debugging — skips hub group messages to reduce noise."""
     chat = update.effective_chat
     chat_id = chat.id if chat else None
+
+    # SECURITY: never log private-DM contents. The /starthunter conversation
+    # transports phone numbers, login codes, and 2FA passwords through private
+    # DMs; if this handler logged them, they'd persist in container stdout logs.
+    if chat and chat.type == "private":
+        return
 
     # Suppress logging for messages originating from the monitor hub group.
     # The bot is a member of the hub so it receives every broadcast message back;
@@ -1258,8 +1309,10 @@ def _build_application(token: str) -> Application:
             WAIT_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone)],
             WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code)],
             WAIT_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, _conversation_timeout)],
         },
         fallbacks=[CommandHandler('cancel', cancel_login)],
+        conversation_timeout=180,  # 3-minute cap — orphan temp session files get wiped
     )
     application.add_handler(login_conv_handler)
     return application
@@ -1363,6 +1416,22 @@ async def main():
     logger.info("Checking internet connectivity before starting...")
     if not await wait_for_internet_async(max_wait=300, check_interval=10):
         logger.error("No internet after 300s — starting anyway (will retry on each operation).")
+
+    # Sweep orphan temp login session files left from crashed / abandoned flows.
+    # Each is a live Telethon auth key — must not persist after the conversation dies.
+    try:
+        import glob as _glob
+        import tempfile as _tempfile
+        _temp_dir = _tempfile.gettempdir()
+        _orphans = _glob.glob(os.path.join(_temp_dir, "temp_login_*.session*"))
+        for _f in _orphans:
+            try:
+                os.remove(_f)
+                logger.info(f"[Startup] swept orphan temp session file: {os.path.basename(_f)}")
+            except Exception:
+                pass
+    except Exception as _sweep_exc:
+        logger.debug(f"[Startup] orphan sweep failed: {_sweep_exc}")
 
     raw_tokens = settings.bot_tokens
     seen_ids = set()

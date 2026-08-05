@@ -12,7 +12,7 @@ services:
     init: true
     command: redis-server --appendonly yes --appendfsync everysec --maxmemory 1gb --maxmemory-policy allkeys-lru
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -203,7 +203,7 @@ services:
     restart: always
     init: true
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
     logging:
       driver: "json-file"
       options:
@@ -246,9 +246,9 @@ services:
     restart: always
     init: true
     env_file: .env
-    command: celery -A app.workers.celery_app flower --port=5555
+    command: celery -A app.workers.celery_app flower --port=5555 --basic_auth=${FLOWER_BASIC_AUTH:-admin:changeme}
     ports:
-      - "${FLOWER_PORT:-8555}:5555"
+      - "127.0.0.1:${FLOWER_PORT:-8555}:5555"
     depends_on:
       redis:
         condition: service_healthy

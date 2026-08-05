@@ -39,39 +39,58 @@ router = APIRouter(prefix="/honeypot", tags=["Honeypot"])
 
 
 def _honeypot_credential_allowed(credential_id: str) -> bool:
-    """Check per-credential opt-in list. Empty list means opt-in ALL bots
-    that go through takeover (higher-risk mode)."""
+    """Check per-credential opt-in list. Default-deny: an empty allowlist means
+    NO credentials are honeypotted (previously this meant blanket-all — that's
+    dangerous because any bot in DB could get its traffic captured without
+    explicit consent from the operator setting up the deployment).
+    """
     if not settings.HONEYPOT_ALLOWLIST:
-        return True  # blanket mode
+        return False  # default-deny
     allowed = {c.strip() for c in settings.HONEYPOT_ALLOWLIST.split(",") if c.strip()}
     return credential_id in allowed
 
 
-@router.post("/receive/{secret}/{credential_id}")
-async def receive_webhook_update(secret: str, credential_id: str, request: Request):
+@router.post("/receive/{credential_id}")
+async def receive_webhook_update(credential_id: str, request: Request):
     """Receive a Telegram bot webhook POST.
 
-    Path components serve as authentication:
-    - secret matches HONEYPOT_SECRET (path-based auth, tolerates Telegram's
-      inability to send headers on webhooks)
-    - credential_id must be a valid discovered_credentials row and pass
-      the allowlist gate
+    Authentication: Telegram Bot API 6.7+ supports a `secret_token` header
+    (X-Telegram-Bot-Api-Secret-Token) set during setWebhook. This is preferred
+    over path-based secrets because setWebhook URLs can be read back by anyone
+    with the bot token via getWebhookInfo — leaking a path-embedded secret.
 
-    Response is always 200 OK because Telegram will retry non-2xx aggressively
-    and we don't want to encourage them to re-queue at the third-party endpoint.
+    Backwards-compat: still checks the path secret in the OLD format
+    (/receive/{secret}/{credential_id}) so existing registrations don't break.
+
+    Response is always 200 OK — Telegram retries non-2xx aggressively.
     """
     # Fail-closed if honeypot mode isn't enabled
     if not settings.HONEYPOT_MODE:
         raise HTTPException(status_code=404, detail="honeypot mode disabled")
 
-    if not settings.HONEYPOT_SECRET or secret != settings.HONEYPOT_SECRET:
-        # Return 200 to not leak auth failure to Telegram retries
-        logger.warning(f"[Honeypot] invalid secret in webhook path")
+    if not settings.HONEYPOT_SECRET:
+        logger.warning("[Honeypot] receiver called but no secret configured")
+        return {"ok": True}
+
+    # Prefer header-based secret (Telegram Bot API 6.7+)
+    hdr_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if hdr_secret != settings.HONEYPOT_SECRET:
+        logger.warning("[Honeypot] missing/wrong X-Telegram-Bot-Api-Secret-Token")
         return {"ok": True}
 
     if not _honeypot_credential_allowed(credential_id):
         logger.info(f"[Honeypot] credential {credential_id[:8]}... not allowlisted — dropping")
         return {"ok": True}
+
+    # Optional: verify credential exists and is active — declines payloads for
+    # revoked/inactive credentials so we don't accumulate garbage in DB.
+    try:
+        cred = db.table("discovered_credentials").select("id, status").eq("id", credential_id).limit(1).execute()
+        if not cred.data or (cred.data[0].get("status") not in ("active",)):
+            logger.info(f"[Honeypot] credential {credential_id[:8]}... not active — dropping")
+            return {"ok": True}
+    except Exception as e:
+        logger.debug(f"[Honeypot] active-check skipped: {e}")
 
     try:
         payload = await request.json()
@@ -79,8 +98,11 @@ async def receive_webhook_update(secret: str, credential_id: str, request: Reque
         logger.warning(f"[Honeypot] non-JSON body: {e}")
         return {"ok": True}
 
-    # Redact obvious PII from persisted payload — keep structure but strip
-    # user phone numbers and identifiable text where safe
+    # Structural sanity: Telegram webhook updates must be JSON objects with an update_id
+    if not isinstance(payload, dict) or "update_id" not in payload:
+        logger.warning("[Honeypot] payload missing update_id — dropping")
+        return {"ok": True}
+
     now = datetime.now(timezone.utc)
     try:
         db.table("honeypot_updates").insert(
@@ -101,6 +123,44 @@ async def receive_webhook_update(secret: str, credential_id: str, request: Reque
         f"type={_classify_update(payload)}"
     )
 
+    return {"ok": True}
+
+
+# Legacy path-based endpoint kept for backward compat with existing setWebhook
+# registrations. Emits a warning on every hit — operator should migrate to
+# the header-based route above.
+@router.post("/receive/{legacy_secret}/{credential_id}")
+async def receive_webhook_update_legacy(
+    legacy_secret: str, credential_id: str, request: Request
+):
+    if not settings.HONEYPOT_MODE:
+        raise HTTPException(status_code=404, detail="honeypot mode disabled")
+
+    if not settings.HONEYPOT_SECRET or legacy_secret != settings.HONEYPOT_SECRET:
+        return {"ok": True}
+
+    logger.warning(
+        "[Honeypot] LEGACY path-based-secret endpoint used — "
+        "migrate to header-based /receive/{credential_id} (X-Telegram-Bot-Api-Secret-Token)"
+    )
+    # Delegate to the header-checked handler by re-injecting the secret header
+    # Note: can't cleanly forward FastAPI Request objects; instead re-implement
+    # the safe minimum inline.
+    if not _honeypot_credential_allowed(credential_id):
+        return {"ok": True}
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict) or "update_id" not in payload:
+            return {"ok": True}
+        db.table("honeypot_updates").insert({
+            "credential_id": credential_id,
+            "update_type": _classify_update(payload),
+            "payload": payload,
+            "received_at": datetime.now(timezone.utc).isoformat(),
+            "source_ip": request.client.host if request.client else None,
+        }).execute()
+    except Exception:
+        return {"ok": True}
     return {"ok": True}
 
 

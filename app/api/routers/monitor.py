@@ -36,8 +36,9 @@ async def get_stats():
             messages_exfiltrated=total_msgs,
             messages_broadcasted=bc_msgs
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("monitor/stats query failed")
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 @router.get("/credentials", response_model=List[CredentialOut])
@@ -87,8 +88,9 @@ async def list_credentials(
         else:
             res = q.order(sort_expr, desc=desc).limit(limit).execute()
         return res.data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("monitor/credentials query failed")
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 @router.get("/messages", response_model=List[MessageOut])
@@ -98,8 +100,9 @@ async def list_messages(limit: int = 100):
     try:
         res = db.table("exfiltrated_messages").select("*").order("created_at", desc=True).limit(limit).execute()
         return res.data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("monitor/messages query failed")
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 @router.get("/webhooks")
@@ -149,8 +152,9 @@ async def list_captured_webhooks(limit: int = 200):
             if len(out) >= limit:
                 break
         return out
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("monitor/webhooks query failed")
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 @router.get("/search")
@@ -177,31 +181,32 @@ def search_messages(
     limit = min(max(limit, 1), 500)
     q_pattern = f"%{q.strip()}%"
 
-    # PostgREST syntax: content=ilike.*bitcoin*
-    query = (
-        db.table("exfiltrated_messages")
-        .select(
-            "id, credential_id, telegram_msg_id, sender_name, content, "
-            "media_type, is_broadcasted, created_at, broadcasted_at"
-        )
-        .or_(f"content.ilike.{q_pattern},sender_name.ilike.{q_pattern}")
-        .order("created_at", desc=True)
-        .limit(limit)
-    )
-
-    if media_only:
-        query = query.neq("media_type", "text")
-
-    if since_hours and since_hours > 0:
-        from datetime import datetime, timedelta, timezone
-
-        since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
-        query = query.gte("created_at", since)
-
     try:
+        # PostgREST syntax: content=ilike.*bitcoin*
+        query = (
+            db.table("exfiltrated_messages")
+            .select(
+                "id, credential_id, telegram_msg_id, sender_name, content, "
+                "media_type, is_broadcasted, created_at, broadcasted_at"
+            )
+            .or_(f"content.ilike.{q_pattern},sender_name.ilike.{q_pattern}")
+            .order("created_at", desc=True)
+            .limit(limit)
+        )
+
+        if media_only:
+            query = query.neq("media_type", "text")
+
+        if since_hours and since_hours > 0:
+            from datetime import datetime, timedelta, timezone
+
+            since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
+            query = query.gte("created_at", since)
+
         res = query.execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"query failed: {str(e)[:200]}")
+    except Exception:
+        logger.exception("monitor/search query failed")
+        raise HTTPException(status_code=500, detail="Internal error")
 
     matches = res.data or []
     return {
@@ -237,8 +242,9 @@ def get_c2_operators(limit: int = 20):
             .limit(2000)
             .execute()
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"query failed: {str(e)[:200]}")
+    except Exception:
+        logger.exception("monitor/operators query failed")
+        raise HTTPException(status_code=500, detail="Internal error")
 
     # Multi-dimensional clustering
     by_san: dict = defaultdict(list)
