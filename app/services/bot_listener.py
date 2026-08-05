@@ -1147,6 +1147,40 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
+    # SAFETY GUARD: if the user is ALREADY an admin/owner with broader rights,
+    # never touch them. This protects the 4 legacy owner accounts + any human
+    # you manually promoted with wider perms.
+    try:
+        current = await context.bot.get_chat_member(
+            chat_id=settings.MONITOR_GROUP_ID,
+            user_id=user.id,
+        )
+        current_status = getattr(current, "status", None)
+        if current_status in ("creator", "administrator"):
+            # Already has admin — preserve whatever perms they have
+            logger.info(
+                f"[MemberJoin] user {user.id} (@{user.username or '?'}) already "
+                f"has status={current_status} — leaving unchanged, marking "
+                f"account {account['id']} as promoted"
+            )
+            await asyncio.to_thread(
+                lambda: db.table("telegram_accounts")
+                    .update({
+                        "is_admin_promoted": True,
+                        "promoted_at": "now()",
+                        "in_monitor_group": True,
+                        "last_membership_check_at": "now()",
+                    })
+                    .eq("id", account["id"])
+                    .execute()
+            )
+            return
+    except Exception as e:
+        logger.debug(
+            f"[MemberJoin] get_chat_member check failed for {user.id}: {e} — "
+            f"proceeding with promotion attempt"
+        )
+
     # Promote with MINIMAL admin rights
     try:
         await context.bot.promote_chat_member(

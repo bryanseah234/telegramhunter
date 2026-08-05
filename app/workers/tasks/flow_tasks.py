@@ -3422,6 +3422,24 @@ async def _audit_user_agent_group_membership_logic() -> dict:
 
                     in_group += 1
 
+                    # SAFETY: never touch creator/administrator — preserves the 4 legacy owner
+                    # accounts and any human you manually promoted with wider rights.
+                    if member_status in ("creator", "administrator"):
+                        already_promoted += 1
+                        try:
+                            await async_execute(
+                                db.table("telegram_accounts")
+                                .update({
+                                    "is_admin_promoted": True,
+                                    "in_monitor_group": True,
+                                    "last_membership_check_at": datetime.now(timezone.utc).isoformat(),
+                                })
+                                .eq("id", acct["id"])
+                            )
+                        except Exception:
+                            pass
+                        continue
+
                     # If in group but not promoted, promote now
                     if member_status == "member" and not acct.get("is_admin_promoted"):
                         promote_resp = await client.post(
