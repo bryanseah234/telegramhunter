@@ -425,6 +425,7 @@ class BotApiUpdateReader:
                     "sender_name": sender.get("username")
                     or sender.get("first_name")
                     or "Unknown",
+                    "sender_user_id": sender.get("id"),
                     "content": target.get("text") or target.get("caption") or "",
                     "media_type": media_type,
                     "file_meta": file_meta,

@@ -298,6 +298,11 @@ app.conf.update(
             "task": "flow.source_quality_report",
             "schedule": crontab(minute=30, hour=7, day_of_week=1),
         },
+        # Attribution graph — weekly on Tuesdays @ 08:00 UTC
+        "attribution-graph-weekly": {
+            "task": "flow.attribution_graph_report",
+            "schedule": crontab(minute=0, hour=8, day_of_week=2),
+        },
         # C2 operator clusters — daily @ 08:00 UTC. Ranks hosted-service
         # tenants (railway/onrender/etc), Shodan orgs, and hostname operators.
         "cluster-c2-operators-daily": {

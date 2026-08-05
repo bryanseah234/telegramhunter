@@ -475,6 +475,7 @@ class ScraperService:
                             {
                                 "telegram_msg_id": message.id,
                                 "sender_name": sender_name,
+                                "sender_user_id": getattr(message.sender, "id", None) if message.sender else None,
                                 "content": content,
                                 "media_type": media_type,
                                 "file_meta": file_meta,

@@ -3527,6 +3527,135 @@ async def _audit_user_agent_group_membership_logic() -> dict:
     }
 
 
+@app.task(name="flow.attribution_graph_report")
+def attribution_graph_report():
+    """Link Telegram user_ids across multiple compromised bots.
+
+    Identifies serial victims (same person interacting with many stolen bots)
+    and coordinated operator patterns (single user_id driving traffic into a
+    cluster of bots owned by the same C2). Broadcasts top findings.
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_attribution_graph_report_logic())
+
+
+async def _attribution_graph_report_logic() -> dict:
+    from collections import defaultdict
+
+    # Pull sender_user_id → credential_id pairs (all-time, bounded to recent 50k rows)
+    try:
+        res = await async_execute(
+            db.table("exfiltrated_messages")
+            .select("sender_user_id, credential_id")
+            .not_.is_("sender_user_id", "null")
+            .order("created_at", desc=True)
+            .limit(50000)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    rows = res.data or []
+    if not rows:
+        return {"status": "no_data_with_sender_user_id"}
+
+    # Group: user_id → set of credential_ids they've interacted with
+    user_bots: dict = defaultdict(set)
+    for r in rows:
+        uid = r.get("sender_user_id")
+        cid = r.get("credential_id")
+        if uid and cid:
+            user_bots[uid].add(cid)
+
+    # Filter to users who've hit 2+ different bots
+    multi_bot_users = {
+        uid: creds for uid, creds in user_bots.items() if len(creds) >= 2
+    }
+
+    if not multi_bot_users:
+        msg = (
+            "🕸️ **Attribution Graph Report**\n\n"
+            f"Analyzed {len(rows):,} messages from {len(user_bots):,} unique users.\n"
+            "No users found interacting with 2+ captured bots yet. "
+            "Graph will populate as new sender_user_id data flows in."
+        )
+        try:
+            await get_broadcaster().send_log(msg)
+        except Exception:
+            pass
+        return {
+            "status": "no_multi_bot_users",
+            "total_messages_scanned": len(rows),
+            "unique_users": len(user_bots),
+        }
+
+    # Rank by number of distinct bots
+    ranked = sorted(multi_bot_users.items(), key=lambda x: len(x[1]), reverse=True)
+
+    # Also correlate with C2 operator info
+    cred_ids_of_interest = set()
+    for _uid, creds in ranked[:20]:
+        cred_ids_of_interest.update(creds)
+
+    # Fetch webhook_url for those credentials
+    cred_c2: dict = {}
+    if cred_ids_of_interest:
+        try:
+            cred_res = await async_execute(
+                db.table("discovered_credentials")
+                .select("id, bot_username, meta")
+                .in_("id", list(cred_ids_of_interest)[:200])
+            )
+            for c in cred_res.data or []:
+                meta = c.get("meta") or {}
+                cred_c2[c["id"]] = {
+                    "bot": c.get("bot_username") or "?",
+                    "c2": meta.get("webhook_url") or "none",
+                }
+        except Exception:
+            pass
+
+    lines = [
+        "🕸️ **Attribution Graph Report**",
+        "",
+        f"Analyzed {len(rows):,} messages from {len(user_bots):,} unique users.",
+        f"**{len(multi_bot_users)} users** interact with 2+ captured bots (serial victims or operators).",
+        "",
+        "**Top cross-bot users:**",
+    ]
+    for uid, creds in ranked[:10]:
+        bot_names = [cred_c2.get(c, {}).get("bot", c[:8]) for c in list(creds)[:5]]
+        c2_hosts = set()
+        for c in creds:
+            url = cred_c2.get(c, {}).get("c2", "")
+            if url and url != "none":
+                try:
+                    from urllib.parse import urlparse
+                    c2_hosts.add(urlparse(url).hostname or "?")
+                except Exception:
+                    pass
+        c2_str = f" → C2: {', '.join(list(c2_hosts)[:3])}" if c2_hosts else ""
+        lines.append(
+            f"• `user:{uid}` × {len(creds)} bots "
+            f"({', '.join(bot_names[:3])}{'...' if len(bot_names) > 3 else ''})"
+            f"{c2_str}"
+        )
+
+    msg = "\n".join(lines)[:3900]
+    try:
+        await get_broadcaster().send_log(msg)
+    except Exception as e:
+        return {"status": "broadcast_failed", "error": str(e)[:200]}
+
+    return {
+        "status": "ok",
+        "total_messages_scanned": len(rows),
+        "unique_users": len(user_bots),
+        "multi_bot_users": len(multi_bot_users),
+        "top_user_bots_count": len(ranked[0][1]) if ranked else 0,
+    }
+
+
 @app.task(name="flow.system_help")
 def system_help():
     """Periodic guide on how to use system commands."""
