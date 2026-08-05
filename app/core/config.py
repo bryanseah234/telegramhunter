@@ -17,6 +17,10 @@ class Settings(BaseSettings):
 
     # Security
     ENCRYPTION_KEY: str  # Fernet Key
+    # Optional comma-separated list of PREVIOUS Fernet keys, used only to
+    # decrypt ciphertext that predates the current ENCRYPTION_KEY. See
+    # app/core/security.py for rotation runbook.
+    ENCRYPTION_KEY_LEGACY: str = ""
     MONITOR_API_KEY: str  # Required — protects /monitor and /health/detailed endpoints
 
     # Telegram Monitoring (The Bot(s) WE control - supports multi-bot rotation)
