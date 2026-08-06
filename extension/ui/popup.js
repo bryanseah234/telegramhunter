@@ -9,11 +9,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const inputMonKey   = document.getElementById("input-monitor-key");
     const elTotal       = document.getElementById("count-total");
 
-    // Load saved config
+    // Load saved config — pre-fill with public tunnel URL if empty
     chrome.storage.local.get(["supabase_config"], (result) => {
         const cfg = result.supabase_config || {};
-        if (cfg.apiUrl)     inputApiUrl.value = cfg.apiUrl;
+        // Default API URL: public Cloudflare tunnel endpoint (friends can use without setup)
+        inputApiUrl.value = cfg.apiUrl || "https://winnethepooh.hong-yi.me";
         if (cfg.monitorKey) inputMonKey.value = cfg.monitorKey;
+        // Auto-save defaults on first load
+        if (!cfg.apiUrl) saveConfig();
     });
 
     function saveConfig() {
