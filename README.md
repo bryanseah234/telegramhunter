@@ -502,3 +502,166 @@ Notes:
 See [LICENSE](LICENSE).
 
 <!-- repo renamed to theprawnhunter on 2026-08-04 -->
+
+
+---
+
+## Advanced Features (added 2026-08-03 → 2026-08-06)
+
+### Webhook Recon + Takeover Pipeline
+
+The system passively fingerprints third-party webhooks registered on captured bots:
+
+```bash
+# View captured webhook URLs + probe results (TLS, Shodan, web recon)
+curl -H "X-Monitor-Key: <key>" http://localhost:8011/monitor/webhooks
+
+# View C2 operator clusters (who controls the most bots)
+curl -H "X-Monitor-Key: <key>" http://localhost:8011/monitor/operators
+
+# Force immediate takeover of all webhook-registered bots
+docker exec theprawnhunter_worker-core celery -A app.workers.celery_app call flow.force_webhook_takeover_pass
+```
+
+When `TELEGRAM_DELETE_WEBHOOK_FOR_SCRAPE=True`, the system:
+1. Detects third-party webhooks via `getWebhookInfo`
+2. Deletes them via `deleteWebhook`
+3. Registers our honeypot webhook (if `HONEYPOT_MODE=True`)
+4. Polls via `getUpdates` for any queued messages
+
+### Honeypot Mode (Push Receiver)
+
+After takeover, optionally registers OUR webhook so Telegram pushes messages to us in real-time.
+
+**Requirements:**
+- Public HTTPS endpoint (Cloudflare Tunnel recommended — free, no port forwarding)
+- `HONEYPOT_MODE=True`
+- `HONEYPOT_WEBHOOK_URL=https://your-public-domain/honeypot`
+- `HONEYPOT_SECRET=<random 32+ char string>`
+- `HONEYPOT_ALLOWLIST=AUTO` (all bots) or comma-separated UUIDs
+
+**Setup with Cloudflare Tunnel:**
+```powershell
+# One-time: authenticate with Cloudflare
+cloudflared tunnel login
+
+# Create tunnel + route DNS (use scripts/setup_cloudflare_tunnel.ps1 for full automation)
+cloudflared tunnel create prawnhunter
+cloudflared tunnel route dns prawnhunter your-subdomain.your-domain.com
+
+# Run tunnel (or install as Windows service)
+cloudflared tunnel run prawnhunter
+```
+
+**Endpoints:**
+- `POST /honeypot/receive/{credential_id}` — Telegram webhook receiver (auth via `X-Telegram-Bot-Api-Secret-Token` header)
+- `GET /honeypot/status` — configuration state (requires monitor key)
+
+**Captured data stored in `honeypot_updates` table** — full Telegram update JSON including sender user_id, message text, media file_ids.
+
+### Honeypot Redirect Injection
+
+When the honeypot captures a user's message, automatically replies FROM the captured bot directing them to your onboard bot:
+
+```env
+HONEYPOT_REDIRECT_MODE=True
+HONEYPOT_REDIRECT_BOT=bryanseahbot
+HONEYPOT_REDIRECT_DEEPLINK=migrate
+```
+
+The message sent:
+```
+⚠️ This service has been migrated.
+Your request could not be processed here.
+To continue, use the updated channel:
+👉 https://t.me/bryanseahbot?start=migrate
+This is an automated notification.
+```
+
+Per-user dedup (permanent Redis key) ensures each user only receives the redirect once per bot.
+
+### Cloudflare WAF Rules
+
+When exposing the API via Cloudflare Tunnel, 4 WAF rules protect the endpoint:
+
+1. **Block bot scanners** — nmap, masscan, nuclei, gobuster, sqlmap, empty UA
+2. **Challenge suspicious paths** — `../`, `/admin`, `/wp-*`, `/.env`, `/.git`, `/phpmyadmin`
+3. **Honeypot IP restriction** — only Telegram's IP ranges (149.154.160.0/20, 91.108.x.0/22) can POST to `/honeypot/receive`
+4. **Block all non-allowed traffic** — only honeypot POSTs, monitor-key requests, root + health GETs pass
+
+### Attribution Graph
+
+Links Telegram user_ids across multiple captured bots to identify serial victims:
+
+```bash
+# Manual trigger
+docker exec theprawnhunter_worker-core celery -A app.workers.celery_app call flow.attribution_graph_report
+```
+
+Runs weekly (Tuesday 08:00 UTC). Requires `sender_user_id` column (populated from new scrapes).
+
+### Full-Text Search
+
+```bash
+# Search across 283k+ exfiltrated messages (pg_trgm indexed)
+curl -H "X-Monitor-Key: <key>" "http://localhost:8011/monitor/search?q=bitcoin&limit=50"
+```
+
+Supports `media_only=true` and `since_hours=24` filters.
+
+### Media Forensics
+
+Automatically SHA-256 + perceptual-hashes photos from exfiltrated messages to detect the same image being sent across multiple compromised bots (common operator fingerprint).
+
+```bash
+# Manual trigger
+docker exec theprawnhunter_worker-core celery -A app.workers.celery_app call flow.hash_exfil_media
+docker exec theprawnhunter_worker-core celery -A app.workers.celery_app call flow.media_duplicate_report
+```
+
+### FOFA Extension Automation
+
+The Chrome extension scrapes FOFA for exposed Telegram bot tokens. To run autonomously:
+
+1. Open Chrome with the CDP debug profile:
+   ```powershell
+   Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" -ArgumentList "--remote-debugging-port=9222","--no-first-run","--user-data-dir=$env:TEMP\chrome_fofa_puppeteer","https://en.fofa.info/"
+   ```
+
+2. Load the extension via `chrome://extensions` → "Load unpacked" → `extension/` folder
+
+3. Log into FOFA in that Chrome window (one-time)
+
+4. Trigger scan via CDP:
+   ```powershell
+   # The content script bridges postMessage to the background service worker
+   # Use any CDP tool to evaluate on the FOFA page:
+   window.postMessage({type:'TH_START_SCAN', query:'body="api.telegram.org/bot"', domain:'en.fofa.info', mode:'both'}, '*')
+   ```
+
+The scan runs through 49 countries × 2 domains, auto-uploads every 10 countries.
+
+### Fernet Key Rotation
+
+```bash
+# 1. Generate new key
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# 2. Move current ENCRYPTION_KEY to ENCRYPTION_KEY_LEGACY in .env
+# 3. Set ENCRYPTION_KEY to the new key
+# 4. Restart workers
+# 5. Run rotation script
+docker exec theprawnhunter_worker-core python scripts/rotate_credentials.py --batch-size 100
+```
+
+### Security Hardening
+
+All ports bound to `127.0.0.1` (Redis, Frontend, Flower, API). External access only via Cloudflare Tunnel.
+
+- **Flower dashboard**: requires `FLOWER_BASIC_AUTH` (refuses to start with default)
+- **Rate limiting**: slowapi 120 req/min per key (Redis-backed, cross-worker)
+- **Bot admin gate**: `/starthunter` requires `ALLOW_PUBLIC_STARTHUNTER=True` or whitelisted admin
+- **Token redaction**: MultiFernet + broadened regex catches tokens in logs/audit
+- **Session management**: re-login auto-cleans old files, membership audit every 30min
+
+<!-- repo renamed to theprawnhunter on 2026-08-04 -->
