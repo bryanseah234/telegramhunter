@@ -2,7 +2,7 @@ name: Supabase Keep Alive
 
 on:
   schedule:
-    - cron: "0 8 */3 * *" # Every 3 days at 08:00 UTC — within 7-day pause window
+    - cron: "0 8 * * *" # Every day at 08:00 UTC — within 7-day pause window
   workflow_dispatch:
 
 jobs:
