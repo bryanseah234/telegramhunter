@@ -630,3 +630,10 @@ async function uploadToSupabase() {
     saveState();
     broadcastState();
 }
+
+// Expose for CDP automation (scripts/run_fofa_scan.mjs)
+globalThis.startScan = startScan;
+globalThis.stopScan = stopScan;
+globalThis.resumeScan = resumeScan;
+globalThis.state = state;
+

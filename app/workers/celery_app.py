@@ -303,6 +303,12 @@ app.conf.update(
             "task": "flow.attribution_graph_report",
             "schedule": crontab(minute=0, hour=8, day_of_week=2),
         },
+        # Honeypot redirect sweep — sends redirect messages to captured users.
+        # Every 30 seconds for real-time response to honeypot captures.
+        "honeypot-redirect-sweep-30s": {
+            "task": "flow.honeypot_redirect_sweep",
+            "schedule": 30.0,
+        },
         # C2 operator clusters — daily @ 08:00 UTC. Ranks hosted-service
         # tenants (railway/onrender/etc), Shodan orgs, and hostname operators.
         "cluster-c2-operators-daily": {
