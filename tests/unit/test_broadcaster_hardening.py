@@ -22,6 +22,10 @@ def _settings(bot_tokens=None, auto_archive=False):
     return SimpleNamespace(
         bot_tokens=bot_tokens or ["123:ABC"],
         AUTO_ARCHIVE_MEDIA=auto_archive,
+        MONITOR_GROUP_ID=-100123,
+        REDIS_URL="redis://localhost:6379/0",
+        TELEGRAM_LOG_MIN_INTERVAL_SECONDS=2.0,
+        TELEGRAM_LOG_FAILURE_WARN_INTERVAL_SECONDS=60,
     )
 
 
@@ -232,3 +236,20 @@ def test_broadcast_exception_classifier_maps_timeout_and_topic_missing():
     assert timeout.retryable is True
     assert topic.reason == "topic_missing"
     assert topic.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_send_log_respects_rate_limit(monkeypatch):
+    from app.services import broadcaster_srv
+
+    monkeypatch.setattr(broadcaster_srv, "settings", _settings(bot_tokens=["123:ABC"]))
+    service = broadcaster_srv.BroadcasterService()
+    fake_bot = _FakeBot()
+
+    monkeypatch.setattr(service, "_acquire_system_log_slot", lambda: False)
+    monkeypatch.setattr(service, "_get_bot_instance", lambda _token: fake_bot)
+
+    sent = await service.send_log("suppressed")
+
+    assert sent is False
+    assert fake_bot.calls == []

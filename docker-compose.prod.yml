@@ -1,0 +1,45 @@
+name: theprawnhunter
+
+services:
+  api:
+    environment:
+      - ENV=production
+      - DEBUG=False
+    command: >-
+      gunicorn app.api.main:app
+      -k uvicorn.workers.UvicornWorker
+      -w ${API_WORKERS:-4}
+      --bind 0.0.0.0:8001
+      --timeout ${API_GUNICORN_TIMEOUT:-120}
+
+  worker-core:
+    command: >-
+      celery -A app.workers.celery_app worker
+      -Q celery
+      --loglevel=${CELERY_LOG_LEVEL:-info}
+      --concurrency=${WORKER_CORE_CONCURRENCY:-8}
+
+  worker-scanners:
+    command: >-
+      celery -A app.workers.celery_app worker
+      -Q scanners
+      --loglevel=${CELERY_LOG_LEVEL:-info}
+      --concurrency=${WORKER_SCANNERS_CONCURRENCY:-8}
+
+  worker-scrape:
+    command: >-
+      celery -A app.workers.celery_app worker
+      -Q scrape
+      --loglevel=${CELERY_LOG_LEVEL:-info}
+      --concurrency=${WORKER_SCRAPE_CONCURRENCY:-6}
+
+  worker-validators:
+    command: >-
+      celery -A app.workers.celery_app worker
+      -Q validation
+      --loglevel=${CELERY_LOG_LEVEL:-info}
+      --concurrency=${WORKER_VALIDATORS_CONCURRENCY:-16}
+
+  frontend:
+    environment:
+      - NODE_ENV=production

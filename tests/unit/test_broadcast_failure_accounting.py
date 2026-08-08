@@ -22,6 +22,14 @@ class _FakeQuery:
         self.filters.append((key, value))
         return self
 
+    @property
+    def not_(self):
+        return self
+
+    def is_(self, key, value):
+        self.filters.append((f"is:{key}", value))
+        return self
+
     def or_(self, condition):
         self.used_or = True
         self.filters.append(("or", condition))
@@ -126,3 +134,65 @@ async def test_fetch_pending_broadcasts_falls_back_when_next_retry_missing(monke
     assert calls[0].used_or is True
     assert calls[1].used_or is False
     assert flow_tasks._BROADCAST_RELIABILITY_COLUMNS_AVAILABLE is False
+
+
+def test_broadcast_retry_delay_has_cap_and_jitter(monkeypatch):
+    from app.workers.tasks import flow_tasks
+
+    monkeypatch.setenv("BROADCAST_RETRY_MAX_DELAY_SECONDS", "600")
+    monkeypatch.setenv("BROADCAST_RETRY_JITTER_RATIO", "0.10")
+    monkeypatch.setattr(flow_tasks.random, "randint", lambda _low, high: high)
+
+    delay = flow_tasks._broadcast_retry_delay_seconds(
+        "flood_wait",
+        retryable=True,
+        retry_after_seconds=None,
+    )
+
+    assert delay == 660
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_broadcasts_clears_delay_and_dispatches(monkeypatch):
+    from app.workers.tasks import flow_tasks
+
+    fake_db = _FakeDb()
+    payloads = []
+    dispatched = []
+    audit_events = []
+
+    async def fake_async_execute(query):
+        if query.payload is None:
+            return SimpleNamespace(
+                data=[
+                    {
+                        "id": "msg-1",
+                        "credential_id": "cred-1",
+                        "broadcast_error": {"reason": "timeout"},
+                    }
+                ]
+            )
+        payloads.append(query.payload)
+        return SimpleNamespace(data=[query.payload])
+
+    monkeypatch.setattr(flow_tasks, "db", fake_db)
+    monkeypatch.setattr(flow_tasks, "async_execute", fake_async_execute)
+    monkeypatch.setattr(
+        flow_tasks,
+        "app",
+        SimpleNamespace(send_task=lambda name: dispatched.append(name)),
+    )
+    monkeypatch.setattr(
+        flow_tasks.AuditLogger,
+        "log",
+        lambda *args, **kwargs: audit_events.append((args, kwargs)),
+    )
+
+    result = await flow_tasks._retry_failed_broadcasts_logic(limit=10)
+
+    assert result["status"] == "ok"
+    assert payloads == [{"broadcast_claimed_at": None, "next_retry_at": None}]
+    assert dispatched == ["flow.broadcast_pending"]
+    assert audit_events[0][0][0] == flow_tasks.AuditEvent.BROADCAST_RETRY_REQUESTED
+    assert audit_events[0][1]["user"] == "celery_worker"
+    assert audit_events[0][1]["details"]["message_ids"] == ["msg-1"]

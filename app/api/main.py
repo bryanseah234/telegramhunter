@@ -6,6 +6,7 @@ from app.api.routers import monitor, scan, ingest
 import logging
 import sys
 import asyncio
+import threading
 
 # ==============================================
 # LOGGING CONFIGURATION
@@ -25,36 +26,67 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+async def _send_lifecycle_notification(message: str, label: str, timeout: float) -> None:
+    try:
+        from app.services.broadcaster_srv import BroadcasterService
+
+        broadcaster = BroadcasterService()
+        sent = await asyncio.wait_for(broadcaster.send_log(message), timeout=timeout)
+        if sent:
+            logger.info("%s notification sent to Telegram", label)
+        else:
+            logger.info("%s notification skipped by Telegram log policy", label)
+    except asyncio.TimeoutError:
+        logger.warning("%s notification timed out (Telegram slow)", label)
+    except Exception as e:
+        logger.warning("%s notification failed: %s", label, e)
+
+
+def _schedule_lifecycle_notification(
+    app: FastAPI,
+    message: str,
+    label: str,
+    timeout: float,
+) -> threading.Thread:
+    threads = getattr(app.state, "lifecycle_notification_threads", None)
+    if threads is None:
+        threads = []
+        app.state.lifecycle_notification_threads = threads
+
+    def _run() -> None:
+        asyncio.run(_send_lifecycle_notification(message, label, timeout))
+
+    thread = threading.Thread(
+        target=_run,
+        name=f"api-{label.lower()}-notification",
+        daemon=True,
+    )
+    threads.append(thread)
+    thread.start()
+    return thread
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────
     logger.info("🚀 API starting up...")
-    try:
-        from app.services.broadcaster_srv import BroadcasterService
-        broadcaster = BroadcasterService()
-        await asyncio.wait_for(
-            broadcaster.send_log(f"🟢 **API Service** Started ({settings.ENV})"),
-            timeout=5.0
-        )
-        logger.info("✅ Startup notification sent to Telegram")
-    except asyncio.TimeoutError:
-        logger.warning("⚠️ Startup notification timed out (Telegram slow)")
-    except Exception as e:
-        logger.warning(f"⚠️ Startup notification failed: {e}")
+    _schedule_lifecycle_notification(
+        app,
+        f"🟢 **API Service** Started ({settings.ENV})",
+        "Startup",
+        timeout=5.0,
+    )
 
     yield  # ── Application runs ──────────────
 
     # ── Shutdown ─────────────────────────────
     logger.info("🛑 API shutting down...")
-    try:
-        from app.services.broadcaster_srv import BroadcasterService
-        broadcaster = BroadcasterService()
-        await asyncio.wait_for(
-            broadcaster.send_log("🔴 **API Service** Stopping..."),
-            timeout=3.0
-        )
-    except Exception:
-        pass
+    _schedule_lifecycle_notification(
+        app,
+        "🔴 **API Service** Stopping...",
+        "Shutdown",
+        timeout=3.0,
+    )
 
 
 app = FastAPI(

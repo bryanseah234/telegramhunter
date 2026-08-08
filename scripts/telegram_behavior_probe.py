@@ -22,6 +22,58 @@ from typing import Any
 import httpx
 
 
+DEFAULT_MATRIX_CASES = [
+    {
+        "name": "bot_in_group",
+        "bot_token_env": "TELEGRAM_PROBE_BOT_IN_GROUP_TOKEN",
+        "chat_id_env": "TELEGRAM_PROBE_BOT_IN_GROUP_CHAT_ID",
+        "expect_chat_access": True,
+    },
+    {
+        "name": "bot_not_in_group",
+        "bot_token_env": "TELEGRAM_PROBE_BOT_NOT_IN_GROUP_TOKEN",
+        "chat_id_env": "TELEGRAM_PROBE_BOT_NOT_IN_GROUP_CHAT_ID",
+        "expect_chat_access": False,
+    },
+    {
+        "name": "channel_or_supergroup",
+        "bot_token_env": "TELEGRAM_PROBE_CHANNEL_TOKEN",
+        "chat_id_env": "TELEGRAM_PROBE_CHANNEL_CHAT_ID",
+        "expect_chat_type": ["channel", "supergroup"],
+    },
+    {
+        "name": "webhook_enabled",
+        "bot_token_env": "TELEGRAM_PROBE_WEBHOOK_ENABLED_TOKEN",
+        "chat_id_env": "TELEGRAM_PROBE_WEBHOOK_ENABLED_CHAT_ID",
+        "expect_webhook_present": True,
+    },
+    {
+        "name": "webhook_disabled",
+        "bot_token_env": "TELEGRAM_PROBE_WEBHOOK_DISABLED_TOKEN",
+        "chat_id_env": "TELEGRAM_PROBE_WEBHOOK_DISABLED_CHAT_ID",
+        "expect_webhook_present": False,
+    },
+    {
+        "name": "invite_allowed",
+        "bot_token_env": "TELEGRAM_PROBE_INVITE_ALLOWED_TOKEN",
+        "chat_id_env": "TELEGRAM_PROBE_INVITE_ALLOWED_CHAT_ID",
+        "invite_link_env": "TELEGRAM_PROBE_INVITE_ALLOWED_LINK",
+    },
+    {
+        "name": "invite_blocked",
+        "bot_token_env": "TELEGRAM_PROBE_INVITE_BLOCKED_TOKEN",
+        "chat_id_env": "TELEGRAM_PROBE_INVITE_BLOCKED_CHAT_ID",
+        "invite_link_env": "TELEGRAM_PROBE_INVITE_BLOCKED_LINK",
+    },
+    {
+        "name": "update_visibility",
+        "bot_token_env": "TELEGRAM_PROBE_UPDATE_VISIBILITY_TOKEN",
+        "chat_id_env": "TELEGRAM_PROBE_UPDATE_VISIBILITY_CHAT_ID",
+        "expect_updates_visible": True,
+    },
+]
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -34,6 +86,33 @@ def _redact_token(token: str | None) -> str | None:
         return None
     bot_id = token.split(":", 1)[0]
     return f"{bot_id}:<redacted>"
+
+
+def _coerce_chat_id(value: str | None) -> int | str | None:
+    if value is None or value == "":
+        return None
+    return int(value) if value.lstrip("-").isdigit() else value
+
+
+def _default_matrix() -> list[dict[str, Any]]:
+    cases: list[dict[str, Any]] = []
+    for template in DEFAULT_MATRIX_CASES:
+        case = dict(template)
+        token_env = str(case.pop("bot_token_env"))
+        chat_id_env = str(case.pop("chat_id_env", ""))
+        invite_link_env = case.pop("invite_link_env", None)
+        case["bot_token"] = os.getenv(token_env)
+        case["chat_id"] = _coerce_chat_id(os.getenv(chat_id_env)) if chat_id_env else None
+        case["allow_delete_webhook"] = False
+        case["source_env"] = {
+            "bot_token": token_env,
+            "chat_id": chat_id_env,
+        }
+        if invite_link_env:
+            case["invite_link"] = os.getenv(str(invite_link_env))
+            case["source_env"]["invite_link"] = str(invite_link_env)
+        cases.append(case)
+    return cases
 
 
 def _load_matrix(path: str | None) -> list[dict[str, Any]]:
@@ -49,11 +128,11 @@ def _load_matrix(path: str | None) -> list[dict[str, Any]]:
             {
                 "name": "default",
                 "bot_token": token,
-                "chat_id": int(chat_id) if chat_id and chat_id.lstrip("-").isdigit() else chat_id,
+                "chat_id": _coerce_chat_id(chat_id),
                 "allow_delete_webhook": False,
             }
         ]
-    return []
+    return _default_matrix()
 
 
 async def _probe_case(case: dict[str, Any]) -> dict[str, Any]:
@@ -68,6 +147,15 @@ async def _probe_case(case: dict[str, Any]) -> dict[str, Any]:
         "started_at": datetime.now(UTC).isoformat(),
         "checks": {},
     }
+    if case.get("source_env"):
+        output["source_env"] = case["source_env"]
+    expectations = {
+        key: value
+        for key, value in case.items()
+        if key.startswith("expect_")
+    }
+    if expectations:
+        output["expectations"] = expectations
     if not token:
         output["status"] = "skipped"
         output["reason"] = "missing_bot_token"
@@ -103,6 +191,11 @@ async def _probe_case(case: dict[str, Any]) -> dict[str, Any]:
                 output["checks"]["deleteWebhook"] = {
                     "status_code": deleted.status_code,
                     "ok": bool(deleted.json().get("ok")) if deleted.content else False,
+                }
+            elif webhook_result.get("url"):
+                output["checks"]["deleteWebhook"] = {
+                    "skipped": True,
+                    "reason": "allow_delete_webhook_false",
                 }
         except Exception as exc:
             output["checks"]["getWebhookInfo"] = {"error": str(exc)[:300]}
@@ -145,6 +238,15 @@ async def _probe_case(case: dict[str, Any]) -> dict[str, Any]:
             except Exception as exc:
                 output["checks"]["getChat"] = {"error": str(exc)[:300]}
 
+        invite_link = case.get("invite_link")
+        if invite_link:
+            output["checks"]["invite_link"] = {
+                "configured": True,
+                "redacted": str(invite_link).split("?", 1)[0],
+                "joined": False,
+                "reason": "non_destructive_probe_only",
+            }
+
     output["finished_at"] = datetime.now(UTC).isoformat()
     output["status"] = "ok"
     return output
@@ -155,9 +257,6 @@ async def _main() -> int:
     parser.add_argument("--matrix", help="Path to JSON array of probe cases")
     args = parser.parse_args()
     cases = _load_matrix(args.matrix)
-    if not cases:
-        print(json.dumps({"status": "skipped", "reason": "no_probe_cases"}, indent=2))
-        return 0
     results = [await _probe_case(case) for case in cases]
     print(json.dumps({"status": "ok", "results": results}, indent=2, sort_keys=True))
     return 0

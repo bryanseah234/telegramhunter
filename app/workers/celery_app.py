@@ -123,26 +123,18 @@ def on_task_failure(task_id, exception, traceback, einfo, args, kwargs, **extra)
     def _persist():
         try:
             from app.core.audit import AuditLogger, AuditEvent
-            loop = get_worker_loop()
 
-            async def _log():
-                try:
-                    await asyncio.to_thread(
-                        lambda: AuditLogger.log(
-                            AuditEvent.TASK_FAILURE if hasattr(AuditEvent, "TASK_FAILURE")
-                            else "task_permanent_failure",
-                            details={
-                                "task_name": task_name,
-                                "task_id": task_id,
-                                "exception": exc_str,
-                            },
-                            user="celery_worker",
-                        )
-                    )
-                except Exception as e:
-                    logger.warning(f"[DeadLetter] AuditLogger persistence failed: {e}")
-
-            loop.call_soon_threadsafe(lambda: loop.create_task(_log()))
+            AuditLogger.log(
+                AuditEvent.TASK_FAILURE if hasattr(AuditEvent, "TASK_FAILURE")
+                else "task_permanent_failure",
+                details={
+                    "task_name": task_name,
+                    "task_id": task_id,
+                    "exception": exc_str,
+                },
+                user="celery_worker",
+                success=False,
+            )
         except Exception as e:
             logger.warning(f"[DeadLetter] Could not persist failure to audit_logs: {e}")
 

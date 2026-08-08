@@ -663,7 +663,7 @@ async def _retry_cold_async():
 
     res = await async_execute(
         db.table("discovered_credentials")
-        .select("id, retry_reason")
+        .select("id, meta")
         .eq("meta->>retryable", "true")
         .filter("meta->>retry_reason", "in", '("low_viability","no_chat_evidence")')
         .lt("meta->>last_gate_at", threshold_str)
@@ -672,7 +672,7 @@ async def _retry_cold_async():
     retried = 0
     for row in res.data:
         cred_id = row["id"]
-        reason = row.get("retry_reason", "")
+        reason = (row.get("meta") or {}).get("retry_reason", "")
         try:
             logger.info(f"    🔁 [RetryCold] Retrying {cred_id} (reason: {reason})")
             # Fetch current meta first then merge — avoid overwriting topic_id, bot info, etc.

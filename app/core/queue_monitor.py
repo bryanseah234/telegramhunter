@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 DEFAULT_QUEUES = ("celery", "scrape", "scanners", "validation")
+DEFAULT_QUEUE_LENGTH_ALERT_THRESHOLD = 100
+DEFAULT_QUEUE_OLDEST_AGE_ALERT_SECONDS = 900
 
 
 def queue_tracking_key(queue_name: str) -> str:
@@ -69,6 +71,65 @@ def get_queue_snapshot(redis_client: Any, queues: tuple[str, ...] = DEFAULT_QUEU
             "oldest_enqueued_at": oldest_enqueued_at,
         }
     return snapshot
+
+
+def evaluate_queue_alerts(
+    snapshot: dict[str, dict[str, Any]],
+    *,
+    length_threshold: int = DEFAULT_QUEUE_LENGTH_ALERT_THRESHOLD,
+    oldest_age_threshold_seconds: int = DEFAULT_QUEUE_OLDEST_AGE_ALERT_SECONDS,
+) -> list[dict[str, Any]]:
+    alerts: list[dict[str, Any]] = []
+    for queue, data in snapshot.items():
+        length = int(data.get("length") or 0)
+        oldest_age = data.get("oldest_job_age_seconds")
+        if length_threshold > 0 and length >= length_threshold:
+            alerts.append(
+                {
+                    "queue": queue,
+                    "type": "queue_length",
+                    "severity": "warning",
+                    "value": length,
+                    "threshold": length_threshold,
+                }
+            )
+        if (
+            oldest_age is not None
+            and oldest_age_threshold_seconds > 0
+            and int(oldest_age) >= oldest_age_threshold_seconds
+        ):
+            alerts.append(
+                {
+                    "queue": queue,
+                    "type": "oldest_job_age",
+                    "severity": "warning",
+                    "value": int(oldest_age),
+                    "threshold": oldest_age_threshold_seconds,
+                }
+            )
+    return alerts
+
+
+def summarize_queue_health(
+    snapshot: dict[str, dict[str, Any]],
+    *,
+    length_threshold: int = DEFAULT_QUEUE_LENGTH_ALERT_THRESHOLD,
+    oldest_age_threshold_seconds: int = DEFAULT_QUEUE_OLDEST_AGE_ALERT_SECONDS,
+) -> dict[str, Any]:
+    alerts = evaluate_queue_alerts(
+        snapshot,
+        length_threshold=length_threshold,
+        oldest_age_threshold_seconds=oldest_age_threshold_seconds,
+    )
+    return {
+        "status": "warning" if alerts else "healthy",
+        "queues": snapshot,
+        "alerts": alerts,
+        "thresholds": {
+            "length": length_threshold,
+            "oldest_job_age_seconds": oldest_age_threshold_seconds,
+        },
+    }
 
 
 def _best_effort_oldest_age_from_queue(redis_client: Any, queue: str, now: float) -> int | None:

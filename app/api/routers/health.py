@@ -2,7 +2,13 @@
 Health check router for monitoring system status.
 Provides endpoints to check database, Redis, and service health.
 """
+from collections import Counter
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
+
+from app.core.audit import AuditEvent
 from app.core.auth import require_monitor_key
 from app.core.config import settings
 from app.core.logger import get_logger
@@ -10,6 +16,150 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 router = APIRouter(prefix="/health", tags=["Health"])
 
+
+def _parse_db_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except ValueError:
+            return None
+    return None
+
+
+def _recent_audit_rows(event_type: str, since_iso: str, limit: int = 500) -> list[dict[str, Any]]:
+    from app.core.database import db
+
+    response = (
+        db.table("audit_logs")
+        .select("event_type, success, details, timestamp")
+        .eq("event_type", event_type)
+        .gte("timestamp", since_iso)
+        .order("timestamp", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return response.data or []
+
+
+def _latest_audit_row(event_type: str) -> dict[str, Any] | None:
+    from app.core.database import db
+
+    response = (
+        db.table("audit_logs")
+        .select("event_type, success, details, timestamp")
+        .eq("event_type", event_type)
+        .order("timestamp", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = response.data or []
+    return rows[0] if rows else None
+
+
+def _canary_status(now: datetime) -> dict[str, Any]:
+    if not settings.CANARY_CREDENTIAL_ID:
+        return {"status": "disabled", "reason": "CANARY_CREDENTIAL_ID not configured"}
+
+    try:
+        latest = _latest_audit_row(AuditEvent.CANARY_FLOW_CHECK)
+    except Exception as exc:
+        logger.warning("[OperationalHealth] Canary audit query failed: %s", exc)
+        return {"status": "unknown", "error": "audit_query_failed"}
+
+    if not latest:
+        return {"status": "failed", "reason": "no_canary_audit_rows"}
+
+    timestamp = _parse_db_timestamp(latest.get("timestamp"))
+    age_seconds = int((now - timestamp).total_seconds()) if timestamp else None
+    details = latest.get("details") if isinstance(latest.get("details"), dict) else {}
+    status = "healthy" if latest.get("success") else "failed"
+    if age_seconds is None:
+        status = "unknown"
+    elif age_seconds > settings.CANARY_STALE_SECONDS:
+        status = "stale"
+
+    return {
+        "status": status,
+        "last_success": bool(latest.get("success")),
+        "last_checked_at": latest.get("timestamp"),
+        "age_seconds": age_seconds,
+        "stale_after_seconds": settings.CANARY_STALE_SECONDS,
+        "details": details,
+    }
+
+
+def _failure_summary(now: datetime) -> dict[str, Any]:
+    window_hours = max(1, int(settings.OPERATIONAL_REPORT_WINDOW_HOURS))
+    since = now - timedelta(hours=window_hours)
+    since_iso = since.isoformat()
+    result: dict[str, Any] = {
+        "window_hours": window_hours,
+        "broadcast_failures": {
+            "total": 0,
+            "by_reason": {},
+            "threshold": settings.BROADCAST_FAILURE_ALERT_THRESHOLD,
+            "alert": False,
+        },
+        "scrape_terminal_reasons": {
+            "total": 0,
+            "by_reason": {},
+            "threshold": settings.SCRAPE_REASON_ALERT_THRESHOLD,
+            "alert": False,
+        },
+    }
+
+    try:
+        rows = _recent_audit_rows(AuditEvent.BROADCAST_FAILED, since_iso)
+        by_reason = Counter(
+            (row.get("details") or {}).get("reason", "unknown")
+            for row in rows
+            if isinstance(row.get("details"), dict)
+        )
+        result["broadcast_failures"] = {
+            "total": len(rows),
+            "by_reason": dict(by_reason),
+            "threshold": settings.BROADCAST_FAILURE_ALERT_THRESHOLD,
+            "alert": any(
+                count >= settings.BROADCAST_FAILURE_ALERT_THRESHOLD
+                for count in by_reason.values()
+            ),
+        }
+    except Exception as exc:
+        logger.warning("[OperationalHealth] Broadcast failure query failed: %s", exc)
+        result["broadcast_failures"]["error"] = "audit_query_failed"
+
+    try:
+        rows = _recent_audit_rows(AuditEvent.SCRAPE_CLASSIFIED, since_iso)
+        terminal_rows = []
+        for row in rows:
+            details = row.get("details") if isinstance(row.get("details"), dict) else {}
+            reason = details.get("reason")
+            if reason and reason not in {"success", "no_new_messages"}:
+                terminal_rows.append(row)
+        by_reason = Counter(
+            (row.get("details") or {}).get("reason", "unknown")
+            for row in terminal_rows
+            if isinstance(row.get("details"), dict)
+        )
+        result["scrape_terminal_reasons"] = {
+            "total": len(terminal_rows),
+            "by_reason": dict(by_reason),
+            "threshold": settings.SCRAPE_REASON_ALERT_THRESHOLD,
+            "alert": any(
+                count >= settings.SCRAPE_REASON_ALERT_THRESHOLD
+                for count in by_reason.values()
+            ),
+        }
+    except Exception as exc:
+        logger.warning("[OperationalHealth] Scrape classification query failed: %s", exc)
+        result["scrape_terminal_reasons"]["error"] = "audit_query_failed"
+
+    return result
 
 
 @router.get("/")
@@ -95,16 +245,63 @@ async def get_queue_health():
     """
     try:
         import redis
-        from app.core.queue_monitor import get_queue_snapshot
+        from app.core.queue_monitor import get_queue_snapshot, summarize_queue_health
 
         client = redis.from_url(settings.REDIS_URL, decode_responses=True)
-        return {"queues": get_queue_snapshot(client)}
+        snapshot = get_queue_snapshot(client)
+        return summarize_queue_health(
+            snapshot,
+            length_threshold=settings.QUEUE_ALERT_LENGTH_THRESHOLD,
+            oldest_age_threshold_seconds=settings.QUEUE_ALERT_OLDEST_AGE_SECONDS,
+        )
     except Exception as e:
         logger.exception("queue health failed")
         raise HTTPException(
             status_code=503,
             detail={"status": "degraded", "error": "unavailable"},
         ) from e
+
+
+@router.get("/operational", dependencies=[Depends(require_monitor_key)])
+async def get_operational_health():
+    """Operational readiness report: health, queues, canary, and recent failures."""
+    now = datetime.now(UTC)
+    report: dict[str, Any] = {
+        "status": "healthy",
+        "generated_at": now.isoformat(),
+    }
+
+    try:
+        import redis
+        from app.core.queue_monitor import get_queue_snapshot, summarize_queue_health
+
+        client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        queue_summary = summarize_queue_health(
+            get_queue_snapshot(client),
+            length_threshold=settings.QUEUE_ALERT_LENGTH_THRESHOLD,
+            oldest_age_threshold_seconds=settings.QUEUE_ALERT_OLDEST_AGE_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("[OperationalHealth] Queue probe failed: %s", exc)
+        queue_summary = {"status": "unknown", "error": "queue_probe_failed"}
+
+    canary = _canary_status(now)
+    failures = _failure_summary(now)
+
+    report["queues"] = queue_summary
+    report["canary"] = canary
+    report["failures"] = failures
+
+    degraded = [
+        queue_summary.get("status") not in {"healthy"},
+        canary.get("status") in {"failed", "stale"},
+        bool(failures.get("broadcast_failures", {}).get("alert")),
+        bool(failures.get("scrape_terminal_reasons", {}).get("alert")),
+    ]
+    if any(degraded):
+        report["status"] = "degraded"
+
+    return report
 
 
 @router.get("/circuit-breakers", dependencies=[Depends(require_monitor_key)])

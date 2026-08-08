@@ -1,6 +1,7 @@
 import asyncio
 import itertools
 import logging
+import math
 import time
 
 from telegram import Bot
@@ -100,6 +101,8 @@ class BroadcasterService:
 
         self._cycle = itertools.cycle(self._pool)
         self._last_send_time = 0
+        self._last_local_log_send = 0.0
+        self._last_log_failure_warning = 0.0
         from app.core.constants import BROADCAST_RATE_LIMIT_SLEEP
         self._min_delay = BROADCAST_RATE_LIMIT_SLEEP
 
@@ -348,8 +351,53 @@ class BroadcasterService:
             retryable=True,
         )
 
+    def _acquire_system_log_slot(self) -> bool:
+        min_interval = float(getattr(settings, "TELEGRAM_LOG_MIN_INTERVAL_SECONDS", 2.0) or 0)
+        if min_interval <= 0:
+            return True
+
+        try:
+            import redis
+
+            client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+            ttl = max(1, int(math.ceil(min_interval)))
+            return bool(client.set("telegram:system_log:send_cooldown", "1", nx=True, ex=ttl))
+        except Exception:
+            now = time.monotonic()
+            if now - self._last_local_log_send < min_interval:
+                return False
+            self._last_local_log_send = now
+            return True
+
+    def _warn_system_log_failure(self, exc: BaseException) -> None:
+        warn_interval = int(getattr(settings, "TELEGRAM_LOG_FAILURE_WARN_INTERVAL_SECONDS", 60) or 0)
+        if warn_interval <= 0:
+            logger.warning(f"Failed to send log: {exc}")
+            return
+
+        try:
+            import redis
+
+            client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+            if client.set("telegram:system_log:failure_warning_cooldown", "1", nx=True, ex=warn_interval):
+                logger.warning(f"Failed to send log: {exc}")
+            else:
+                logger.debug(f"Suppressed repeated Telegram log send failure: {exc}")
+            return
+        except Exception:
+            now = time.monotonic()
+            if now - self._last_log_failure_warning >= warn_interval:
+                self._last_log_failure_warning = now
+                logger.warning(f"Failed to send log: {exc}")
+            else:
+                logger.debug(f"Suppressed repeated Telegram log send failure: {exc}")
+
     async def send_log(self, message: str):
         """Sends a log to the General topic using a healthy bot."""
+        if not self._acquire_system_log_slot():
+            logger.debug("Suppressed Telegram system log due to rate limit")
+            return False
+
         await self._wait_for_rate_limit()
         try:
             bot = self._get_bot_instance(self.bot_tokens[0])
@@ -357,8 +405,10 @@ class BroadcasterService:
                 chat_id=settings.MONITOR_GROUP_ID,
                 text=f"🤖 [System Log]\n{message}"
             )
+            return True
         except Exception as e:
-            logger.error(f"Failed to send log: {e}")
+            self._warn_system_log_failure(e)
+            return False
 
     async def send_to_thread(
         self,

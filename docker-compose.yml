@@ -10,6 +10,9 @@ services:
     container_name: theprawnhunter_redis
     restart: always
     init: true
+    cpus: "${REDIS_CPUS:-0.50}"
+    mem_limit: "${REDIS_MEM_LIMIT:-1280m}"
+    mem_reservation: "${REDIS_MEM_RESERVATION:-512m}"
     command: redis-server --appendonly yes --appendfsync everysec --maxmemory 1gb --maxmemory-policy noeviction
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
@@ -31,6 +34,9 @@ services:
     container_name: theprawnhunter_api
     restart: always
     init: true
+    cpus: "${API_CPUS:-2.00}"
+    mem_limit: "${API_MEM_LIMIT:-2g}"
+    mem_reservation: "${API_MEM_RESERVATION:-768m}"
     ports:
       - "127.0.0.1:${API_PORT:-8011}:8001"
     env_file: .env
@@ -46,9 +52,9 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health/', timeout=5)"]
       interval: 30s
-      timeout: 30s
+      timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 10s
     logging:
       driver: "json-file"
       options:
@@ -60,6 +66,9 @@ services:
     container_name: theprawnhunter_worker-core
     restart: always
     init: true
+    cpus: "${WORKER_CORE_CPUS:-2.00}"
+    mem_limit: "${WORKER_CORE_MEM_LIMIT:-2g}"
+    mem_reservation: "${WORKER_CORE_MEM_RESERVATION:-512m}"
     env_file: .env
     command: celery -A app.workers.celery_app worker -Q celery --loglevel=info --concurrency=8
     depends_on:
@@ -88,6 +97,9 @@ services:
     container_name: theprawnhunter_worker-scanners
     restart: always
     init: true
+    cpus: "${WORKER_SCANNERS_CPUS:-2.00}"
+    mem_limit: "${WORKER_SCANNERS_MEM_LIMIT:-2g}"
+    mem_reservation: "${WORKER_SCANNERS_MEM_RESERVATION:-512m}"
     env_file: .env
     command: celery -A app.workers.celery_app worker -Q scanners --loglevel=info --concurrency=8
     depends_on:
@@ -113,6 +125,9 @@ services:
     container_name: theprawnhunter_worker-scrape
     restart: always
     init: true
+    cpus: "${WORKER_SCRAPE_CPUS:-2.00}"
+    mem_limit: "${WORKER_SCRAPE_MEM_LIMIT:-2g}"
+    mem_reservation: "${WORKER_SCRAPE_MEM_RESERVATION:-512m}"
     env_file: .env
     command: celery -A app.workers.celery_app worker -Q scrape --loglevel=info --concurrency=6
     depends_on:
@@ -143,6 +158,9 @@ services:
     container_name: theprawnhunter_worker-validators
     restart: always
     init: true
+    cpus: "${WORKER_VALIDATORS_CPUS:-2.00}"
+    mem_limit: "${WORKER_VALIDATORS_MEM_LIMIT:-2g}"
+    mem_reservation: "${WORKER_VALIDATORS_MEM_RESERVATION:-512m}"
     env_file: .env
     command: celery -A app.workers.celery_app worker -Q validation --loglevel=info --concurrency=16
     depends_on:
@@ -168,6 +186,9 @@ services:
     container_name: theprawnhunter_beat
     restart: always
     init: true
+    cpus: "${BEAT_CPUS:-0.50}"
+    mem_limit: "${BEAT_MEM_LIMIT:-512m}"
+    mem_reservation: "${BEAT_MEM_RESERVATION:-256m}"
     env_file: .env
     command: celery -A app.workers.celery_app beat --loglevel=info --schedule /app/beat/celerybeat-schedule
     depends_on:
@@ -202,6 +223,9 @@ services:
     container_name: theprawnhunter_frontend
     restart: always
     init: true
+    cpus: "${FRONTEND_CPUS:-1.00}"
+    mem_limit: "${FRONTEND_MEM_LIMIT:-1g}"
+    mem_reservation: "${FRONTEND_MEM_RESERVATION:-256m}"
     ports:
       - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
     logging:
@@ -215,6 +239,9 @@ services:
     container_name: theprawnhunter_bot
     restart: always
     init: true
+    cpus: "${BOT_CPUS:-0.50}"
+    mem_limit: "${BOT_MEM_LIMIT:-512m}"
+    mem_reservation: "${BOT_MEM_RESERVATION:-256m}"
     env_file: .env
     command: python -m app.services.bot_listener
     healthcheck:
@@ -245,6 +272,9 @@ services:
     container_name: theprawnhunter_flower
     restart: always
     init: true
+    cpus: "${FLOWER_CPUS:-0.50}"
+    mem_limit: "${FLOWER_MEM_LIMIT:-512m}"
+    mem_reservation: "${FLOWER_MEM_RESERVATION:-256m}"
     env_file: .env
     command: >-
       sh -c '
@@ -268,13 +298,21 @@ services:
 volumes:
   # Volume names pinned to legacy 'telegramhunter_*' prefix — these are the
   # physical volumes created before the project rename to 'theprawnhunter'.
-  # Docker has no volume rename primitive, so we keep the old names to avoid
-  # losing Redis state, Telethon sessions, and beat schedule DB.
+  # Mark them external so Compose does not warn about legacy project labels.
+  # For first-time setup, create these once with:
+  #   docker volume create telegramhunter_redis_data
+  #   docker volume create telegramhunter_sessions
+  #   docker volume create telegramhunter_imports
+  #   docker volume create telegramhunter_beat_schedule
   redis_data:
-    name: telegramhunter_redis_data
+    external: true
+    name: ${REDIS_VOLUME_NAME:-telegramhunter_redis_data}
   sessions:
-    name: telegramhunter_sessions
+    external: true
+    name: ${SESSIONS_VOLUME_NAME:-telegramhunter_sessions}
   imports:
-    name: telegramhunter_imports
+    external: true
+    name: ${IMPORTS_VOLUME_NAME:-telegramhunter_imports}
   beat_schedule:
-    name: telegramhunter_beat_schedule
+    external: true
+    name: ${BEAT_SCHEDULE_VOLUME_NAME:-telegramhunter_beat_schedule}

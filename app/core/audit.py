@@ -7,7 +7,6 @@ import re
 from typing import Optional, Dict, Any
 from datetime import datetime
 from app.core.logger import get_logger
-from app.core.database import db
 
 logger = get_logger(__name__)
 
@@ -53,6 +52,7 @@ class AuditEvent:
     TOKEN_REVOKED = "token_revoked"
     BROADCAST_SENT = "broadcast_sent"
     BROADCAST_FAILED = "broadcast.failed"
+    BROADCAST_RETRY_REQUESTED = "broadcast.retry_requested"
     SCRAPE_CLASSIFIED = "scrape.classified"
     SCRAPE_STRATEGY_ATTEMPT = "scrape.strategy_attempt"
     CANARY_FLOW_CHECK = "canary.flow_check"
@@ -113,15 +113,18 @@ class AuditLogger:
 
         # Optionally persist to DB for compliance
         if AuditLogger._should_persist(event_type):
-            # _persist_to_db is sync. If called from an async context, schedule
-            # it in a thread so we don't block the event loop. If called from a
-            # sync Celery task, call directly.
+            # _persist_to_db is sync. If called from an async context, move it
+            # to a plain thread so we do not leave an unawaited asyncio task
+            # behind when short-lived loops shut down.
             try:
-                loop = asyncio.get_running_loop()
-                # We're inside an async context — schedule without blocking
-                loop.create_task(
-                    asyncio.to_thread(AuditLogger._persist_to_db, audit_entry)
-                )
+                asyncio.get_running_loop()
+                import threading
+
+                threading.Thread(
+                    target=AuditLogger._persist_to_db,
+                    args=(audit_entry,),
+                    daemon=True,
+                ).start()
             except RuntimeError:
                 # No running loop — sync Celery task, call directly
                 try:
@@ -142,6 +145,7 @@ class AuditLogger:
             AuditEvent.SCRAPE_CLASSIFIED,
             AuditEvent.SCRAPE_STRATEGY_ATTEMPT,
             AuditEvent.BROADCAST_FAILED,
+            AuditEvent.BROADCAST_RETRY_REQUESTED,
             AuditEvent.CANARY_FLOW_CHECK,
             AuditEvent.WEBHOOK_PROBED,
             AuditEvent.WEBHOOK_TAKEOVER,
@@ -160,6 +164,9 @@ class AuditLogger:
         deployments that haven't applied init.sql don't flood stderr.
         """
         try:
+            from app.core import database
+
+            db = database.db
             db.table("audit_logs").insert({
                 "event_type":    audit_entry["event_type"],
                 "credential_id": audit_entry.get("credential_id"),

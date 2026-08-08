@@ -1,7 +1,13 @@
 import json
 import time
 
-from app.core.queue_monitor import get_queue_snapshot, record_task_enqueued, record_task_started
+from app.core.queue_monitor import (
+    evaluate_queue_alerts,
+    get_queue_snapshot,
+    record_task_enqueued,
+    record_task_started,
+    summarize_queue_health,
+)
 
 
 class _FakeRedis:
@@ -75,3 +81,30 @@ def test_queue_snapshot_clears_stale_tracking_when_queue_empty():
     assert snapshot["scrape"]["length"] == 0
     assert snapshot["scrape"]["oldest_job_age_seconds"] is None
     assert "queue_monitor:scrape:enqueued" not in fake.zsets
+
+
+def test_queue_alerts_flag_length_and_oldest_age():
+    snapshot = {
+        "scrape": {"length": 101, "oldest_job_age_seconds": 901},
+        "celery": {"length": 0, "oldest_job_age_seconds": None},
+    }
+
+    alerts = evaluate_queue_alerts(
+        snapshot,
+        length_threshold=100,
+        oldest_age_threshold_seconds=900,
+    )
+
+    assert {alert["type"] for alert in alerts} == {"queue_length", "oldest_job_age"}
+    assert all(alert["queue"] == "scrape" for alert in alerts)
+
+
+def test_queue_health_summary_is_healthy_without_alerts():
+    summary = summarize_queue_health(
+        {"validation": {"length": 1, "oldest_job_age_seconds": 10}},
+        length_threshold=100,
+        oldest_age_threshold_seconds=900,
+    )
+
+    assert summary["status"] == "healthy"
+    assert summary["alerts"] == []

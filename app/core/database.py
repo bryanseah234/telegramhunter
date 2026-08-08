@@ -1,6 +1,5 @@
-from supabase import create_client, Client
 from app.core.config import settings
-import httpx
+from typing import Any
 
 
 # supabase-py 2.x (this version) does not expose http_client via ClientOptions.
@@ -10,7 +9,7 @@ import httpx
 # keepalive_expiry=30s, so idle connections are dropped before Supabase's
 # server-side timeout (~60s) that causes:
 #   httpx.RemoteProtocolError: Server disconnected
-def _patch_postgrest_session(client: Client) -> None:
+def _patch_postgrest_session(client: Any) -> None:
     """
     Patch the postgrest httpx.Client transport to add retries=1 on connection reset.
     Also sets keepalive_expiry=30s at the pool level so idle sockets are dropped
@@ -21,6 +20,8 @@ def _patch_postgrest_session(client: Client) -> None:
     which is stable across httpx 0.23+.
     """
     try:
+        import httpx
+
         session: httpx.Client = client.postgrest.session
         # Swap transport to add retries=1 (automatic retry on connection reset)
         session._transport = httpx.HTTPTransport(retries=1)
@@ -38,10 +39,10 @@ def _patch_postgrest_session(client: Client) -> None:
 
 
 class Database:
-    _client: Client = None
+    _client: Any = None
 
     @classmethod
-    def get_client(cls) -> Client:
+    def get_client(cls) -> Any:
         """
         Returns a Supabase client using the SERVICE ROLE KEY.
         This bypasses Row Level Security (RLS) for backend operations.
@@ -53,6 +54,8 @@ class Database:
         RemoteProtocolError: Server disconnected on idle connections.
         """
         if cls._client is None:
+            from supabase import create_client
+
             cls._client = create_client(
                 settings.SUPABASE_URL,
                 settings.SUPABASE_SERVICE_ROLE_KEY,
@@ -61,6 +64,20 @@ class Database:
         return cls._client
 
 
-# Global instance accessor (backend use only - bypasses RLS)
-db = Database.get_client()
+class LazyDatabaseClient:
+    """Defers Supabase client creation until the first DB operation."""
+
+    def _client(self) -> Any:
+        return Database.get_client()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client(), name)
+
+    def table(self, *args, **kwargs):
+        return self._client().table(*args, **kwargs)
+
+
+# Global backend accessor (service role, bypasses RLS) created lazily so API
+# readiness is not delayed by importing the Supabase client dependency graph.
+db = LazyDatabaseClient()
 

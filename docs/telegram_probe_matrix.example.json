@@ -1,0 +1,58 @@
+[
+  {
+    "name": "bot_in_group",
+    "bot_token": "123456789:REDACTED",
+    "chat_id": -1001111111111,
+    "allow_delete_webhook": false,
+    "expect_chat_access": true
+  },
+  {
+    "name": "bot_not_in_group",
+    "bot_token": "123456789:REDACTED",
+    "chat_id": -1002222222222,
+    "allow_delete_webhook": false,
+    "expect_chat_access": false
+  },
+  {
+    "name": "channel_or_supergroup",
+    "bot_token": "123456789:REDACTED",
+    "chat_id": -1003333333333,
+    "allow_delete_webhook": false,
+    "expect_chat_type": ["channel", "supergroup"]
+  },
+  {
+    "name": "webhook_enabled",
+    "bot_token": "123456789:REDACTED",
+    "chat_id": -1004444444444,
+    "allow_delete_webhook": false,
+    "expect_webhook_present": true
+  },
+  {
+    "name": "webhook_disabled",
+    "bot_token": "123456789:REDACTED",
+    "chat_id": -1005555555555,
+    "allow_delete_webhook": false,
+    "expect_webhook_present": false
+  },
+  {
+    "name": "invite_allowed",
+    "bot_token": "123456789:REDACTED",
+    "chat_id": -1006666666666,
+    "invite_link": "https://t.me/+REDACTED",
+    "allow_delete_webhook": false
+  },
+  {
+    "name": "invite_blocked",
+    "bot_token": "123456789:REDACTED",
+    "chat_id": -1007777777777,
+    "invite_link": "https://t.me/+REDACTED",
+    "allow_delete_webhook": false
+  },
+  {
+    "name": "update_visibility",
+    "bot_token": "123456789:REDACTED",
+    "chat_id": -1008888888888,
+    "allow_delete_webhook": false,
+    "expect_updates_visible": true
+  }
+]

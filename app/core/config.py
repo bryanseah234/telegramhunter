@@ -56,7 +56,18 @@ class Settings(BaseSettings):
     CANARY_CREDENTIAL_ID: Optional[str] = None
     CANARY_EXPECTED_TEXT: str = "telegramhunter-canary"
     CANARY_MAX_AGE_SECONDS: int = 1800
+    CANARY_STALE_SECONDS: int = 3600
     PUBLIC_FRONTEND_URL: Optional[str] = None
+    DATABASE_URL: Optional[str] = None
+
+    # Operational alerting
+    QUEUE_ALERT_LENGTH_THRESHOLD: int = 100
+    QUEUE_ALERT_OLDEST_AGE_SECONDS: int = 900
+    OPERATIONAL_REPORT_WINDOW_HOURS: int = 24
+    BROADCAST_FAILURE_ALERT_THRESHOLD: int = 5
+    SCRAPE_REASON_ALERT_THRESHOLD: int = 10
+    TELEGRAM_LOG_MIN_INTERVAL_SECONDS: float = 2.0
+    TELEGRAM_LOG_FAILURE_WARN_INTERVAL_SECONDS: int = 60
 
     # Honeypot mode — after successful takeover of a stolen webhook, optionally
     # re-register a webhook pointing to OUR public receiver so we can observe

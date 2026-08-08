@@ -1,6 +1,8 @@
 import types
 
 import asyncio
+import time
+from pathlib import Path
 import pytest
 
 from app.core.db_retry import DatabaseHealth
@@ -11,6 +13,36 @@ from app.workers.tasks import validation_tasks
 
 def test_database_health_probe_remains_callable():
     assert callable(DatabaseHealth.check_connection)
+
+
+def test_global_database_accessor_is_lazy():
+    from app.core import database
+
+    assert isinstance(database.db, database.LazyDatabaseClient)
+
+
+@pytest.mark.asyncio
+async def test_api_lifespan_does_not_wait_for_telegram_notification(monkeypatch):
+    from app.api import main as api_main
+
+    class SlowBroadcaster:
+        async def send_log(self, _message):
+            await asyncio.sleep(2)
+
+    fake_app = types.SimpleNamespace(state=types.SimpleNamespace())
+    monkeypatch.setattr(
+        "app.services.broadcaster_srv.BroadcasterService",
+        SlowBroadcaster,
+    )
+
+    started = time.perf_counter()
+    async with api_main.lifespan(fake_app):
+        elapsed_inside = time.perf_counter() - started
+    elapsed_total = time.perf_counter() - started
+
+    assert elapsed_inside < 0.2
+    assert elapsed_total < 0.4
+    assert len(fake_app.state.lifecycle_notification_threads) == 2
 
 
 @pytest.mark.asyncio
@@ -47,6 +79,14 @@ def test_backfill_scoring_does_not_update_top_level_confidence_score():
     source = open(validation_tasks.__file__, "r", encoding="utf-8").read()
     forbidden = '.update({\n                        "meta": new_meta,\n                        "confidence_score": score,'
     assert forbidden not in source
+
+
+def test_retry_cold_does_not_require_top_level_retry_reason_column():
+    path = Path(__file__).parents[2] / "app" / "workers" / "tasks" / "scanner_tasks.py"
+    source = path.read_text(encoding="utf-8")
+    assert '.select("id, retry_reason")' not in source
+    assert '.select("id, meta")' in source
+    assert '(row.get("meta") or {}).get("retry_reason", "")' in source
 
 
 def test_task_failure_audit_uses_live_audit_schema(monkeypatch):

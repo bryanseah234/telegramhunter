@@ -1,0 +1,28 @@
+{
+  "name": "theprawnhunter",
+  "version": "1.0.0",
+  "description": "A self-hosted, continuously-running OSINT pipeline that discovers exposed bot tokens across 13 public data sources, validates them against the live API, harvests accessible chat history, and broadcasts findings to a private Telegram supergroup. Delivered as a Docker Compose stack.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests",
+    "doc": "docs"
+  },
+  "scripts": {
+    "check": "node --check scripts/run_fofa_scan.mjs",
+    "fofa:scan": "node scripts/run_fofa_scan.mjs",
+    "test": "npm run check"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hongyime/theprawnhunter.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/hongyime/theprawnhunter/issues"
+  },
+  "homepage": "https://github.com/hongyime/theprawnhunter#readme",
+  "dependencies": {
+    "puppeteer-core": "^25.5.0"
+  }
+}

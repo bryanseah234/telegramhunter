@@ -1157,7 +1157,7 @@ async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # SECURITY: never log private-DM contents. The /starthunter conversation
     # transports phone numbers, login codes, and 2FA passwords through private
     # DMs; if this handler logged them, they'd persist in container stdout logs.
-    if chat and chat.type == "private":
+    if chat and getattr(chat, "type", None) == "private":
         return
 
     # Suppress logging for messages originating from the monitor hub group.
