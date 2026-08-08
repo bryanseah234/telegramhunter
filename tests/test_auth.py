@@ -4,11 +4,10 @@ Addresses AUDIT-1 (media auth), AUDIT-2 (constant-time compare), and
 AUDIT-3 (single-source auth). These tests must pass alongside the
 existing test_api.py suite.
 """
-import time
+import inspect
 from unittest.mock import patch
 
 import pytest
-
 
 AUTH = {"X-Monitor-Key": "test-monitor-key-for-pytest"}
 
@@ -51,7 +50,6 @@ def test_media_endpoint_accepts_valid_key(client):
 def test_auth_uses_hmac_compare_digest():
     """The auth module must import hmac and reference compare_digest."""
     from app.core import auth as auth_module
-    import inspect
 
     src = inspect.getsource(auth_module)
     assert "hmac.compare_digest" in src, (
@@ -80,6 +78,7 @@ PROTECTED_ENDPOINTS = [
     ("POST", "/monitor/broadcasts/00000000-0000-0000-0000-000000000000/retry"),
     ("POST", "/monitor/topics/revoked/close"),
     ("GET",  "/monitor/webhooks"),
+    ("GET",  "/monitor/targets/export"),
     ("GET",  "/monitor/search?q=abc"),
     ("GET",  "/monitor/operators"),
     ("GET",  "/health/detailed"),

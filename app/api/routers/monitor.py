@@ -1,9 +1,13 @@
 import logging
+from datetime import UTC, datetime
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
 from fastapi import APIRouter, Depends, HTTPException
-from typing import List
-from app.core.database import db
-from app.core.auth import require_monitor_key
+
 from app.core.audit import AuditEvent, AuditLogger
+from app.core.auth import require_monitor_key
+from app.core.database import db
 from app.schemas.models import CredentialOut, MessageOut, StatsOut
 
 logger = logging.getLogger(__name__)
@@ -37,12 +41,12 @@ async def get_stats():
             messages_exfiltrated=total_msgs,
             messages_broadcasted=bc_msgs
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("monitor/stats query failed")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
 
 
-@router.get("/credentials", response_model=List[CredentialOut])
+@router.get("/credentials", response_model=list[CredentialOut])
 async def list_credentials(
     limit: int = 100,
     sort_by: str = "created_at",
@@ -89,21 +93,21 @@ async def list_credentials(
         else:
             res = q.order(sort_expr, desc=desc).limit(limit).execute()
         return res.data
-    except Exception:
+    except Exception as exc:
         logger.exception("monitor/credentials query failed")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
 
 
-@router.get("/messages", response_model=List[MessageOut])
+@router.get("/messages", response_model=list[MessageOut])
 async def list_messages(limit: int = 100):
     """List recent exfiltrated messages. Requires X-Monitor-Key header."""
     limit = max(1, min(limit, 1000))  # Clamp to [1, 1000]
     try:
         res = db.table("exfiltrated_messages").select("*").order("created_at", desc=True).limit(limit).execute()
         return res.data
-    except Exception:
+    except Exception as exc:
         logger.exception("monitor/messages query failed")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
 
 
 @router.get("/broadcasts/pending")
@@ -313,9 +317,151 @@ async def list_captured_webhooks(limit: int = 200):
             if len(out) >= limit:
                 break
         return out
-    except Exception:
+    except Exception as exc:
         logger.exception("monitor/webhooks query failed")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
+
+
+@router.get("/targets/export")
+async def export_targets(limit: int = 100):
+    """Export a sanitized generic target feed for downstream tooling.
+
+    The feed intentionally contains only domain/URL candidates and neutral
+    provenance. It never selects or returns token material, token hashes,
+    raw message content, chat metadata, credentials, or webhook probe details.
+    """
+    limit = max(1, min(limit, 1000))
+    try:
+        items = _target_feed_items(limit)
+        return {
+            "schema_version": "target-feed.v1",
+            "generated_at": _utc_now_iso(),
+            "items": items,
+        }
+    except Exception as exc:
+        logger.exception("monitor/targets/export query failed")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
+
+
+def _target_feed_items(limit: int) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def append_item(item: dict[str, Any]) -> None:
+        key = (str(item.get("target_type") or ""), str(item.get("target_value") or "").casefold())
+        if key[0] not in {"domain", "url"} or not key[1] or key in seen:
+            return
+        seen.add(key)
+        items.append(item)
+
+    for row in _fetch_telemetry_target_rows(limit):
+        if len(items) >= limit:
+            break
+        item = _telemetry_row_to_target(row)
+        if item:
+            append_item(item)
+
+    if len(items) < limit:
+        for row in _fetch_webhook_target_rows(limit):
+            if len(items) >= limit:
+                break
+            item = _webhook_row_to_target(row)
+            if item:
+                append_item(item)
+
+    return items[:limit]
+
+
+def _fetch_telemetry_target_rows(limit: int) -> list[dict[str, Any]]:
+    res = (
+        db.table("telemetry_indicators")
+        .select("indicator_type, indicator_value, first_seen_at")
+        .in_("indicator_type", ["network_domain", "canonical_url"])
+        .order("first_seen_at", desc=True)
+        .limit(max(limit * 2, 25))
+        .execute()
+    )
+    return list(res.data or [])
+
+
+def _fetch_webhook_target_rows(limit: int) -> list[dict[str, Any]]:
+    res = (
+        db.table("discovered_credentials")
+        .select("source, status, meta, created_at, updated_at")
+        .order("created_at", desc=True)
+        .limit(max(limit * 5, 100))
+        .execute()
+    )
+    return list(res.data or [])
+
+
+def _telemetry_row_to_target(row: dict[str, Any]) -> dict[str, Any] | None:
+    indicator_type = str(row.get("indicator_type") or "").strip()
+    raw_value = str(row.get("indicator_value") or "").strip()
+    first_seen_at = str(row.get("first_seen_at") or "").strip()
+    if indicator_type == "network_domain":
+        target_value = _canonical_domain(raw_value)
+        target_type = "domain"
+        confidence = 0.85
+    elif indicator_type == "canonical_url":
+        target_value = _canonical_url(raw_value)
+        target_type = "url"
+        confidence = 0.9
+    else:
+        return None
+    if not target_value:
+        return None
+    return {
+        "target_type": target_type,
+        "target_value": target_value,
+        "source_kind": "telemetry_indicator",
+        "confidence": confidence,
+        "first_seen_at": first_seen_at,
+        "provenance": f"telemetry_indicators.{indicator_type}",
+    }
+
+
+def _webhook_row_to_target(row: dict[str, Any]) -> dict[str, Any] | None:
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    webhook_url = _canonical_url(str(meta.get("webhook_url") or ""))
+    if not webhook_url:
+        return None
+    return {
+        "target_type": "url",
+        "target_value": webhook_url,
+        "source_kind": "credential_metadata",
+        "confidence": 0.8,
+        "first_seen_at": str(row.get("updated_at") or row.get("created_at") or "").strip(),
+        "provenance": "discovered_credentials.meta.webhook_url",
+    }
+
+
+def _canonical_domain(value: str) -> str:
+    candidate = str(value or "").strip().lower().strip(".")
+    if not candidate or "://" in candidate or "/" in candidate or "@" in candidate:
+        return ""
+    return candidate
+
+
+def _canonical_url(value: str) -> str:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return ""
+    parsed = urlsplit(candidate)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    host = str(parsed.hostname or "").lower().strip(".")
+    if not host:
+        return ""
+    netloc = host
+    if parsed.port:
+        netloc = f"{host}:{parsed.port}"
+    path = parsed.path or "/"
+    return urlunsplit((parsed.scheme.lower(), netloc, path, "", ""))
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 @router.get("/search")
@@ -370,15 +516,15 @@ def search_messages(
             query = query.neq("media_type", "text")
 
         if since_hours and since_hours > 0:
-            from datetime import datetime, timedelta, timezone
+            from datetime import timedelta
 
-            since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
+            since = (datetime.now(UTC) - timedelta(hours=since_hours)).isoformat()
             query = query.gte("created_at", since)
 
         res = query.execute()
-    except Exception:
+    except Exception as exc:
         logger.exception("monitor/search query failed")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
 
     matches = res.data or []
     return {
@@ -414,9 +560,9 @@ def get_c2_operators(limit: int = 20):
             .limit(2000)
             .execute()
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("monitor/operators query failed")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
 
     # Multi-dimensional clustering
     by_san: dict = defaultdict(list)
