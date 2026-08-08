@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import mimetypes
 import sys
 from types import SimpleNamespace
 
@@ -11,9 +12,33 @@ class _FakeBot:
     def __init__(self, *, error=None):
         self.error = error
         self.calls = []
+        self.document_calls = []
+        self.photo_calls = []
+        self.video_calls = []
+        self.audio_calls = []
 
     async def send_message(self, **kwargs):
         self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+
+    async def send_document(self, **kwargs):
+        self.document_calls.append(kwargs)
+        if self.error:
+            raise self.error
+
+    async def send_photo(self, **kwargs):
+        self.photo_calls.append(kwargs)
+        if self.error:
+            raise self.error
+
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        if self.error:
+            raise self.error
+
+    async def send_audio(self, **kwargs):
+        self.audio_calls.append(kwargs)
         if self.error:
             raise self.error
 
@@ -26,6 +51,14 @@ def _settings(bot_tokens=None, auto_archive=False):
         REDIS_URL="redis://localhost:6379/0",
         TELEGRAM_LOG_MIN_INTERVAL_SECONDS=2.0,
         TELEGRAM_LOG_FAILURE_WARN_INTERVAL_SECONDS=60,
+    )
+
+
+def test_android_package_mime_type_is_registered():
+    import app.services.broadcaster_srv  # noqa: F401
+
+    assert mimetypes.guess_type("payload.apk", strict=False)[0] == (
+        "application/vnd.android.package-archive"
     )
 
 
@@ -181,7 +214,7 @@ async def test_send_message_marks_forbidden_bot_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_message_schedules_auto_archive_for_supported_media(monkeypatch):
+async def test_send_message_awaits_auto_archive_for_supported_media(monkeypatch):
     from app.services import broadcaster_srv
 
     monkeypatch.setattr(
@@ -190,18 +223,18 @@ async def test_send_message_schedules_auto_archive_for_supported_media(monkeypat
         _settings(bot_tokens=["123:ABC"], auto_archive=True),
     )
     service = broadcaster_srv.BroadcasterService()
-    scheduled = []
+    archived = []
 
     async def no_wait():
         return None
 
+    async def fake_archive(*args):
+        archived.append(args)
+        return SimpleNamespace(ok=True, code="ok", detail="")
+
     monkeypatch.setattr(service, "_wait_for_rate_limit", no_wait)
     monkeypatch.setattr(service, "_get_bot_instance", lambda _token: _FakeBot())
-    monkeypatch.setattr(
-        service,
-        "_schedule_auto_archive",
-        lambda *args: scheduled.append(args),
-    )
+    monkeypatch.setattr(service, "_auto_archive_media", fake_archive)
 
     await service.send_message(
         -100123,
@@ -216,7 +249,7 @@ async def test_send_message_schedules_auto_archive_for_supported_media(monkeypat
         },
     )
 
-    assert scheduled == [(-100123, 4, {
+    assert archived == [(-100123, 4, {
         "id": "row-1",
         "content": "photo",
         "sender_name": "tester",
@@ -224,6 +257,139 @@ async def test_send_message_schedules_auto_archive_for_supported_media(monkeypat
         "telegram_msg_id": 88,
         "credential_id": "cred-1",
     }, 88)]
+
+
+@pytest.mark.asyncio
+async def test_send_document_preserves_original_filename(monkeypatch):
+    from app.services import broadcaster_srv
+
+    monkeypatch.setattr(broadcaster_srv, "settings", _settings(bot_tokens=["123:ABC"]))
+    service = broadcaster_srv.BroadcasterService()
+    fake_bot = _FakeBot()
+
+    async def no_wait():
+        return None
+
+    async def fake_download(_file_meta, _credential_id):
+        return b"apk-bytes"
+
+    monkeypatch.setattr(service, "_wait_for_rate_limit", no_wait)
+    monkeypatch.setattr(service, "_get_bot_instance", lambda _token: fake_bot)
+    monkeypatch.setattr(service, "_download_media_bytes", fake_download)
+
+    await service.send_message(
+        -100123,
+        4,
+        {
+            "id": "row-1",
+            "content": "apk",
+            "sender_name": "tester",
+            "media_type": "document",
+            "telegram_msg_id": 88,
+            "credential_id": "cred-1",
+            "file_meta": {
+                "file_id": "file-1",
+                "file_name": "NetPlus Pro.apk",
+                "mime": "application/octet-stream",
+            },
+        },
+    )
+
+    assert fake_bot.calls == []
+    assert len(fake_bot.document_calls) == 1
+    sent = fake_bot.document_calls[0]
+    assert sent["document"] == b"apk-bytes"
+    assert sent["filename"] == "NetPlus Pro.apk"
+    assert sent["disable_content_type_detection"] is False
+
+
+@pytest.mark.asyncio
+async def test_media_upload_failure_does_not_fallback_to_text(monkeypatch):
+    from app.services import broadcaster_srv
+
+    monkeypatch.setattr(
+        broadcaster_srv,
+        "settings",
+        _settings(bot_tokens=["123:ABC"], auto_archive=False),
+    )
+    service = broadcaster_srv.BroadcasterService()
+    fake_bot = _FakeBot(error=BadRequest("file is too big"))
+
+    async def no_wait():
+        return None
+
+    async def fake_download(_file_meta, _credential_id):
+        return b"apk-bytes"
+
+    monkeypatch.setattr(service, "_wait_for_rate_limit", no_wait)
+    monkeypatch.setattr(service, "_get_bot_instance", lambda _token: fake_bot)
+    monkeypatch.setattr(service, "_download_media_bytes", fake_download)
+
+    with pytest.raises(broadcaster_srv.BroadcastSendError) as exc_info:
+        await service.send_message(
+            -100123,
+            4,
+            {
+                "id": "row-1",
+                "content": "apk",
+                "sender_name": "tester",
+                "media_type": "document",
+                "telegram_msg_id": 88,
+                "credential_id": "cred-1",
+                "file_meta": {"file_id": "file-1", "file_name": "payload.apk"},
+            },
+        )
+
+    assert exc_info.value.reason == "bad_request"
+    assert fake_bot.calls == []
+    assert len(fake_bot.document_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_media_without_download_bytes_uses_archive_path(monkeypatch):
+    from app.services import broadcaster_srv
+
+    monkeypatch.setattr(
+        broadcaster_srv,
+        "settings",
+        _settings(bot_tokens=["123:ABC"], auto_archive=True),
+    )
+    service = broadcaster_srv.BroadcasterService()
+    fake_bot = _FakeBot()
+    archived = []
+
+    async def no_wait():
+        return None
+
+    async def no_download(_file_meta, _credential_id):
+        return None
+
+    async def fake_archive(*args):
+        archived.append(args)
+        return SimpleNamespace(ok=True, code="ok", detail="")
+
+    monkeypatch.setattr(service, "_wait_for_rate_limit", no_wait)
+    monkeypatch.setattr(service, "_get_bot_instance", lambda _token: fake_bot)
+    monkeypatch.setattr(service, "_download_media_bytes", no_download)
+    monkeypatch.setattr(service, "_auto_archive_media", fake_archive)
+
+    await service.send_message(
+        -100123,
+        4,
+        {
+            "id": "row-1",
+            "content": "apk",
+            "sender_name": "tester",
+            "media_type": "document",
+            "telegram_msg_id": 88,
+            "credential_id": "cred-1",
+            "file_meta": {"file_id": "file-1", "file_name": "payload.apk"},
+        },
+    )
+
+    assert fake_bot.calls == []
+    assert fake_bot.document_calls == []
+    assert archived
 
 
 def test_broadcast_exception_classifier_maps_timeout_and_topic_missing():
