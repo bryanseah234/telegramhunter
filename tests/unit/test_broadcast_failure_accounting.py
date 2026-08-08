@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -232,6 +233,114 @@ async def test_close_revoked_topics_dry_run_reports_candidates(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_close_revoked_topics_auto_disabled_skips_live_close(monkeypatch):
+    from app.services import topic_admin_srv
+
+    async def fake_candidates(_limit):
+        raise AssertionError("disabled automatic close must not query candidates")
+
+    monkeypatch.setattr(topic_admin_srv, "fetch_revoked_topic_candidates", fake_candidates)
+    monkeypatch.setattr(topic_admin_srv, "settings", SimpleNamespace(AUTO_CLOSE_REVOKED_TOPICS=False))
+
+    result = await topic_admin_srv.close_revoked_topics_logic(limit=10, dry_run=False)
+
+    assert result == {
+        "status": "disabled",
+        "dry_run": False,
+        "candidate_count": 0,
+        "closed": 0,
+        "failed": 0,
+        "topics": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_close_revoked_topics_force_overrides_auto_disabled(monkeypatch):
+    from app.services import topic_admin_srv
+
+    candidates = [{"id": "cred-1", "topic_id": 44, "meta": {"topic_id": 44}}]
+    closed_topics = []
+    updated_payloads = []
+
+    async def fake_candidates(_limit):
+        return candidates
+
+    class _FakeBroadcaster:
+        async def close_topic(self, group_id, topic_id):
+            closed_topics.append((group_id, topic_id))
+            return True
+
+    async def fake_async_execute(query):
+        if query.payload is None:
+            return SimpleNamespace(data=[{"meta": {"topic_id": 44}}])
+        updated_payloads.append(query.payload)
+        return SimpleNamespace(data=[query.payload])
+
+    monkeypatch.setattr(
+        topic_admin_srv,
+        "settings",
+        SimpleNamespace(
+            AUTO_CLOSE_REVOKED_TOPICS=False,
+            MONITOR_GROUP_ID=-100123,
+            REVOKED_TOPIC_CLOSE_DELAY_SECONDS=0,
+        ),
+    )
+    monkeypatch.setattr(topic_admin_srv, "db", _FakeDb())
+    monkeypatch.setattr(topic_admin_srv, "fetch_revoked_topic_candidates", fake_candidates)
+    monkeypatch.setattr(topic_admin_srv, "get_broadcaster", lambda: _FakeBroadcaster())
+    monkeypatch.setattr(topic_admin_srv, "async_execute", fake_async_execute)
+    monkeypatch.setattr(topic_admin_srv.AuditLogger, "log", lambda *args, **kwargs: None)
+
+    result = await topic_admin_srv.close_revoked_topics_logic(
+        limit=10,
+        dry_run=False,
+        force=True,
+    )
+
+    assert result["status"] == "ok"
+    assert closed_topics == [(-100123, 44)]
+    assert updated_payloads[0]["meta"]["topic_status"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_close_revoked_topics_timeout_counts_failure(monkeypatch):
+    from app.services import topic_admin_srv
+
+    candidates = [{"id": "cred-1", "topic_id": 44, "meta": {"topic_id": 44}}]
+
+    async def fake_candidates(_limit):
+        return candidates
+
+    class _SlowBroadcaster:
+        async def close_topic(self, _group_id, _topic_id):
+            await asyncio.sleep(0.05)
+            return True
+
+    monkeypatch.setattr(
+        topic_admin_srv,
+        "settings",
+        SimpleNamespace(
+            AUTO_CLOSE_REVOKED_TOPICS=True,
+            MONITOR_GROUP_ID=-100123,
+            REVOKED_TOPIC_CLOSE_DELAY_SECONDS=0,
+            REVOKED_TOPIC_CLOSE_TIMEOUT_SECONDS=0.01,
+        ),
+    )
+    monkeypatch.setattr(topic_admin_srv, "fetch_revoked_topic_candidates", fake_candidates)
+    monkeypatch.setattr(topic_admin_srv, "get_broadcaster", lambda: _SlowBroadcaster())
+    monkeypatch.setattr(topic_admin_srv.AuditLogger, "log", lambda *args, **kwargs: None)
+
+    result = await topic_admin_srv.close_revoked_topics_logic(limit=10, dry_run=False)
+
+    assert result["status"] == "partial"
+    assert result["closed"] == 0
+    assert result["failed"] == 1
+    assert result["topics"] == [
+        {"credential_id": "cred-1", "topic_id": 44, "closed": False}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_revoked_topic_candidates_exclude_canary(monkeypatch):
     from app.services import topic_admin_srv
 
@@ -258,6 +367,33 @@ async def test_revoked_topic_candidates_exclude_canary(monkeypatch):
             "meta": {"topic_id": 45},
             "updated_at": None,
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_revoked_topic_candidates_dedupe_topic_ids(monkeypatch):
+    from app.services import topic_admin_srv
+
+    fake_db = _FakeDb()
+
+    async def fake_async_execute(_query):
+        return SimpleNamespace(
+            data=[
+                {"id": "revoked-1", "meta": {"topic_id": 45}},
+                {"id": "revoked-2", "meta": {"topic_id": 45}},
+                {"id": "revoked-3", "meta": {"topic_id": 46}},
+            ]
+        )
+
+    monkeypatch.setattr(topic_admin_srv, "db", fake_db)
+    monkeypatch.setattr(topic_admin_srv, "settings", SimpleNamespace(CANARY_CREDENTIAL_ID=None))
+    monkeypatch.setattr(topic_admin_srv, "async_execute", fake_async_execute)
+
+    candidates = await topic_admin_srv.fetch_revoked_topic_candidates(limit=10)
+
+    assert [(row["id"], row["topic_id"]) for row in candidates] == [
+        ("revoked-1", 45),
+        ("revoked-3", 46),
     ]
 
 
@@ -305,3 +441,65 @@ async def test_close_revoked_topics_closes_and_marks_meta(monkeypatch):
     assert updated_payloads[0]["meta"]["topic_closed_reason"] == "credential_revoked"
     assert updated_payloads[0]["meta"]["keep"] == "value"
     assert audit_events[0][0][0] == topic_admin_srv.AuditEvent.TOPIC_CLOSED
+
+
+@pytest.mark.asyncio
+async def test_mark_credential_revoked_queues_topic_close_when_enabled(monkeypatch):
+    from app.workers.tasks import flow_tasks
+
+    fake_db = _FakeDb()
+    updates = []
+    queued = []
+
+    async def fake_async_execute(query):
+        updates.append(query.payload)
+        return SimpleNamespace(data=[query.payload])
+
+    class _FakeTask:
+        def apply_async(self, **kwargs):
+            queued.append(kwargs)
+
+    monkeypatch.setattr(flow_tasks, "db", fake_db)
+    monkeypatch.setattr(flow_tasks, "settings", SimpleNamespace(AUTO_CLOSE_REVOKED_TOPICS=True))
+    monkeypatch.setattr(flow_tasks, "async_execute", fake_async_execute)
+    monkeypatch.setattr(flow_tasks, "close_revoked_topics", _FakeTask())
+
+    await flow_tasks._mark_credential_revoked("cred-1", "unit_test")
+
+    assert updates == [{"status": "revoked"}]
+    assert queued == [
+        {
+            "kwargs": {
+                "limit": 1,
+                "dry_run": False,
+                "credential_id": "cred-1",
+                "reason": "unit_test",
+            },
+            "countdown": 5,
+            "queue": "celery",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mark_credential_revoked_skips_topic_close_when_disabled(monkeypatch):
+    from app.workers.tasks import flow_tasks
+
+    fake_db = _FakeDb()
+    queued = []
+
+    async def fake_async_execute(query):
+        return SimpleNamespace(data=[query.payload])
+
+    class _FakeTask:
+        def apply_async(self, **kwargs):
+            queued.append(kwargs)
+
+    monkeypatch.setattr(flow_tasks, "db", fake_db)
+    monkeypatch.setattr(flow_tasks, "settings", SimpleNamespace(AUTO_CLOSE_REVOKED_TOPICS=False))
+    monkeypatch.setattr(flow_tasks, "async_execute", fake_async_execute)
+    monkeypatch.setattr(flow_tasks, "close_revoked_topics", _FakeTask())
+
+    await flow_tasks._mark_credential_revoked("cred-1", "unit_test")
+
+    assert queued == []

@@ -52,9 +52,9 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health/', timeout=5)"]
       interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      timeout: "${API_HEALTHCHECK_TIMEOUT_SECONDS:-45}s"
+      retries: 5
+      start_period: "${API_HEALTHCHECK_START_PERIOD_SECONDS:-180}s"
     logging:
       driver: "json-file"
       options:

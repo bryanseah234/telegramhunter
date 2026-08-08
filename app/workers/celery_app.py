@@ -256,6 +256,16 @@ app.conf.update(
             "task": "flow.queue_monitor",
             "schedule": crontab(minute="*/5"),
         },
+        "close-revoked-topics-5min": {
+            "task": "flow.close_revoked_topics",
+            "schedule": crontab(
+                minute=f"*/{int(os.getenv('REVOKED_TOPIC_CLOSE_INTERVAL_MINUTES', 5))}"
+            ),
+            "kwargs": {
+                "limit": int(os.getenv("REVOKED_TOPIC_CLOSE_BATCH_SIZE", 25)),
+                "dry_run": False,
+            },
+        },
         "canary-flow-check-30min": {
             "task": "flow.canary_flow_check",
             "schedule": crontab(minute="*/30"),

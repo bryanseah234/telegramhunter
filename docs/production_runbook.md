@@ -120,6 +120,20 @@ curl -X POST -H "X-Monitor-Key: $env:MONITOR_API_KEY" `
   "http://127.0.0.1:8011/monitor/topics/revoked/close?dry_run=false&limit=50"
 ```
 
+Automatic revoked-topic closure:
+
+```powershell
+# Enabled by default. Beat queues flow.close_revoked_topics every 5 minutes.
+AUTO_CLOSE_REVOKED_TOPICS=True
+REVOKED_TOPIC_CLOSE_INTERVAL_MINUTES=5
+REVOKED_TOPIC_CLOSE_BATCH_SIZE=25
+REVOKED_TOPIC_CLOSE_TIMEOUT_SECONDS=10
+```
+
+When enabled, credential revocation paths also queue a one-record close check
+for the affected credential. Closing a Telegram forum topic locks it but keeps
+the topic history.
+
 Telegram behavior probe:
 
 ```powershell

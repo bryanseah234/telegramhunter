@@ -236,6 +236,29 @@ async def test_close_topic_uses_forum_close_without_deleting(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_text",
+    [
+        "Bad Request: TOPIC_CLOSED",
+        "Topic_not_modified",
+    ],
+)
+async def test_close_topic_treats_already_closed_as_success(monkeypatch, error_text):
+    from app.services import broadcaster_srv
+
+    monkeypatch.setattr(broadcaster_srv, "settings", _settings(bot_tokens=["123:ABC"]))
+    service = broadcaster_srv.BroadcasterService()
+    fake_bot = _FakeBot(error=Exception(error_text))
+
+    monkeypatch.setattr(service, "_get_bot_instance", lambda _token: fake_bot)
+
+    closed = await service.close_topic(-100123, 44)
+
+    assert closed is True
+    assert fake_bot.closed_topics == [{"chat_id": -100123, "message_thread_id": 44}]
+
+
+@pytest.mark.asyncio
 async def test_send_message_awaits_auto_archive_for_supported_media(monkeypatch):
     from app.services import broadcaster_srv
 

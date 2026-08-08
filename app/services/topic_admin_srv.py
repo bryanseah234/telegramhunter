@@ -31,6 +31,7 @@ async def fetch_revoked_topic_candidates(limit: int) -> list[dict[str, Any]]:
     page_size = min(max(limit * 4, 25), 500)
     offset = 0
     canary_credential_id = getattr(settings, "CANARY_CREDENTIAL_ID", None)
+    seen_topic_ids: set[int] = set()
 
     while len(candidates) < limit and offset < 5000:
         response = await async_execute(
@@ -51,6 +52,9 @@ async def fetch_revoked_topic_candidates(limit: int) -> list[dict[str, Any]]:
             topic_id = coerce_topic_id(meta)
             if not topic_id or meta.get("topic_closed_at"):
                 continue
+            if topic_id in seen_topic_ids:
+                continue
+            seen_topic_ids.add(topic_id)
             candidates.append(
                 {
                     "id": row.get("id"),
@@ -69,6 +73,35 @@ async def fetch_revoked_topic_candidates(limit: int) -> list[dict[str, Any]]:
     return candidates
 
 
+async def fetch_revoked_topic_candidate(credential_id: str) -> list[dict[str, Any]]:
+    response = await async_execute(
+        db.table("discovered_credentials")
+        .select("id, status, meta, updated_at")
+        .eq("id", credential_id)
+        .eq("status", "revoked")
+        .limit(1)
+    )
+    rows = response.data or []
+    if not rows:
+        return []
+
+    row = rows[0]
+    if getattr(settings, "CANARY_CREDENTIAL_ID", None) and row.get("id") == settings.CANARY_CREDENTIAL_ID:
+        return []
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    topic_id = coerce_topic_id(meta)
+    if not topic_id or meta.get("topic_closed_at"):
+        return []
+    return [
+        {
+            "id": row.get("id"),
+            "topic_id": topic_id,
+            "meta": meta,
+            "updated_at": row.get("updated_at"),
+        }
+    ]
+
+
 def get_broadcaster():
     from app.services.broadcaster_srv import BroadcasterService
 
@@ -78,15 +111,31 @@ def get_broadcaster():
 async def close_revoked_topics_logic(
     limit: int = 50,
     dry_run: bool = True,
+    credential_id: str | None = None,
     *,
     actor: str = "celery_worker",
+    force: bool = False,
 ) -> dict:
-    limit = max(1, min(int(limit or 50), 500))
+    limit = max(1, min(int(limit or getattr(settings, "REVOKED_TOPIC_CLOSE_BATCH_SIZE", 25)), 500))
     dry_run = bool(dry_run)
-    candidates = await fetch_revoked_topic_candidates(limit)
+    if not dry_run and not force and not getattr(settings, "AUTO_CLOSE_REVOKED_TOPICS", True):
+        return {
+            "status": "disabled",
+            "dry_run": False,
+            "candidate_count": 0,
+            "closed": 0,
+            "failed": 0,
+            "topics": [],
+        }
+
+    if credential_id:
+        candidates = await fetch_revoked_topic_candidate(credential_id)
+    else:
+        candidates = await fetch_revoked_topic_candidates(limit)
     result: dict[str, Any] = {
         "status": "dry_run" if dry_run else "ok",
         "dry_run": dry_run,
+        "credential_id": credential_id,
         "candidate_count": len(candidates),
         "closed": 0,
         "failed": 0,
@@ -107,11 +156,22 @@ async def close_revoked_topics_logic(
     broadcaster = get_broadcaster()
     closed_at = datetime.now(timezone.utc).isoformat()
     monitor_group_id = getattr(settings, "MONITOR_GROUP_ID", None)
+    delay_seconds = max(0.0, float(getattr(settings, "REVOKED_TOPIC_CLOSE_DELAY_SECONDS", 0.5) or 0.0))
+    timeout_seconds = float(getattr(settings, "REVOKED_TOPIC_CLOSE_TIMEOUT_SECONDS", 10.0) or 10.0)
+    if timeout_seconds <= 0:
+        timeout_seconds = 10.0
 
     for row in candidates:
         credential_id = row["id"]
         topic_id = row["topic_id"]
-        ok = await broadcaster.close_topic(monitor_group_id, topic_id)
+        try:
+            ok = await asyncio.wait_for(
+                broadcaster.close_topic(monitor_group_id, topic_id),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning(f"Topic close timed out for {topic_id}")
+            ok = False
         entry = {
             "credential_id": credential_id,
             "topic_id": topic_id,
@@ -143,6 +203,8 @@ async def close_revoked_topics_logic(
         else:
             result["failed"] += 1
         result["topics"].append(entry)
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
 
     AuditLogger.log(
         AuditEvent.TOPIC_CLOSED,

@@ -242,6 +242,7 @@ async def close_revoked_topics(limit: int = 50, dry_run: bool = True, dispatch: 
                 limit=limit,
                 dry_run=dry_run,
                 actor="monitor_api",
+                force=True,
             )
         except Exception as exc:
             logger.exception("monitor/topics/revoked/close inline run failed")
@@ -252,7 +253,7 @@ async def close_revoked_topics(limit: int = 50, dry_run: bool = True, dispatch: 
 
         task = celery_app.send_task(
             "flow.close_revoked_topics",
-            kwargs={"limit": limit, "dry_run": False},
+            kwargs={"limit": limit, "dry_run": False, "force": True},
         )
         return {
             "status": "dispatched",

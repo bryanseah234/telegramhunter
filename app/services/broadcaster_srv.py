@@ -608,5 +608,14 @@ class BroadcasterService:
             logger.info(f"Closed topic {thread_id_int}")
             return True
         except Exception as e:
+            err = str(e).lower()
+            if (
+                "topic_closed" in err
+                or "topic is closed" in err
+                or "topic_not_modified" in err
+                or "not modified" in err
+            ):
+                logger.info(f"Topic {thread_id_int} already closed")
+                return True
             logger.warning(f"Topic close failed for {thread_id}: {e}")
             return False
