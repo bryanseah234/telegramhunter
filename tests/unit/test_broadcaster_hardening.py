@@ -16,6 +16,7 @@ class _FakeBot:
         self.photo_calls = []
         self.video_calls = []
         self.audio_calls = []
+        self.closed_topics = []
 
     async def send_message(self, **kwargs):
         self.calls.append(kwargs)
@@ -39,6 +40,11 @@ class _FakeBot:
 
     async def send_audio(self, **kwargs):
         self.audio_calls.append(kwargs)
+        if self.error:
+            raise self.error
+
+    async def close_forum_topic(self, **kwargs):
+        self.closed_topics.append(kwargs)
         if self.error:
             raise self.error
 
@@ -211,6 +217,22 @@ async def test_send_message_marks_forbidden_bot_failed(monkeypatch):
 
     assert "123:ABC" in service._failed_tokens
     assert exc_info.value.reason == "forbidden"
+
+
+@pytest.mark.asyncio
+async def test_close_topic_uses_forum_close_without_deleting(monkeypatch):
+    from app.services import broadcaster_srv
+
+    monkeypatch.setattr(broadcaster_srv, "settings", _settings(bot_tokens=["123:ABC"]))
+    service = broadcaster_srv.BroadcasterService()
+    fake_bot = _FakeBot()
+
+    monkeypatch.setattr(service, "_get_bot_instance", lambda _token: fake_bot)
+
+    closed = await service.close_topic(-100123, 44)
+
+    assert closed is True
+    assert fake_bot.closed_topics == [{"chat_id": -100123, "message_thread_id": 44}]
 
 
 @pytest.mark.asyncio

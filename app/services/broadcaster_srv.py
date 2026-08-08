@@ -586,3 +586,27 @@ class BroadcasterService:
         except Exception as e:
             logger.warning(f"Topic rename failed for {thread_id}: {e}")
             return False
+
+    async def close_topic(self, group_id: int | str, thread_id: int) -> bool:
+        """Closes an existing forum topic without deleting its history."""
+        try:
+            thread_id_int = int(thread_id)
+        except (TypeError, ValueError):
+            logger.warning(f"Topic close skipped for invalid thread_id={thread_id}")
+            return False
+
+        if thread_id_int <= 1:
+            logger.warning(f"Topic close skipped for invalid thread_id={thread_id}")
+            return False
+
+        bot = self._get_bot_instance(self.bot_tokens[0])
+        try:
+            await bot.close_forum_topic(
+                chat_id=group_id,
+                message_thread_id=thread_id_int,
+            )
+            logger.info(f"Closed topic {thread_id_int}")
+            return True
+        except Exception as e:
+            logger.warning(f"Topic close failed for {thread_id}: {e}")
+            return False

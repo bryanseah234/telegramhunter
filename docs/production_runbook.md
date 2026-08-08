@@ -106,6 +106,20 @@ docker exec theprawnhunter_worker-core celery -A app.workers.celery_app call `
   flow.retry_failed_broadcasts --kwargs='{"limit":50}'
 ```
 
+Dry-run closing topics for revoked credentials:
+
+```powershell
+curl -X POST -H "X-Monitor-Key: $env:MONITOR_API_KEY" `
+  "http://127.0.0.1:8011/monitor/topics/revoked/close?dry_run=true&limit=50"
+```
+
+Close a batch after reviewing the dry-run:
+
+```powershell
+curl -X POST -H "X-Monitor-Key: $env:MONITOR_API_KEY" `
+  "http://127.0.0.1:8011/monitor/topics/revoked/close?dry_run=false&limit=50"
+```
+
 Telegram behavior probe:
 
 ```powershell

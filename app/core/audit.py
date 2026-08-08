@@ -58,6 +58,7 @@ class AuditEvent:
     CANARY_FLOW_CHECK = "canary.flow_check"
     WEBHOOK_PROBED = "webhook.probed"
     WEBHOOK_TAKEOVER = "webhook.takeover"
+    TOPIC_CLOSED = "topic.closed"
     TASK_FAILURE = "task_permanent_failure"
     SCANNER_RUN = "scanner_run"
 
@@ -149,6 +150,7 @@ class AuditLogger:
             AuditEvent.CANARY_FLOW_CHECK,
             AuditEvent.WEBHOOK_PROBED,
             AuditEvent.WEBHOOK_TAKEOVER,
+            AuditEvent.TOPIC_CLOSED,
             AuditEvent.TASK_FAILURE,
         ]
         return event_type in high_importance

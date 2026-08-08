@@ -1275,6 +1275,17 @@ async def _retry_failed_broadcasts_logic(limit: int = 50) -> dict:
     }
 
 
+@app.task(name="flow.close_revoked_topics")
+def close_revoked_topics(limit: int = 50, dry_run: bool = True):
+    """Close Telegram forum topics for revoked credentials. Dry-run by default."""
+    from app.workers.celery_app import get_worker_loop
+    from app.services.topic_admin_srv import close_revoked_topics_logic
+
+    return get_worker_loop().run_until_complete(
+        close_revoked_topics_logic(limit=limit, dry_run=dry_run)
+    )
+
+
 @app.task(name="flow.canary_flow_check")
 def canary_flow_check():
     """Run a synthetic DB -> broadcast -> visibility canary when configured."""

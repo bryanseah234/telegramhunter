@@ -78,6 +78,7 @@ PROTECTED_ENDPOINTS = [
     ("GET",  "/monitor/messages"),
     ("GET",  "/monitor/broadcasts/pending"),
     ("POST", "/monitor/broadcasts/00000000-0000-0000-0000-000000000000/retry"),
+    ("POST", "/monitor/topics/revoked/close"),
     ("GET",  "/monitor/webhooks"),
     ("GET",  "/monitor/search?q=abc"),
     ("GET",  "/monitor/operators"),
